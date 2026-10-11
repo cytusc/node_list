@@ -83,11 +83,33 @@ test("shows stored IPPure fields in desktop details and mobile cards", async ({
   await page.route("**/api/downloads", (route) => route.fulfill({ json: [] }));
   await page.goto("/");
   await expect(page.locator(".node-row")).toContainText("32% 中性");
-  const row = page.locator(".node-row");
-  for (const text of [
+  for (const label of [
+    "ASN 组织",
     "IP 来源",
-    "广播IP",
     "IP 属性",
+    "IPPure 系数",
+    "人机流量比",
+  ])
+    await expect(page.getByRole("columnheader", { name: label })).toHaveCount(
+      1,
+    );
+  const row = page.locator(".node-row");
+  await expect(row.locator('[data-column="asnOrganization"]')).toHaveText(
+    "YUUSEI LTD",
+  );
+  await expect(row.locator('[data-column="ipSource"]')).toHaveText("广播IP");
+  await expect(row.locator('[data-column="ipAttributes"]')).toHaveText(
+    "机房IP",
+  );
+  await expect(row.locator('[data-column="ippure"]')).toContainText("32% 中性");
+  await expect(row.locator('[data-column="ippure"]')).not.toContainText(
+    "YUUSEI LTD",
+  );
+  await expect(row.locator('[data-column="trafficRatio"]')).toContainText(
+    "human 15.96%",
+  );
+  for (const text of [
+    "广播IP",
     "机房IP",
     "YUUSEI LTD",
     "human 15.96%",
@@ -97,6 +119,20 @@ test("shows stored IPPure fields in desktop details and mobile cards", async ({
   await expect(
     row.getByRole("img", { name: "人机流量比 human 15.96% / bot 84.04%" }),
   ).toBeVisible();
+  await page.getByRole("button", { name: "显示列" }).click();
+  await page
+    .getByRole("menuitemcheckbox", { name: "IP 来源", exact: true })
+    .click();
+  await page.keyboard.press("Escape");
+  await expect(row.locator('[data-column="ipSource"]')).toHaveCount(0);
+  await expect(row.locator('[data-column="ipAttributes"]')).toHaveText(
+    "机房IP",
+  );
+  await page.getByRole("button", { name: "显示列" }).click();
+  await page
+    .getByRole("menuitemcheckbox", { name: "IP 来源", exact: true })
+    .click();
+  await page.keyboard.press("Escape");
   await page.locator(".node-name").click();
   const dialog = page.getByRole("dialog");
   for (const text of [

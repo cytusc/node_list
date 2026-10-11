@@ -1119,7 +1119,7 @@ select option {
   color: var(--muted-foreground);
   flex-shrink: 0;
 }
-.ippure-summary-row > strong {
+.ippure-summary-row > div {
   font-weight: 500;
   text-align: right;
   overflow-wrap: anywhere;
@@ -1165,11 +1165,20 @@ select option {
   border-radius: 2px;
   transform: translateX(-50%);
 }
-.desktop-table th[data-column="ippure"] {
-  width: 250px;
+.ippure-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
-.desktop-table table {
-  min-width: 1180px;
+.desktop-table td[data-column="asnOrganization"],
+.desktop-table td[data-column="ipAttributes"] {
+  overflow-wrap: anywhere;
+}
+.mobile-node .ippure-summary-row > div {
+  min-width: 190px;
 }
 .mobile-node .ippure-summary {
   width: 100%;

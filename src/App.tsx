@@ -85,61 +85,81 @@ import {
 } from "@/lib/data";
 import { flagUrl } from "@/lib/flags";
 
-function IPPureSummary({ result }: { result?: IPPureResult }) {
+type IPPureMetricName =
+  "asnOrganization" | "source" | "attributes" | "score" | "ratio";
+const ippureMetrics: {
+  key: IPPureMetricName;
+  label: string;
+  column: string;
+}[] = [
+  { key: "asnOrganization", label: "ASN 组织", column: "asnOrganization" },
+  { key: "source", label: "IP 来源", column: "ipSource" },
+  { key: "attributes", label: "IP 属性", column: "ipAttributes" },
+  { key: "score", label: "IPPure 系数", column: "ippure" },
+  { key: "ratio", label: "人机流量比", column: "trafficRatio" },
+];
+function IPPureMetric({
+  result,
+  metric,
+}: {
+  result?: IPPureResult;
+  metric: IPPureMetricName;
+}) {
   if (result?.status !== "success")
     return (
-      <div className="protocol-cell" title={result?.error}>
-        <span>{result?.status === "error" ? "检测失败" : "待检测"}</span>
-        <small>IPPure · 点击查看详情</small>
+      <span className="text-muted-foreground" title={result?.error}>
+        {result?.status === "error" ? "检测失败" : "待检测"}
+      </span>
+    );
+  if (metric === "asnOrganization")
+    return <span>{result.asnOrganization || "待补采"}</span>;
+  if (metric === "source") return <span>{result.source || "—"}</span>;
+  if (metric === "attributes")
+    return <span>{result.attributes?.join(" · ") || "—"}</span>;
+  if (metric === "score")
+    return (
+      <div className="ippure-metric">
+        <span>
+          {result.score}% {result.label}
+        </span>
+        <div
+          className="ippure-list-scale"
+          role="img"
+          aria-label={`IPPure 系数 ${result.score}% ${result.label}，越低越纯净`}
+        >
+          <span style={{ left: `${result.score}%` }} />
+        </div>
       </div>
     );
-  const hasRatio = result.humanPercent != null && result.botPercent != null;
+  if (result.humanPercent == null || result.botPercent == null)
+    return <span className="text-muted-foreground">统计数据不足</span>;
   return (
-    <div className="ippure-summary">
-      <div className="ippure-summary-row">
-        <span>ASN 组织</span>
-        <strong>{result.asnOrganization || "待补采"}</strong>
-      </div>
-      <div className="ippure-summary-row">
-        <span>IP 来源</span>
-        <strong>{result.source || "—"}</strong>
-      </div>
-      <div className="ippure-summary-row">
-        <span>IP 属性</span>
-        <strong>{result.attributes?.join(" · ") || "—"}</strong>
-      </div>
-      <div className="ippure-summary-row">
-        <span>IPPure 系数</span>
-        <strong>
-          {result.score}% {result.label}
-        </strong>
+    <div className="ippure-metric">
+      <div className="ippure-ratio-values">
+        <span>human {result.humanPercent}%</span>
+        <span>bot {result.botPercent}%</span>
       </div>
       <div
-        className="ippure-list-scale"
+        className="ippure-ratio-track"
         role="img"
-        aria-label={`IPPure 系数 ${result.score}% ${result.label}，越低越纯净`}
+        aria-label={`人机流量比 human ${result.humanPercent}% / bot ${result.botPercent}%`}
       >
-        <span style={{ left: `${result.score}%` }} />
+        <span style={{ left: `${result.humanPercent}%` }} />
       </div>
-      <div className="ippure-summary-row">
-        <span>人机流量比</span>
-        {!hasRatio && <strong>统计数据不足</strong>}
-      </div>
-      {hasRatio && (
-        <>
-          <div className="ippure-ratio-values">
-            <span>human {result.humanPercent}%</span>
-            <span>bot {result.botPercent}%</span>
+    </div>
+  );
+}
+function IPPureSummary({ result }: { result?: IPPureResult }) {
+  return (
+    <div className="ippure-summary">
+      {ippureMetrics.map(({ key, label }) => (
+        <div className="ippure-summary-row" key={key}>
+          <span>{label}</span>
+          <div>
+            <IPPureMetric result={result} metric={key} />
           </div>
-          <div
-            className="ippure-ratio-track"
-            role="img"
-            aria-label={`人机流量比 human ${result.humanPercent}% / bot ${result.botPercent}%`}
-          >
-            <span style={{ left: `${result.humanPercent}%` }} />
-          </div>
-        </>
-      )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -225,7 +245,23 @@ const columnLabels: Record<string, string> = {
   features: "连接特性",
   media: "服务解锁",
   speed: "下载速度",
-  ippure: "IPPure",
+  ...Object.fromEntries(
+    ippureMetrics.map(({ column, label }) => [column, label]),
+  ),
+};
+const columnWidths: Record<string, number> = {
+  country: 130,
+  name: 240,
+  type: 130,
+  features: 120,
+  asnOrganization: 160,
+  ipSource: 100,
+  ipAttributes: 110,
+  ippure: 150,
+  trafficRatio: 205,
+  media: 160,
+  speed: 125,
+  actions: 44,
 };
 const emptyNodes: NodeRecord[] = [];
 
@@ -475,13 +511,22 @@ export default function App() {
         enableSorting: false,
         cell: ({ row }) => <Features node={row.original} />,
       },
-      {
-        id: "ippure",
-        accessorFn: (node) => node.ippure?.score,
-        header: "IPPure",
+      ...ippureMetrics.map(({ key, label, column }): ColumnDef<NodeRecord> => ({
+        id: column,
+        accessorFn: (node) => {
+          if (node.ippure?.status !== "success") return undefined;
+          return key === "ratio"
+            ? (node.ippure.humanPercent ?? undefined)
+            : key === "attributes"
+              ? node.ippure.attributes?.join(" · ")
+              : node.ippure[key];
+        },
+        header: label,
         sortUndefined: "last",
-        cell: ({ row }) => <IPPureSummary result={row.original.ippure} />,
-      },
+        cell: ({ row }) => (
+          <IPPureMetric result={row.original.ippure} metric={key} />
+        ),
+      })),
       ...(snapshot?.mediaCheck
         ? [
             {
@@ -970,12 +1015,25 @@ export default function App() {
           ) : filtered.length ? (
             <>
               <div className="desktop-table">
-                <Table>
+                <Table
+                  style={{
+                    minWidth: table
+                      .getVisibleLeafColumns()
+                      .reduce(
+                        (sum, column) => sum + (columnWidths[column.id] || 150),
+                        0,
+                      ),
+                  }}
+                >
                   <TableHeader>
                     {table.getHeaderGroups().map((g) => (
                       <TableRow key={g.id}>
                         {g.headers.map((h) => (
-                          <TableHead key={h.id} data-column={h.column.id}>
+                          <TableHead
+                            key={h.id}
+                            data-column={h.column.id}
+                            style={{ width: columnWidths[h.column.id] || 150 }}
+                          >
                             {h.column.getCanSort() ? (
                               <button
                                 className="sort-header"
