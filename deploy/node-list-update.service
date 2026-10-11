@@ -8,4 +8,4 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/root/node_list
 ExecStart=/usr/bin/bash /root/node_list/deploy/update.sh
-TimeoutStartSec=600
+TimeoutStartSec=1200
