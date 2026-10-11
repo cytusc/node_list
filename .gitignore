@@ -1,6 +1,10 @@
 node_modules/
 dist/
 .env
+release.env
+release.env.tmp
+.update.lock
+data/
 *.tsbuildinfo
 test-results/
 playwright-report/

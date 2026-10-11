@@ -1,0 +1,17 @@
+[Unit]
+Description=Node Explorer container
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/root/node_list
+ExecStart=/usr/bin/docker compose --env-file .env --env-file release.env up -d --wait --wait-timeout 120
+ExecStop=/usr/bin/docker compose --env-file .env --env-file release.env stop
+TimeoutStartSec=180
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
