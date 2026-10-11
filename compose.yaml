@@ -1,6 +1,6 @@
 services:
   node-explorer:
-    image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-v1.2.0}
+    image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-v1.2.1}
     restart: unless-stopped
     init: true
     logging:
