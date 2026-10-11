@@ -16,6 +16,20 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: node_explorer_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d node_explorer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     permissions:
       contents: write
       packages: write
@@ -27,6 +41,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+        env:
+          TEST_POSTGRES_URL: postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test
       - run: npm run build
       - name: Set image name
         run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
@@ -67,17 +83,19 @@ jobs:
             sleep 2
           done
           curl --fail http://127.0.0.1:3001/api/health
+          curl --fail http://127.0.0.1:3001/api/history -o /tmp/history.json
+          node -e "const h = JSON.parse(require('fs').readFileSync('/tmp/history.json')); if (h.total !== 0 || h.items.length !== 0) process.exit(1)"
           curl --fail http://127.0.0.1:3001/ -o /tmp/index.html
           grep -q 'id="root"' /tmp/index.html
           test "$(curl --silent -o /tmp/results.json -w '%{http_code}' http://127.0.0.1:3001/api/results)" = 404
       - name: Package production files
         if: startsWith(github.ref, 'refs/tags/')
-        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz dist server package.json package-lock.json Dockerfile compose.yaml compose.subs-check.yaml deploy README.md
+        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz dist server package.json package-lock.json Dockerfile compose.yaml compose.subs-check.yaml compose.pgsql.yaml deploy README.md .env.example
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n支持 linux/amd64 和 linux/arm64。部署说明见 README.md；请只读挂载 subs-check 数据目录。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
+          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n支持 linux/amd64 和 linux/arm64。新增检测历史批次与 SQLite/PostgreSQL 持久化。连接、网络和目录映射通过服务器 .env 配置。部署说明见 README.md；请保留数据库与 subs-check 数据目录。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
           gh release create "$GITHUB_REF_NAME" "node-explorer-$GITHUB_REF_NAME.tar.gz" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md --verify-tag

@@ -23,7 +23,15 @@ export type NodeRecord = {
   media?: MediaTag[];
   details?: { k: string; v: string }[];
 };
+export type HistoryItem = {
+  id: number;
+  checkedAt?: string;
+  importedAt: string;
+  nodeCount: number;
+};
 export type Snapshot = {
+  id?: number;
+  sourceWarning?: string | null;
   checkedAt?: string;
   speedTest: boolean;
   mediaCheck: boolean;

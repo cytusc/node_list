@@ -79,6 +79,7 @@ import {
   speedParts,
   timeLabel,
   type Download,
+  type HistoryItem,
   type NodeRecord,
   type Snapshot,
 } from "@/lib/data";
@@ -170,6 +171,9 @@ const emptyNodes: NodeRecord[] = [];
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [batch, setBatch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [errorCode, setErrorCode] = useState("");
@@ -205,16 +209,20 @@ export default function App() {
     }
   }, [dark]);
 
-  const load = useCallback(async (announce = false) => {
+  const load = useCallback(async (announce = false, snapshotId = "") => {
     activeRequest.current?.abort();
     const controller = new AbortController();
     activeRequest.current = controller;
     setLoading(true);
     try {
-      const response = await fetch("/api/results", {
-        signal: controller.signal,
-      });
+      const response = await fetch(
+        snapshotId ? `/api/results?snapshot=${snapshotId}` : "/api/results",
+        {
+          signal: controller.signal,
+        },
+      );
       const body = await response.json();
+      if (controller.signal.aborted) return;
       if (!response.ok) {
         setErrorCode(body.code || "");
         throw new Error(body.error || "读取失败，请稍后重试");
@@ -222,12 +230,15 @@ export default function App() {
       if (!Array.isArray(body.nodes))
         throw new Error("结果格式无效，请检查检测结果文件");
       setSnapshot(body);
+      setBatch(snapshotId);
+      setSelected(null);
       setError("");
       setErrorCode("");
       if (!body.speedTest) setSorting([{ id: "name", desc: false }]);
       if (!body.mediaCheck) setMedia([]);
       if (!body.speedTest) setMinSpeed("");
-      if (announce) toast.success("已读取最新检测结果");
+      if (announce)
+        toast.success(snapshotId ? "已读取历史检测结果" : "已读取最新检测结果");
     } catch (e) {
       if (!controller.signal.aborted)
         setError(
@@ -235,6 +246,20 @@ export default function App() {
         );
     } finally {
       if (!controller.signal.aborted) setLoading(false);
+    }
+    if (!controller.signal.aborted) {
+      try {
+        const r = await fetch("/api/history", { signal: controller.signal });
+        if (r.ok) {
+          const data = await r.json();
+          if (!controller.signal.aborted) {
+            setHistory(data.items);
+            setHistoryTotal(data.total);
+          }
+        }
+      } catch {
+        /* History can be retried on refresh. */
+      }
     }
     if (!controller.signal.aborted) {
       try {
@@ -289,15 +314,13 @@ export default function App() {
     const keys = new Set(
       nodes.flatMap((n) => (n.media || []).map(mediaPlatform)),
     );
-    return [...keys]
-      .filter(Boolean)
-      .map((value) => ({
-        value,
-        label: platforms[value] || value,
-        count: nodes.filter((n) =>
-          n.media?.some((m) => mediaPlatform(m) === value && mediaValue(m)),
-        ).length,
-      }));
+    return [...keys].filter(Boolean).map((value) => ({
+      value,
+      label: platforms[value] || value,
+      count: nodes.filter((n) =>
+        n.media?.some((m) => mediaPlatform(m) === value && mediaValue(m)),
+      ).length,
+    }));
   }, [nodes]);
   const filtered = useMemo(
     () =>
@@ -563,7 +586,7 @@ export default function App() {
             <div className="snapshot-time">
               <Clock3 className="size-3.5" />
               <span>
-                最近检测{" "}
+                {batch ? "历史检测" : "最近检测"}{" "}
                 <time>
                   {snapshot?.checkedAt ? timeLabel(snapshot.checkedAt) : "—"}
                 </time>
@@ -604,6 +627,73 @@ export default function App() {
           </div>
         </section>
 
+        <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
+          <label htmlFor="snapshot-batch" className="text-muted-foreground">
+            检测批次
+          </label>
+          <select
+            id="snapshot-batch"
+            className="h-9 max-w-full rounded-md border border-input bg-background px-3"
+            value={batch}
+            disabled={loading}
+            onChange={(e) => void load(true, e.target.value)}
+          >
+            <option value="">最新检测结果</option>
+            {batch && !history.some((item) => String(item.id) === batch) && (
+              <option value={batch}>
+                {timeLabel(snapshot?.checkedAt)} · 当前历史批次
+              </option>
+            )}
+            {history.map((item) => (
+              <option key={item.id} value={item.id}>
+                {timeLabel(item.checkedAt || item.importedAt)} ·{" "}
+                {item.nodeCount} 个节点 · #{item.id}
+              </option>
+            ))}
+          </select>
+          <span className="text-muted-foreground">
+            已保存 {historyTotal} 轮检测
+          </span>
+          {history.length < historyTotal && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={loading}
+              onClick={async () => {
+                try {
+                  const response = await fetch(
+                    `/api/history?offset=${history.length}`,
+                  );
+                  if (!response.ok) throw new Error();
+                  const data = await response.json();
+                  setHistory((items) => [
+                    ...items,
+                    ...data.items.filter(
+                      (item: HistoryItem) =>
+                        !items.some((existing) => existing.id === item.id),
+                    ),
+                  ]);
+                  setHistoryTotal(data.total);
+                } catch {
+                  toast.error("历史批次加载失败，请重试");
+                }
+              }}
+            >
+              加载更早批次
+            </Button>
+          )}
+          {batch && (
+            <span className="text-muted-foreground">
+              订阅下载仍使用最新生成的文件。
+            </span>
+          )}
+        </div>
+        {snapshot?.sourceWarning && !error && (
+          <div role="status" className="error-banner">
+            <CircleAlert className="size-5 shrink-0" />
+            结果文件暂时无法读取，当前展示数据库中保存的检测结果。
+          </div>
+        )}
         {error && (
           <div role="alert" className="error-banner">
             <CircleAlert className="size-5 shrink-0" />
@@ -818,7 +908,7 @@ export default function App() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => void load(true)}
+                onClick={() => void load(true, batch)}
                 disabled={loading}
                 aria-label="刷新结果"
               >
@@ -1059,7 +1149,7 @@ export default function App() {
           <span>
             <Server className="size-3.5" />由 subs-check 提供检测结果
           </span>
-          <span>速度为最近一轮检测值，实际表现可能变化。</span>
+          <span>速度为所选批次检测值，实际表现可能变化。</span>
         </footer>
       </main>
       <Sheet

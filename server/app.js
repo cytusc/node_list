@@ -1,6 +1,7 @@
 import express from "express";
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import path from "node:path";
+import { createStore } from "./store.js";
 
 export const downloads = {
   clash: { file: "all.yaml", label: "Clash 节点", type: "application/yaml" },
@@ -12,54 +13,88 @@ export const downloads = {
   base64: { file: "base64.txt", label: "Base64 订阅", type: "text/plain" },
 };
 
-export function createApp({ subDir, resultsFile, distDir } = {}) {
+export function createApp({
+  subDir,
+  resultsFile,
+  distDir,
+  databasePath,
+  store: configuredStore,
+  importIntervalMs = 5000,
+} = {}) {
   const app = express();
   app.disable("x-powered-by");
   app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
   const snapshotPath =
     resultsFile ||
     path.join(subDir, "config", "cache", "config", "results.json");
-  app.get("/api/results", async (_req, res) => {
+  const store = configuredStore || createStore(databasePath);
+  const sync = () => store.sync(snapshotPath).catch(() => {});
+  void sync();
+  const timer = setInterval(sync, importIntervalMs);
+  timer.unref();
+  app.locals.close = async () => {
+    clearInterval(timer);
+    await sync();
+    await store.close();
+  };
+  app.get("/api/history", async (req, res) => {
     res.set("Cache-Control", "no-store");
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 200 ||
+      !Number.isSafeInteger(offset) ||
+      offset < 0
+    ) {
+      return res.status(400).json({ error: "历史分页参数无效。" });
+    }
+    await sync();
     try {
-      const snapshot = JSON.parse(await readFile(snapshotPath, "utf8"));
-      if (!Array.isArray(snapshot.nodes)) throw new Error("Invalid snapshot");
-      // Whitelist the result schema; never expose arbitrary file contents or proxy credentials.
-      const fields = [
-        "name",
-        "baseName",
-        "type",
-        "server",
-        "port",
-        "sni",
-        "tls",
-        "reality",
-        "udp",
-        "network",
-        "speed",
-        "country",
-        "ip",
-        "ipRisk",
-        "media",
-        "subTag",
-        "details",
-      ];
-      res.json({
-        checkedAt: snapshot.checkedAt,
-        speedTest: !!snapshot.speedTest,
-        mediaCheck: !!snapshot.mediaCheck,
-        nodes: snapshot.nodes.map((n) =>
-          Object.fromEntries(
-            fields.filter((k) => k in n).map((k) => [k, n[k]]),
-          ),
-        ),
-      });
-    } catch (error) {
-      if (error.code === "ENOENT")
+      res.json(await store.history(limit, offset));
+    } catch {
+      res
+        .status(503)
+        .json({
+          error: "数据库暂时无法读取，请稍后重试。",
+          code: "DATABASE_FAILED",
+        });
+    }
+  });
+  app.get("/api/results", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const id = req.query.snapshot;
+    if (
+      id !== undefined &&
+      (typeof id !== "string" ||
+        !/^[1-9]\d*$/.test(id) ||
+        !Number.isSafeInteger(Number(id)))
+    ) {
+      return res.status(400).json({ error: "检测批次无效。" });
+    }
+    try {
+      let sourceError;
+      try {
+        await store.sync(snapshotPath);
+      } catch (error) {
+        sourceError = error;
+      }
+      const snapshot = await store.get(
+        id === undefined ? undefined : Number(id),
+      );
+      if (snapshot) return res.json(snapshot);
+      if (id !== undefined)
+        return res
+          .status(404)
+          .json({ error: "该历史批次不存在。", code: "SNAPSHOT_NOT_FOUND" });
+      if (!sourceError || sourceError.code === "ENOENT")
         return res.status(404).json({
           error: "尚未找到检测结果，请确认 subs-check 已完成至少一轮检测。",
           code: "NO_RESULTS",
         });
+      throw sourceError;
+    } catch {
       res.status(503).json({
         error: "检测结果暂时无法读取，请稍后刷新重试。",
         code: "READ_FAILED",

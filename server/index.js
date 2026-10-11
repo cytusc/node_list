@@ -1,20 +1,59 @@
 import path from "node:path";
+import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
+import { createPostgresStore } from "./postgres-store.js";
 import { createApp } from "./app.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+try {
+  loadEnvFile(path.join(root, ".env"));
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
 const subDir = path.resolve(
-  process.env.SUBS_CHECK_DIR ||
-    (process.platform === "win32" ? "D:\\code\\sub" : "/mnt/d/code/sub"),
+  process.env.SUBS_CHECK_DIR || path.join(root, "data", "sub"),
 );
+let store;
+if (process.env.PGHOST) {
+  if (
+    !process.env.PGDATABASE ||
+    !process.env.PGUSER ||
+    !process.env.PGPASSWORD
+  ) {
+    console.error("PostgreSQL requires PGDATABASE, PGUSER and PGPASSWORD.");
+    process.exit(1);
+  }
+  try {
+    store = await createPostgresStore();
+  } catch {
+    console.error(
+      "PostgreSQL initialization failed. Check connection, database and table creation permissions.",
+    );
+    process.exit(1);
+  }
+}
 const app = createApp({
+  store,
   subDir,
   resultsFile: process.env.RESULTS_FILE,
+  databasePath: path.resolve(
+    process.env.DATABASE_PATH || path.join(root, "data", "nodes.sqlite"),
+  ),
   distDir: path.join(root, "dist"),
 });
 const port = Number(process.env.API_PORT || 3001);
-app.listen(port, process.env.HOST || "127.0.0.1", () =>
+const server = app.listen(port, process.env.HOST || "127.0.0.1", () =>
   console.log(
     `Node Explorer: http://localhost:${port}\nResults directory: ${subDir}`,
   ),
 );
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    server.close(async () => {
+      await app.locals.close();
+      process.exit(0);
+    });
+    server.closeIdleConnections();
+  });
+}

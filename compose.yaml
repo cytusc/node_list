@@ -1,6 +1,6 @@
 services:
   node-explorer:
-    image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-v1.1.0}
+    image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-v1.2.0}
     restart: unless-stopped
     init: true
     logging:
@@ -12,9 +12,11 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3001}:3001"
     environment:
       SUBS_CHECK_DIR: /data/sub
+      DATABASE_PATH: /data/history/nodes.sqlite
     volumes:
+      - node-history:/data/history
       - type: bind
-        source: ${SUBS_CHECK_HOST_DIR:-/mnt/d/code/sub}
+        source: ${SUBS_CHECK_HOST_DIR:?Set SUBS_CHECK_HOST_DIR in .env}
         target: /data/sub
         read_only: true
         bind:
@@ -26,3 +28,6 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+
+volumes:
+  node-history:
