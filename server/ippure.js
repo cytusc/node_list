@@ -22,6 +22,8 @@ export function extractIPPure() {
     /^(\d+(?:\.\d+)?)%\s*(.+)$/,
   );
   const ip = value("IP");
+  const asnValue = value("ASN").match(/^(AS\d+)\s*[-–—]\s*(.+)$/i);
+  if (!asnValue) throw new Error("IPPure ASN 组织信息不完整");
   const source = value("IP来源");
   const attributes = [...table.querySelectorAll(".ip-attr .ip-tag")]
     .map(text)
@@ -37,6 +39,8 @@ export function extractIPPure() {
   if (!!human !== !!bot) throw new Error("IPPure 人机流量比不完整");
   return {
     ip,
+    asn: asnValue[1].toUpperCase(),
+    asnOrganization: asnValue[2],
     source,
     attributes,
     humanPercent: human ? percentage(human[1]) : null,
@@ -148,8 +152,12 @@ export function startIPPureCollector({
       if (abort.signal.aborted) return;
       if ((await store.get())?.id !== snapshot.id) return;
       const old = node.ippure;
-      if (old?.status === "success" || old?.attempts >= 3) continue;
-      if (old && Date.now() - Date.parse(old.checkedAt) < 30 * 60 * 1000)
+      const backfill = old?.status === "success" && !old.asnOrganization;
+      if (old?.status === "success" && !backfill) continue;
+      if ((backfill ? old.organizationAttempts || 0 : old?.attempts || 0) >= 3)
+        continue;
+      const lastAttempt = backfill ? old.organizationCheckedAt : old?.checkedAt;
+      if (lastAttempt && Date.now() - Date.parse(lastAttempt) < 30 * 60 * 1000)
         continue;
       const matches = document.proxies.filter(
         (p) =>
@@ -179,6 +187,15 @@ export function startIPPureCollector({
         );
       } catch (error) {
         if (abort.signal.aborted) return;
+        if (backfill) {
+          // Keep previously collected metrics if the organization refresh fails.
+          await store.saveIPPure(snapshot.id, index, {
+            ...old,
+            organizationAttempts: (old.organizationAttempts || 0) + 1,
+            organizationCheckedAt: result.checkedAt,
+          });
+          continue;
+        }
         result.status = "error";
         // Never persist proxy credentials or controller response bodies.
         result.error = /IPPure|代理配置/.test(error.message)

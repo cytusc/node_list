@@ -80,9 +80,69 @@ import {
   timeLabel,
   type Download,
   type NodeRecord,
+  type IPPureResult,
   type Snapshot,
 } from "@/lib/data";
 import { flagUrl } from "@/lib/flags";
+
+function IPPureSummary({ result }: { result?: IPPureResult }) {
+  if (result?.status !== "success")
+    return (
+      <div className="protocol-cell" title={result?.error}>
+        <span>{result?.status === "error" ? "检测失败" : "待检测"}</span>
+        <small>IPPure · 点击查看详情</small>
+      </div>
+    );
+  const hasRatio = result.humanPercent != null && result.botPercent != null;
+  return (
+    <div className="ippure-summary">
+      <div className="ippure-summary-row">
+        <span>ASN 组织</span>
+        <strong>{result.asnOrganization || "待补采"}</strong>
+      </div>
+      <div className="ippure-summary-row">
+        <span>IP 来源</span>
+        <strong>{result.source || "—"}</strong>
+      </div>
+      <div className="ippure-summary-row">
+        <span>IP 属性</span>
+        <strong>{result.attributes?.join(" · ") || "—"}</strong>
+      </div>
+      <div className="ippure-summary-row">
+        <span>IPPure 系数</span>
+        <strong>
+          {result.score}% {result.label}
+        </strong>
+      </div>
+      <div
+        className="ippure-list-scale"
+        role="img"
+        aria-label={`IPPure 系数 ${result.score}% ${result.label}，越低越纯净`}
+      >
+        <span style={{ left: `${result.score}%` }} />
+      </div>
+      <div className="ippure-summary-row">
+        <span>人机流量比</span>
+        {!hasRatio && <strong>统计数据不足</strong>}
+      </div>
+      {hasRatio && (
+        <>
+          <div className="ippure-ratio-values">
+            <span>human {result.humanPercent}%</span>
+            <span>bot {result.botPercent}%</span>
+          </div>
+          <div
+            className="ippure-ratio-track"
+            role="img"
+            aria-label={`人机流量比 human ${result.humanPercent}% / bot ${result.botPercent}%`}
+          >
+            <span style={{ left: `${result.humanPercent}%` }} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 function Flag({ code }: { code?: string }) {
   const url = flagUrl(code);
@@ -420,25 +480,7 @@ export default function App() {
         accessorFn: (node) => node.ippure?.score,
         header: "IPPure",
         sortUndefined: "last",
-        cell: ({ row }) => {
-          const result = row.original.ippure;
-          return (
-            <div className="protocol-cell" title={result?.error}>
-              <span>
-                {result?.status === "success"
-                  ? `${result.score}% ${result.label}`
-                  : result?.status === "error"
-                    ? "检测失败"
-                    : "待检测"}
-              </span>
-              <small>
-                {result?.status === "success"
-                  ? [result.source, ...(result.attributes || [])].join(" · ")
-                  : "点击查看详情"}
-              </small>
-            </div>
-          );
-        },
+        cell: ({ row }) => <IPPureSummary result={row.original.ippure} />,
       },
       ...(snapshot?.mediaCheck
         ? [
@@ -1002,14 +1044,7 @@ export default function App() {
                     <span className="mobile-address">
                       {row.original.server}:{row.original.port}
                     </span>
-                    <span className="mobile-address">
-                      IPPure ·{" "}
-                      {row.original.ippure?.status === "success"
-                        ? `${row.original.ippure.score}% ${row.original.ippure.label}`
-                        : row.original.ippure?.status === "error"
-                          ? "检测失败"
-                          : "待检测"}
-                    </span>
+                    <IPPureSummary result={row.original.ippure} />
                     <div className="mobile-node-bottom">
                       <div>
                         <Badge variant="outline" className="protocol-badge">
@@ -1195,6 +1230,11 @@ export default function App() {
                     <dl>
                       {[
                         ["检测出口 IP", selected.ippure.ip],
+                        ["ASN", selected.ippure.asn || "待补采"],
+                        [
+                          "ASN 组织",
+                          selected.ippure.asnOrganization || "待补采",
+                        ],
                         [
                           "人机流量比",
                           selected.ippure.humanPercent == null
