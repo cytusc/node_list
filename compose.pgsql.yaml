@@ -1,0 +1,17 @@
+# Combine with compose.yaml; PostgreSQL must already exist on this external network.
+services:
+  node-explorer:
+    environment:
+      PGHOST: ${PGHOST:?Set PGHOST in .env}
+      PGPORT: ${PGPORT:-5432}
+      PGDATABASE: ${PGDATABASE:?Set PGDATABASE in .env}
+      PGUSER: ${PGUSER:?Set PGUSER in .env}
+      PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+    networks:
+      - default
+      - postgres
+
+networks:
+  postgres:
+    external: true
+    name: ${POSTGRES_NETWORK:?Set POSTGRES_NETWORK in .env}

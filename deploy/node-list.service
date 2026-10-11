@@ -8,8 +8,8 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/root/node_list
-ExecStart=/usr/bin/docker compose -f compose.yaml -f compose.subs-check.yaml --env-file .env --env-file release.env up -d --wait --wait-timeout 120
-ExecStop=/usr/bin/docker compose -f compose.yaml -f compose.subs-check.yaml --env-file .env --env-file release.env stop
+ExecStart=/usr/bin/bash deploy/compose.sh up -d --wait --wait-timeout 120
+ExecStop=/usr/bin/bash deploy/compose.sh stop
 TimeoutStartSec=180
 TimeoutStopSec=120
 

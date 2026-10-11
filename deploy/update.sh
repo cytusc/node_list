@@ -4,9 +4,9 @@ cd "$(dirname "$0")/.."
 exec 9>.update.lock
 flock -n 9 || exit 0
 
-compose() { docker compose -f compose.yaml -f compose.subs-check.yaml --env-file .env --env-file release.env "$@"; }
+compose() { bash deploy/compose.sh "$@"; }
 compose_tag() {
-  env "$1=$2" docker compose -f compose.yaml -f compose.subs-check.yaml --env-file .env --env-file release.env "${@:3}"
+  env "$1=$2" bash deploy/compose.sh "${@:3}"
 }
 healthy() {
   local container state
@@ -47,6 +47,10 @@ update_one() {
   fi
 }
 failed=0
-update_one node-explorer IMAGE_TAG cytusc/node_list || failed=1
+if [[ "${NODE_EXPLORER_AUTO_UPDATE:-}" == false ]] || grep -Eq '^NODE_EXPLORER_AUTO_UPDATE=(false|0)$' .env; then
+  echo "node-explorer automatic updates disabled by .env"
+else
+  update_one node-explorer IMAGE_TAG cytusc/node_list || failed=1
+fi
 update_one subs-check SUBS_CHECK_TAG beck-8/subs-check || failed=1
 exit "$failed"

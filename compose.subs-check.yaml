@@ -9,8 +9,8 @@ services:
       GOMEMLIMIT: 192MiB
       GOGC: "50"
     volumes:
-      - ${SUBS_CHECK_HOST_DIR:-/mnt/d/code/sub}/config:/app/config
-      - ${SUBS_CHECK_HOST_DIR:-/mnt/d/code/sub}/output:/app/output
+      - ${SUBS_CHECK_HOST_DIR:?Set SUBS_CHECK_HOST_DIR in .env}/config:/app/config
+      - ${SUBS_CHECK_HOST_DIR:?Set SUBS_CHECK_HOST_DIR in .env}/output:/app/output
     mem_limit: 384m
     memswap_limit: 768m
     cpus: 0.75

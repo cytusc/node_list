@@ -53,6 +53,9 @@ test.describe("interactions and data states", () => {
     await page.route("**/api/results", (route) =>
       route.fulfill({ json: snapshot }),
     );
+    await page.route("**/api/history", (route) =>
+      route.fulfill({ json: { items: [], total: 0 } }),
+    );
     await page.route("**/api/downloads", (route) =>
       route.fulfill({
         json: [
@@ -66,6 +69,56 @@ test.describe("interactions and data states", () => {
       }),
     );
     await page.goto("/");
+    await expect(page.locator(".title-count")).toHaveText("63");
+  });
+
+  test("switches between saved history and latest results", async ({
+    page,
+  }) => {
+    await page.route("**/api/history", (route) =>
+      route.fulfill({
+        json: {
+          items: [
+            {
+              id: 1,
+              checkedAt: "2026-10-10T00:00:00Z",
+              importedAt: "2026-10-10T00:00:00Z",
+              nodeCount: 1,
+            },
+          ],
+          total: 1,
+        },
+      }),
+    );
+    await page.route("**/api/results?snapshot=1", (route) =>
+      route.fulfill({
+        json: {
+          ...snapshot,
+          id: 1,
+          checkedAt: "2026-10-10T00:00:00Z",
+          nodes: [
+            {
+              ...snapshot.nodes[0],
+              name: "Archived node",
+              baseName: "Archived node",
+            },
+          ],
+        },
+      }),
+    );
+    await page.getByRole("button", { name: "刷新结果" }).click();
+    await expect(page.getByLabel("检测批次").locator("option")).toHaveCount(2);
+    await page.getByLabel("检测批次").selectOption("1");
+    await expect(page.locator(".title-count")).toHaveText("1");
+    await expect(page.locator(".node-row")).toContainText("Archived node");
+    await expect(page.locator(".snapshot-time")).toContainText("历史检测");
+    await expect(
+      page.getByText("订阅下载仍使用最新生成的文件。"),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "刷新结果" }).click();
+    await expect(page.getByLabel("检测批次")).toHaveValue("1");
+    await expect(page.locator(".title-count")).toHaveText("1");
+    await page.getByLabel("检测批次").selectOption("");
     await expect(page.locator(".title-count")).toHaveText("63");
   });
 
