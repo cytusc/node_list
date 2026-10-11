@@ -10,7 +10,9 @@ COPY src ./src
 COPY server ./server
 RUN npm test && npm run build
 
-FROM node:22-alpine AS dependencies
+# Production dependencies are pure JavaScript; install them on the builder
+# host to avoid Node/V8 crashes under QEMU when targeting ARM64.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
