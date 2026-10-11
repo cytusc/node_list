@@ -1099,3 +1099,82 @@ select option {
   top: 6px;
   transform: translateX(-50%);
 }
+
+.ippure-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ippure-summary-row,
+.ippure-ratio-values {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.ippure-summary-row > span {
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+.ippure-summary-row > strong {
+  font-weight: 500;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.ippure-ratio-values > span:first-child {
+  color: #15803d;
+}
+.ippure-ratio-values > span:last-child {
+  color: #dc2626;
+}
+.dark .ippure-ratio-values > span:first-child {
+  color: #4ade80;
+}
+.dark .ippure-ratio-values > span:last-child {
+  color: #fb7185;
+}
+.ippure-list-scale,
+.ippure-ratio-track {
+  position: relative;
+  height: 6px;
+  margin: 2px 2px 4px;
+  border-radius: 4px;
+  background: linear-gradient(
+    to right,
+    #22c55e,
+    #84cc16 30%,
+    #eab308 50%,
+    #f97316 70%,
+    #dc2626
+  );
+}
+.ippure-ratio-track {
+  background: linear-gradient(to right, #22c55e, #fb7185, #dc2626);
+}
+.ippure-list-scale > span,
+.ippure-ratio-track > span {
+  position: absolute;
+  top: -3px;
+  height: 12px;
+  width: 3px;
+  background: var(--foreground);
+  border: 1px solid var(--card);
+  border-radius: 2px;
+  transform: translateX(-50%);
+}
+.desktop-table th[data-column="ippure"] {
+  width: 250px;
+}
+.desktop-table table {
+  min-width: 1180px;
+}
+.mobile-node .ippure-summary {
+  width: 100%;
+  margin: 10px 0;
+  padding: 12px 0 6px;
+  border-top: 1px solid var(--border);
+  text-align: left;
+}

@@ -10,6 +10,8 @@ export type IPPureResult = {
   attempts: number;
   error?: string;
   ip?: string;
+  asn?: string;
+  asnOrganization?: string;
   humanPercent?: number | null;
   botPercent?: number | null;
   source?: string;
