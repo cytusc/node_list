@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { chromium } from "playwright-core";
 import { createStore } from "./store.js";
 import {
   startIPPureCollector,
@@ -41,6 +42,36 @@ test("exit IP is read from IP.SB through the configured target proxy", async (t)
   });
   assert.equal(ip, "203.0.113.17");
   assert.deepEqual(urls, ["https://api.ip.sb/ip"]);
+});
+
+test("default browser launcher preserves the Chromium instance context", async (t) => {
+  const controller = createServer((_request, response) => {
+    response.writeHead(204).end();
+  });
+  await new Promise((resolve) => controller.listen(0, "127.0.0.1", resolve));
+  t.after(() => controller.close());
+  const originalLaunch = chromium.launch;
+  t.after(() => {
+    chromium.launch = originalLaunch;
+  });
+  chromium.launch = async function (options) {
+    assert.equal(this, chromium);
+    assert.equal(options.proxy.server, "http://127.0.0.1:7890");
+    return {
+      newPage: async () => ({
+        goto: async () => ({ ok: () => true }),
+        locator: () => ({ innerText: async () => "203.0.113.19" }),
+      }),
+      close: async () => {},
+    };
+  };
+  const ip = await resolveExitIP({
+    controller: `http://127.0.0.1:${controller.address().port}`,
+    proxyUrl: "http://127.0.0.1:7890",
+    proxy: { name: "target", type: "http", server: "proxy.example.org", port: 8080 },
+    signal: new AbortController().signal,
+  });
+  assert.equal(ip, "203.0.113.19");
 });
 
 test("IPPure saves per-node results, retries failures without rechecking successes and preserves batches after reopen", async (t) => {

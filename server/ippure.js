@@ -59,7 +59,7 @@ async function withProxyBrowser(
     executablePath,
     proxy,
     signal,
-    launchBrowser = chromium.launch,
+    launchBrowser = (options) => chromium.launch(options),
   },
   callback,
 ) {
