@@ -98,5 +98,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n支持 linux/amd64 和 linux/arm64。新增 ASN 编号和组织名称提取并保存到 SQLite/PostgreSQL，自动补采当前批次的旧结果。移除连接特性列，节点 / 服务器列宽调整为 155px。电脑列表以五个独立列显示 ASN 组织、IP 来源、IP 属性、IPPure 系数及人机流量比，支持单独显隐与排序；手机按字段展示。系数与人机比例配有绿红渐变条。启用检测需在 COMPOSE_FILE 追加 compose.ippure.yaml。连接、网络和目录映射通过服务器 .env 配置。部署说明见 README.md；请保留数据库与 subs-check 数据目录。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
+          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n支持 linux/amd64 和 linux/arm64。IPPure 检测先获取目标节点的出口 IP，再通过可用节点轮换查询指定 IP，并将结果保存到原节点；查询和出口探测均不回退直连，此前旧方式失败的节点可在新模式下重新检测。保留 ASN 编号和组织名称提取、SQLite/PostgreSQL 持久化及当前批次补采。电脑列表以独立列显示 ASN 组织、IP 来源、IP 属性、IPPure 系数及人机流量比，支持单独显隐与排序；手机按字段展示。启用检测需在 COMPOSE_FILE 追加 compose.ippure.yaml。连接、网络和目录映射通过服务器 .env 配置。部署说明见 README.md；请保留数据库与 subs-check 数据目录。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
           gh release create "$GITHUB_REF_NAME" "node-explorer-$GITHUB_REF_NAME.tar.gz" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md --verify-tag
