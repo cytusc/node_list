@@ -1,0 +1,35 @@
+# Based on beck-8/subs-check v1.6.5. Conservative defaults for a 1 GB VPS.
+print-progress: false
+concurrent: 5
+media-concurrent: 2
+speed-concurrent: 1
+shuffle-test-order: true
+check-interval: 120
+success-limit: 0
+timeout: 5000
+alive-test-url: http://gstatic.com/generate_204
+speed-test-url: https://github.com/AaronFeng753/Waifu2x-Extension-GUI/releases/download/v2.21.12/Waifu2x-Extension-GUI-v2.21.12-Portable.7z
+min-speed: 512
+download-timeout: 5
+download-mb: 5
+total-speed-limit: 10
+listen-port: ":8199"
+rename-node: true
+media-check: false
+media-check-timeout: 5
+keep-days: 0
+output-dir: /app/output
+enable-web-ui: false
+sub-store-port: ":8299"
+sub-store-path: ""
+mihomo-overwrite-url: http://127.0.0.1:8199/sub/ACL4SSR_Online_Full.yaml
+save-method: local
+sub-urls-retry: 2
+sub-urls-concurrent: 2
+sub-urls-get-ua: clash.meta
+ipv6: true
+sub-urls-remote: []
+sub-urls:
+  - https://raw.githubusercontent.com/firefoxmmx2/v2rayshare_subcription/main/subscription/clash_sub.yaml
+  - https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/snippets/nodes.meta.yml
+  - https://raw.githubusercontent.com/Barabama/FreeNodes/main/nodes/wenode.txt

@@ -1,0 +1,44 @@
+services:
+  subs-check:
+    image: ghcr.io/beck-8/subs-check:${SUBS_CHECK_TAG:-1.6.5}
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    environment:
+      TZ: Asia/Shanghai
+      GOMEMLIMIT: 192MiB
+      GOGC: "50"
+    volumes:
+      - ${SUBS_CHECK_HOST_DIR:-/mnt/d/code/sub}/config:/app/config
+      - ${SUBS_CHECK_HOST_DIR:-/mnt/d/code/sub}/output:/app/output
+    mem_limit: 384m
+    memswap_limit: 768m
+    cpus: 0.75
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:8199/debug/pprof/",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  node-explorer:
+    depends_on:
+      subs-check:
+        condition: service_started

@@ -44,8 +44,8 @@ GitHub Actions 在推送 `v*.*.*` 标签后构建并发布 `ghcr.io/cytusc/node_
 在安装 Docker Compose 的机器上运行：
 
 ```bash
-SUBS_CHECK_HOST_DIR=/mnt/d/code/sub IMAGE_TAG=v1.0.0 docker compose pull
-SUBS_CHECK_HOST_DIR=/mnt/d/code/sub IMAGE_TAG=v1.0.0 docker compose up -d
+SUBS_CHECK_HOST_DIR=/mnt/d/code/sub IMAGE_TAG=v1.1.0 docker compose pull
+SUBS_CHECK_HOST_DIR=/mnt/d/code/sub IMAGE_TAG=v1.1.0 docker compose up -d
 docker compose ps
 curl --fail http://127.0.0.1:3001/api/health
 ```
@@ -54,7 +54,7 @@ PowerShell / Docker Desktop 可设置：
 
 ```powershell
 $env:SUBS_CHECK_HOST_DIR = 'D:/code/sub'
-$env:IMAGE_TAG = 'v1.0.0'
+$env:IMAGE_TAG = 'v1.1.0'
 docker compose pull
 docker compose up -d
 ```
@@ -67,18 +67,38 @@ docker compose up -d
 
 ### Linux 开机启动与定时更新
 
-将项目放在 `/root/node_list`，在 `.env` 设置实际数据目录、绑定地址和端口，例如：
+服务器完整部署使用两个独立容器：官方 `ghcr.io/beck-8/subs-check:1.6.5` 检测数据，页面镜像只读展示；检测服务没有宿主机端口映射。上游项目、源码与 GPL-3.0 许可证见 https://github.com/beck-8/subs-check 。通过文件共享集成，不将上游源码复制进页面镜像。
+
+将项目放在 `/root/node_list`，首次建立共享目录和配置：
+
+```bash
+mkdir -p data/config data/output
+cp deploy/subs-check.example.yaml data/config/config.yaml
+chown -R 1000:1000 data
+chmod 700 data/config
+```
+
+只在首次安装时复制示例，升级时保留实际配置。检测容器与页面均使用 UID 1000，保证可读取上游以 `0600` 保存的结果。示例使用三个上游公共订阅源，每 120 分钟检测一次；为 1 GB VPS 设置较低并发和下载量，可在 `data/config/config.yaml` 的 `sub-urls` 替换自己的订阅。
+
+在 `.env` 设置数据目录、绑定地址和端口，例如：
 
 ```dotenv
-SUBS_CHECK_HOST_DIR=/path/to/subs-check
+SUBS_CHECK_HOST_DIR=/root/node_list/data
 BIND_ADDRESS=127.0.0.1
 WEB_PORT=3100
 ```
 
-在 `release.env` 写入 `IMAGE_TAG=v1.0.0`，然后执行：
+在 `release.env` 写入以下版本：
+
+```dotenv
+IMAGE_TAG=v1.1.0
+SUBS_CHECK_TAG=1.6.5
+```
+
+然后执行：
 
 ```bash
-docker compose --env-file .env --env-file release.env pull
+docker compose -f compose.yaml -f compose.subs-check.yaml --env-file .env --env-file release.env pull
 cp deploy/node-list.service deploy/node-list-update.service deploy/node-list-update.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now node-list.service node-list-update.timer
@@ -87,7 +107,7 @@ systemctl list-timers node-list-update.timer
 journalctl -u node-list-update.service
 ```
 
-定时器每小时检查 GitHub 最新正式 Release，增加最多 5 分钟随机延迟。新版本先拉取镜像，等待 Docker 健康检查通过后才记录版本；启动或健康检查失败时恢复旧版本。检查失败不改变当前容器。更新仅替换镜像，不自动拉取或执行远端仓库脚本。容器日志最多保留 3 个 10 MB 文件。
+定时器每小时分别检查页面和 subs-check 的最新正式 Release，增加最多 5 分钟随机延迟。新版本先拉取镜像，等待 Docker 健康检查通过后才记录版本；启动或健康检查失败时恢复旧版本。检查失败不改变当前容器。更新仅替换镜像，不自动拉取或执行远端仓库脚本。容器日志最多保留 3 个 10 MB 文件。subs-check 更新会中断正在进行的一轮检测，但保留上次完成的结果。
 
 ## 数据含义
 
