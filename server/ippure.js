@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { isIP } from "node:net";
 import { parse, stringify } from "yaml";
 import { chromium } from "playwright-core";
 
@@ -50,14 +51,10 @@ export function extractIPPure() {
   };
 }
 
-export async function queryIPPure({
-  controller,
-  proxyUrl,
-  secret,
-  executablePath,
-  proxy,
-  signal,
-}) {
+async function withProxyBrowser(
+  { controller, proxyUrl, secret, executablePath, proxy, signal },
+  callback,
+) {
   const config = {
     "mixed-port": Number(new URL(proxyUrl).port),
     "allow-lan": true,
@@ -95,9 +92,51 @@ export async function queryIPPure({
   signal.addEventListener("abort", abort, { once: true });
   try {
     signal.throwIfAborted();
+    return await callback(browser);
+  } finally {
+    signal.removeEventListener("abort", abort);
+    await browser.close();
+  }
+}
+
+export async function resolveExitIP(options) {
+  return withProxyBrowser(options, async (browser) => {
+    const page = await browser.newPage();
+    // Both services see the target node's egress; never resolve its hostname
+    // locally or fall back to a direct connection.
+    for (const url of [
+      "https://api.ipify.org?format=json",
+      "https://www.cloudflare.com/cdn-cgi/trace",
+    ]) {
+      options.signal.throwIfAborted();
+      try {
+        const response = await page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: 15000,
+        });
+        if (!response?.ok()) continue;
+        const body = await page.locator("body").innerText();
+        const ip = url.includes("ipify")
+          ? JSON.parse(body).ip
+          : body.match(/^ip=(.+)$/m)?.[1]?.trim();
+        if (typeof ip === "string" && isIP(ip)) return ip;
+      } catch {
+        options.signal.throwIfAborted();
+      }
+    }
+    throw new Error("IPPure 无法获取节点出口 IP");
+  });
+}
+
+export async function queryIPPure(options) {
+  const { target } = options;
+  if (target && !isIP(target)) throw new Error("IPPure 查询目标必须是出口 IP");
+  return withProxyBrowser(options, async (browser) => {
     const page = await browser.newPage({ locale: "zh-CN" });
     page.setDefaultTimeout(45000);
-    const response = await page.goto("https://ippure.com/", {
+    const url = new URL("https://ippure.com/");
+    if (target) url.searchParams.set("ip", target);
+    const response = await page.goto(url.href, {
       waitUntil: "domcontentloaded",
       timeout: 45000,
     });
@@ -120,11 +159,13 @@ export async function queryIPPure({
       undefined,
       { timeout: 15000 },
     );
-    return await page.evaluate(extractIPPure);
-  } finally {
-    signal.removeEventListener("abort", abort);
-    await browser.close();
-  }
+    const data = await page.evaluate(extractIPPure);
+    const normalizeIP = (ip) =>
+      isIP(ip) === 6 ? new URL(`http://[${ip}]/`).hostname : ip;
+    if (target && normalizeIP(target) !== normalizeIP(data.ip))
+      throw new Error("IPPure 返回 IP 与查询出口 IP 不一致");
+    return data;
+  });
 }
 
 export function startIPPureCollector({
@@ -135,11 +176,13 @@ export function startIPPureCollector({
   secret,
   executablePath,
   query = queryIPPure,
+  resolveIP = resolveExitIP,
   intervalMs = 30000,
 }) {
   const abort = new AbortController();
   let pending;
   let lastError = null;
+  let rotation = 0;
   async function collect() {
     const snapshot = await store.get();
     if (!snapshot?.nodes.length) return;
@@ -148,17 +191,7 @@ export function startIPPureCollector({
     );
     if (!Array.isArray(document?.proxies))
       throw new Error("Clash 订阅缺少 proxies");
-    for (const [index, node] of snapshot.nodes.entries()) {
-      if (abort.signal.aborted) return;
-      if ((await store.get())?.id !== snapshot.id) return;
-      const old = node.ippure;
-      const backfill = old?.status === "success" && !old.asnOrganization;
-      if (old?.status === "success" && !backfill) continue;
-      if ((backfill ? old.organizationAttempts || 0 : old?.attempts || 0) >= 3)
-        continue;
-      const lastAttempt = backfill ? old.organizationCheckedAt : old?.checkedAt;
-      if (lastAttempt && Date.now() - Date.parse(lastAttempt) < 30 * 60 * 1000)
-        continue;
+    const matchProxy = (node) => {
       const matches = document.proxies.filter(
         (p) =>
           p.name === node.name &&
@@ -166,25 +199,87 @@ export function startIPPureCollector({
           p.server === node.server &&
           String(p.port) === String(node.port),
       );
+      return matches.length === 1 ? matches[0] : undefined;
+    };
+    // Query transport and the node receiving the result are independent.
+    const working = snapshot.nodes
+      .filter((node) => node.ippure?.status === "success")
+      .map(matchProxy)
+      .filter(Boolean);
+    const unavailable = new Set();
+    for (const [index, node] of snapshot.nodes.entries()) {
+      if (abort.signal.aborted) return;
+      if ((await store.get())?.id !== snapshot.id) return;
+      const old = node.ippure;
+      const backfill = old?.status === "success" && !old.asnOrganization;
+      if (old?.status === "success" && !backfill) continue;
+      // Old failures used the target as transport. Give the new query mode
+      // its own retry budget, including nodes that exhausted the old budget.
+      const attempts =
+        old?.queryMode === "specified-exit" ? old.attempts || 0 : 0;
+      if ((backfill ? old.organizationAttempts || 0 : attempts) >= 3) continue;
+      const lastAttempt = backfill
+        ? old.organizationCheckedAt
+        : old?.queryMode === "specified-exit"
+          ? old.checkedAt
+          : undefined;
+      if (lastAttempt && Date.now() - Date.parse(lastAttempt) < 30 * 60 * 1000)
+        continue;
       // A rewritten subscription may belong to a different detection round.
-      if (matches.length !== 1) continue;
+      const ownProxy = matchProxy(node);
+      if (!ownProxy) continue;
       const result = {
         checkedAt: new Date().toISOString(),
-        attempts: (old?.attempts || 0) + 1,
+        attempts: attempts + 1,
+        queryMode: "specified-exit",
       };
       try {
-        Object.assign(
-          result,
-          await query({
-            controller,
-            proxyUrl,
-            secret,
-            executablePath,
-            proxy: matches[0],
-            signal: abort.signal,
-          }),
-          { status: "success" },
-        );
+        const options = {
+          controller,
+          proxyUrl,
+          secret,
+          executablePath,
+          signal: abort.signal,
+        };
+        const target =
+          typeof old?.ip === "string" && isIP(old.ip)
+            ? old.ip
+            : await resolveIP({ ...options, proxy: ownProxy });
+        if (typeof target !== "string" || !isIP(target))
+          throw new Error("IPPure 无法获取有效的节点出口 IP");
+        result.ip = target;
+        result.queryTarget = target;
+        const available = working.filter((proxy) => !unavailable.has(proxy));
+        // Bootstrap the pool through a node itself when no usable donor exists.
+        const candidates = available.length
+          ? Array.from(
+              { length: Math.min(3, available.length) },
+              (_, offset) => available[(rotation + offset) % available.length],
+            )
+          : [ownProxy];
+        rotation++;
+        let failure;
+        for (const proxy of candidates) {
+          try {
+            const data = await query({
+              controller,
+              proxyUrl,
+              secret,
+              executablePath,
+              proxy,
+              target,
+              signal: abort.signal,
+            });
+            Object.assign(result, data, { status: "success" });
+            if (!working.includes(proxy)) working.push(proxy);
+            break;
+          } catch (error) {
+            if (abort.signal.aborted) return;
+            unavailable.add(proxy);
+            failure = error;
+          }
+        }
+        if (result.status !== "success") throw failure;
       } catch (error) {
         if (abort.signal.aborted) return;
         if (backfill) {
@@ -202,6 +297,7 @@ export function startIPPureCollector({
           ? error.message.slice(0, 160)
           : "节点访问或页面提取失败，请稍后重试";
       }
+      if ((await store.get())?.id !== snapshot.id) return;
       await store.saveIPPure(snapshot.id, index, result);
     }
   }
