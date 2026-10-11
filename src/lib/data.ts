@@ -5,6 +5,10 @@ export type MediaTag = {
   Tag?: string;
 };
 export type NodeRecord = {
+  checkedAt?: string;
+  snapshotId?: number;
+  speedTest?: boolean;
+  mediaCheck?: boolean;
   name: string;
   baseName?: string;
   type: string;
@@ -31,6 +35,7 @@ export type HistoryItem = {
 };
 export type Snapshot = {
   id?: number;
+  batchCount?: number;
   sourceWarning?: string | null;
   checkedAt?: string;
   speedTest: boolean;

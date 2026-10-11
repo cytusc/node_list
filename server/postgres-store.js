@@ -57,6 +57,12 @@ export async function createPostgresStore(config) {
             );
       return result.rows[0];
     },
+    async all() {
+      const result = await pool.query(
+        'SELECT id, imported_at AS "importedAt", payload FROM node_explorer_snapshots ORDER BY id DESC',
+      );
+      return result.rows;
+    },
     async history(limit, offset) {
       const result = await pool.query(
         `SELECT id, checked_at AS "checkedAt", imported_at AS "importedAt",

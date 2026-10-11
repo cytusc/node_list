@@ -65,6 +65,13 @@ export function createStore(databasePath = ":memory:") {
             .get()
         : db.prepare("SELECT id, payload FROM snapshots WHERE id = ?").get(id);
     },
+    all() {
+      return db
+        .prepare(
+          "SELECT id, imported_at AS importedAt, payload FROM snapshots ORDER BY id DESC",
+        )
+        .all();
+    },
     history(limit, offset) {
       return {
         items: db
@@ -130,7 +137,73 @@ export function createSnapshotStore(adapter) {
         ? { ...JSON.parse(row.payload), id: row.id, sourceWarning }
         : null;
     },
+    async aggregate() {
+      const rows = await adapter.all();
+      if (!rows.length) return null;
+      const batches = rows
+        .map((row) => ({
+          ...JSON.parse(row.payload),
+          id: row.id,
+          importedAt: row.importedAt,
+        }))
+        .sort((a, b) => {
+          const time = (batch) => {
+            const checked = Date.parse(batch.checkedAt);
+            return Number.isFinite(checked)
+              ? checked
+              : Date.parse(batch.importedAt) || 0;
+          };
+          return time(b) - time(a) || b.id - a.id;
+        });
+      const nodes = new Map();
+      for (const batch of batches) {
+        for (const node of batch.nodes) {
+          // Names, exit IPs and test results can change between checks.
+          const key = nodeIdentity(node);
+          if (!nodes.has(key))
+            nodes.set(key, {
+              ...node,
+              checkedAt: batch.checkedAt,
+              snapshotId: batch.id,
+              speedTest: batch.speedTest,
+              mediaCheck: batch.mediaCheck,
+            });
+        }
+      }
+      const result = [...nodes.values()];
+      return {
+        checkedAt: batches[0].checkedAt,
+        batchCount: batches.length,
+        speedTest: result.length
+          ? result.some((node) => node.speedTest)
+          : batches[0].speedTest,
+        mediaCheck: result.length
+          ? result.some((node) => node.mediaCheck)
+          : batches[0].mediaCheck,
+        nodes: result,
+        sourceWarning,
+      };
+    },
     history: (limit, offset) => adapter.history(limit, offset),
     close: () => adapter.close(),
   };
+}
+
+function nodeIdentity(node) {
+  const details = (node.details || [])
+    .map(({ k, v }) => [k, v])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return JSON.stringify([
+    node.type?.toLowerCase(),
+    node.server?.toLowerCase(),
+    String(node.port ?? ""),
+    node.sni?.toLowerCase() || "",
+    node.network?.toLowerCase() || "",
+    !!node.tls,
+    !!node.reality,
+    !!node.udp,
+    details,
+    // Incomplete legacy records cannot be identified by an endpoint alone.
+    node.server ? "" : node.baseName || node.name,
+  ]);
 }

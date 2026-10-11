@@ -79,7 +79,6 @@ import {
   speedParts,
   timeLabel,
   type Download,
-  type HistoryItem,
   type NodeRecord,
   type Snapshot,
 } from "@/lib/data";
@@ -171,9 +170,6 @@ const emptyNodes: NodeRecord[] = [];
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [historyTotal, setHistoryTotal] = useState(0);
-  const [batch, setBatch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [errorCode, setErrorCode] = useState("");
@@ -209,18 +205,15 @@ export default function App() {
     }
   }, [dark]);
 
-  const load = useCallback(async (announce = false, snapshotId = "") => {
+  const load = useCallback(async (announce = false) => {
     activeRequest.current?.abort();
     const controller = new AbortController();
     activeRequest.current = controller;
     setLoading(true);
     try {
-      const response = await fetch(
-        snapshotId ? `/api/results?snapshot=${snapshotId}` : "/api/results",
-        {
-          signal: controller.signal,
-        },
-      );
+      const response = await fetch("/api/results?view=aggregate", {
+        signal: controller.signal,
+      });
       const body = await response.json();
       if (controller.signal.aborted) return;
       if (!response.ok) {
@@ -230,15 +223,13 @@ export default function App() {
       if (!Array.isArray(body.nodes))
         throw new Error("结果格式无效，请检查检测结果文件");
       setSnapshot(body);
-      setBatch(snapshotId);
       setSelected(null);
       setError("");
       setErrorCode("");
       if (!body.speedTest) setSorting([{ id: "name", desc: false }]);
       if (!body.mediaCheck) setMedia([]);
       if (!body.speedTest) setMinSpeed("");
-      if (announce)
-        toast.success(snapshotId ? "已读取历史检测结果" : "已读取最新检测结果");
+      if (announce) toast.success("已刷新聚合检测结果");
     } catch (e) {
       if (!controller.signal.aborted)
         setError(
@@ -246,20 +237,6 @@ export default function App() {
         );
     } finally {
       if (!controller.signal.aborted) setLoading(false);
-    }
-    if (!controller.signal.aborted) {
-      try {
-        const r = await fetch("/api/history", { signal: controller.signal });
-        if (r.ok) {
-          const data = await r.json();
-          if (!controller.signal.aborted) {
-            setHistory(data.items);
-            setHistoryTotal(data.total);
-          }
-        }
-      } catch {
-        /* History can be retried on refresh. */
-      }
     }
     if (!controller.signal.aborted) {
       try {
@@ -586,7 +563,7 @@ export default function App() {
             <div className="snapshot-time">
               <Clock3 className="size-3.5" />
               <span>
-                {batch ? "历史检测" : "最近检测"}{" "}
+                最近检测{" "}
                 <time>
                   {snapshot?.checkedAt ? timeLabel(snapshot.checkedAt) : "—"}
                 </time>
@@ -621,72 +598,19 @@ export default function App() {
               {snapshot?.mediaCheck
                 ? "已启用服务解锁检测"
                 : snapshot
-                  ? "本轮未启用服务解锁检测"
+                  ? "未启用服务解锁检测"
                   : "正在读取检测结果"}
             </span>
           </div>
         </section>
 
-        <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
-          <label htmlFor="snapshot-batch" className="text-muted-foreground">
-            检测批次
-          </label>
-          <select
-            id="snapshot-batch"
-            className="h-9 max-w-full rounded-md border border-input bg-background px-3"
-            value={batch}
-            disabled={loading}
-            onChange={(e) => void load(true, e.target.value)}
-          >
-            <option value="">最新检测结果</option>
-            {batch && !history.some((item) => String(item.id) === batch) && (
-              <option value={batch}>
-                {timeLabel(snapshot?.checkedAt)} · 当前历史批次
-              </option>
-            )}
-            {history.map((item) => (
-              <option key={item.id} value={item.id}>
-                {timeLabel(item.checkedAt || item.importedAt)} ·{" "}
-                {item.nodeCount} 个节点 · #{item.id}
-              </option>
-            ))}
-          </select>
-          <span className="text-muted-foreground">
-            已保存 {historyTotal} 轮检测
+        <div className="mb-4 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+          <span>
+            已聚合 {snapshot?.batchCount ?? 0}{" "}
+            轮检测，同一节点保留最近一次结果。
           </span>
-          {history.length < historyTotal && (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={loading}
-              onClick={async () => {
-                try {
-                  const response = await fetch(
-                    `/api/history?offset=${history.length}`,
-                  );
-                  if (!response.ok) throw new Error();
-                  const data = await response.json();
-                  setHistory((items) => [
-                    ...items,
-                    ...data.items.filter(
-                      (item: HistoryItem) =>
-                        !items.some((existing) => existing.id === item.id),
-                    ),
-                  ]);
-                  setHistoryTotal(data.total);
-                } catch {
-                  toast.error("历史批次加载失败，请重试");
-                }
-              }}
-            >
-              加载更早批次
-            </Button>
-          )}
-          {batch && (
-            <span className="text-muted-foreground">
-              订阅下载仍使用最新生成的文件。
-            </span>
-          )}
+          <span>历史节点不代表当前仍可用，检测时间可在详情中查看。</span>
+          <span>订阅下载仍使用最新生成的文件。</span>
         </div>
         {snapshot?.sourceWarning && !error && (
           <div role="status" className="error-banner">
@@ -908,7 +832,7 @@ export default function App() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => void load(true, batch)}
+                onClick={() => void load(true)}
                 disabled={loading}
                 aria-label="刷新结果"
               >
@@ -1080,7 +1004,7 @@ export default function App() {
                   : nodes.length
                     ? "没有匹配的节点"
                     : snapshot?.checkedAt
-                      ? "本轮没有保留节点"
+                      ? "暂无保留节点"
                       : "尚无检测结果"}
               </h2>
               <p>
@@ -1170,7 +1094,8 @@ export default function App() {
                   {plainName(selected)}
                 </SheetTitle>
                 <SheetDescription>
-                  本轮节点详情 · {timeLabel(snapshot?.checkedAt)}
+                  最近检测 ·{" "}
+                  {timeLabel(selected.checkedAt)}
                 </SheetDescription>
               </SheetHeader>
               <div className="detail-content">
@@ -1179,7 +1104,7 @@ export default function App() {
                     {selected.type.toUpperCase()}
                   </Badge>
                   <Features node={selected} />
-                  {snapshot?.speedTest && (
+                  {(selected.speedTest ?? snapshot?.speedTest) && (
                     <Speed value={selected.speed} max={maxSpeed} />
                   )}
                 </div>
@@ -1232,7 +1157,7 @@ export default function App() {
                   </>
                 )}
                 <h3>服务解锁</h3>
-                {snapshot?.mediaCheck ? (
+                {(selected.mediaCheck ?? snapshot?.mediaCheck) ? (
                   selected.media?.length ? (
                     <dl>
                       {selected.media.map((m, i) => (
@@ -1248,7 +1173,7 @@ export default function App() {
                     <p className="detail-note">该节点没有服务解锁记录。</p>
                   )
                 ) : (
-                  <p className="detail-note">本轮未启用服务解锁检测。</p>
+                  <p className="detail-note">未启用服务解锁检测。</p>
                 )}
               </div>
               <div className="detail-footer">

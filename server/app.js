@@ -54,17 +54,21 @@ export function createApp({
     try {
       res.json(await store.history(limit, offset));
     } catch {
-      res
-        .status(503)
-        .json({
-          error: "数据库暂时无法读取，请稍后重试。",
-          code: "DATABASE_FAILED",
-        });
+      res.status(503).json({
+        error: "数据库暂时无法读取，请稍后重试。",
+        code: "DATABASE_FAILED",
+      });
     }
   });
   app.get("/api/results", async (req, res) => {
     res.set("Cache-Control", "no-store");
     const id = req.query.snapshot;
+    const aggregate = req.query.view === "aggregate";
+    if (
+      (req.query.view !== undefined && !aggregate) ||
+      (aggregate && id !== undefined)
+    )
+      return res.status(400).json({ error: "检测结果视图无效。" });
     if (
       id !== undefined &&
       (typeof id !== "string" ||
@@ -80,9 +84,9 @@ export function createApp({
       } catch (error) {
         sourceError = error;
       }
-      const snapshot = await store.get(
-        id === undefined ? undefined : Number(id),
-      );
+      const snapshot = aggregate
+        ? await store.aggregate()
+        : await store.get(id === undefined ? undefined : Number(id));
       if (snapshot) return res.json(snapshot);
       if (id !== undefined)
         return res

@@ -71,6 +71,10 @@ test(
     assert.equal(history.total, 2);
     assert.equal(history.items[0].id, old.id);
     assert.equal(history.items[0].nodeCount, 1);
+    const aggregated = await (await get("/api/results?view=aggregate")).json();
+    assert.equal(aggregated.batchCount, 2);
+    assert.equal(aggregated.nodes[0].name, "Archived");
+    assert.equal(aggregated.nodes[0].snapshotId, old.id);
     await rm(file);
     const saved = await (await get(`/api/results?snapshot=${old.id}`)).json();
     assert.equal(saved.nodes[0].name, "Archived");
