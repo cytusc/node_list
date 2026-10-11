@@ -52,7 +52,15 @@ export function extractIPPure() {
 }
 
 async function withProxyBrowser(
-  { controller, proxyUrl, secret, executablePath, proxy, signal },
+  {
+    controller,
+    proxyUrl,
+    secret,
+    executablePath,
+    proxy,
+    signal,
+    launchBrowser = chromium.launch,
+  },
   callback,
 ) {
   const config = {
@@ -78,7 +86,7 @@ async function withProxyBrowser(
     },
   );
   if (!response.ok) throw new Error(`代理配置失败 (HTTP ${response.status})`);
-  const browser = await chromium.launch({
+  const browser = await launchBrowser({
     executablePath,
     args: [
       "--no-sandbox",
@@ -102,29 +110,18 @@ async function withProxyBrowser(
 export async function resolveExitIP(options) {
   return withProxyBrowser(options, async (browser) => {
     const page = await browser.newPage();
-    // Both services see the target node's egress; never resolve its hostname
+    // The request sees the target node's egress; never resolve its hostname
     // locally or fall back to a direct connection.
-    for (const url of [
-      "https://api.ipify.org?format=json",
-      "https://www.cloudflare.com/cdn-cgi/trace",
-    ]) {
-      options.signal.throwIfAborted();
-      try {
-        const response = await page.goto(url, {
-          waitUntil: "domcontentloaded",
-          timeout: 15000,
-        });
-        if (!response?.ok()) continue;
-        const body = await page.locator("body").innerText();
-        const ip = url.includes("ipify")
-          ? JSON.parse(body).ip
-          : body.match(/^ip=(.+)$/m)?.[1]?.trim();
-        if (typeof ip === "string" && isIP(ip)) return ip;
-      } catch {
-        options.signal.throwIfAborted();
-      }
-    }
-    throw new Error("IPPure 无法获取节点出口 IP");
+    options.signal.throwIfAborted();
+    const response = await page.goto("https://api.ip.sb/ip", {
+      waitUntil: "domcontentloaded",
+      timeout: 15000,
+    });
+    if (!response?.ok())
+      throw new Error(`IP.SB 访问失败 (HTTP ${response?.status()})`);
+    const ip = (await page.locator("body").innerText()).trim();
+    if (!isIP(ip)) throw new Error("IP.SB 未返回有效的出口 IP");
+    return ip;
   });
 }
 
@@ -211,16 +208,21 @@ export function startIPPureCollector({
       if (abort.signal.aborted) return;
       if ((await store.get())?.id !== snapshot.id) return;
       const old = node.ippure;
-      const backfill = old?.status === "success" && !old.asnOrganization;
-      if (old?.status === "success" && !backfill) continue;
+      const currentExitIP = old?.exitIPSource === "ip.sb";
+      const currentExitMode = old?.exitIPMode === "ip.sb";
+      const backfill =
+        old?.status === "success" && currentExitIP && !old.asnOrganization;
+      if (old?.status === "success" && currentExitIP && !backfill) continue;
       // Old failures used the target as transport. Give the new query mode
       // its own retry budget, including nodes that exhausted the old budget.
       const attempts =
-        old?.queryMode === "specified-exit" ? old.attempts || 0 : 0;
+        currentExitMode && old?.queryMode === "specified-exit"
+          ? old.attempts || 0
+          : 0;
       if ((backfill ? old.organizationAttempts || 0 : attempts) >= 3) continue;
       const lastAttempt = backfill
         ? old.organizationCheckedAt
-        : old?.queryMode === "specified-exit"
+        : currentExitMode && old?.queryMode === "specified-exit"
           ? old.checkedAt
           : undefined;
       if (lastAttempt && Date.now() - Date.parse(lastAttempt) < 30 * 60 * 1000)
@@ -232,6 +234,7 @@ export function startIPPureCollector({
         checkedAt: new Date().toISOString(),
         attempts: attempts + 1,
         queryMode: "specified-exit",
+        exitIPMode: "ip.sb",
       };
       try {
         const options = {
@@ -242,12 +245,13 @@ export function startIPPureCollector({
           signal: abort.signal,
         };
         const target =
-          typeof old?.ip === "string" && isIP(old.ip)
+          currentExitIP && typeof old?.ip === "string" && isIP(old.ip)
             ? old.ip
             : await resolveIP({ ...options, proxy: ownProxy });
         if (typeof target !== "string" || !isIP(target))
           throw new Error("IPPure 无法获取有效的节点出口 IP");
         result.ip = target;
+        result.exitIPSource = "ip.sb";
         result.queryTarget = target;
         const available = working.filter((proxy) => !unavailable.has(proxy));
         // Bootstrap the pool through a node itself when no usable donor exists.
@@ -293,7 +297,7 @@ export function startIPPureCollector({
         }
         result.status = "error";
         // Never persist proxy credentials or controller response bodies.
-        result.error = /IPPure|代理配置/.test(error.message)
+        result.error = /IPPure|IP\.SB|代理配置/.test(error.message)
           ? error.message.slice(0, 160)
           : "节点访问或页面提取失败，请稍后重试";
       }

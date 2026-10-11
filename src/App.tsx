@@ -1322,7 +1322,8 @@ export default function App() {
                     </div>
                     <p className="detail-note">
                       系数越低越纯净；人机流量比为 IPPure 提供的 ASN
-                      流量统计。结果来自该节点访问 IPPure 时的出口。
+                      流量统计。按该节点访问 IP.SB 得到的出口 IP 查询，IPPure
+                      请求可经其他可用节点转发。
                     </p>
                   </>
                 ) : (
