@@ -165,6 +165,7 @@ const columnLabels: Record<string, string> = {
   features: "连接特性",
   media: "服务解锁",
   speed: "下载速度",
+  ippure: "IPPure",
 };
 const emptyNodes: NodeRecord[] = [];
 
@@ -413,6 +414,31 @@ export default function App() {
         header: "连接特性",
         enableSorting: false,
         cell: ({ row }) => <Features node={row.original} />,
+      },
+      {
+        id: "ippure",
+        accessorFn: (node) => node.ippure?.score,
+        header: "IPPure",
+        sortUndefined: "last",
+        cell: ({ row }) => {
+          const result = row.original.ippure;
+          return (
+            <div className="protocol-cell" title={result?.error}>
+              <span>
+                {result?.status === "success"
+                  ? `${result.score}% ${result.label}`
+                  : result?.status === "error"
+                    ? "检测失败"
+                    : "待检测"}
+              </span>
+              <small>
+                {result?.status === "success"
+                  ? [result.source, ...(result.attributes || [])].join(" · ")
+                  : "点击查看详情"}
+              </small>
+            </div>
+          );
+        },
       },
       ...(snapshot?.mediaCheck
         ? [
@@ -976,6 +1002,14 @@ export default function App() {
                     <span className="mobile-address">
                       {row.original.server}:{row.original.port}
                     </span>
+                    <span className="mobile-address">
+                      IPPure ·{" "}
+                      {row.original.ippure?.status === "success"
+                        ? `${row.original.ippure.score}% ${row.original.ippure.label}`
+                        : row.original.ippure?.status === "error"
+                          ? "检测失败"
+                          : "待检测"}
+                    </span>
                     <div className="mobile-node-bottom">
                       <div>
                         <Badge variant="outline" className="protocol-badge">
@@ -1094,8 +1128,7 @@ export default function App() {
                   {plainName(selected)}
                 </SheetTitle>
                 <SheetDescription>
-                  最近检测 ·{" "}
-                  {timeLabel(selected.checkedAt)}
+                  最近检测 · {timeLabel(selected.checkedAt)}
                 </SheetDescription>
               </SheetHeader>
               <div className="detail-content">
@@ -1155,6 +1188,62 @@ export default function App() {
                       ))}
                     </dl>
                   </>
+                )}
+                <h3>IPPure 检测</h3>
+                {selected.ippure?.status === "success" ? (
+                  <>
+                    <dl>
+                      {[
+                        ["检测出口 IP", selected.ippure.ip],
+                        [
+                          "人机流量比",
+                          selected.ippure.humanPercent == null
+                            ? "统计数据不足"
+                            : `human ${selected.ippure.humanPercent}% / bot ${selected.ippure.botPercent}%`,
+                        ],
+                        ["IP 来源", selected.ippure.source],
+                        ["IP 属性", selected.ippure.attributes?.join(" · ")],
+                        [
+                          "IPPure 系数",
+                          `${selected.ippure.score}% ${selected.ippure.label}`,
+                        ],
+                        ["检测时间", timeLabel(selected.ippure.checkedAt)],
+                      ].map(([label, value]) => (
+                        <div className="detail-field" key={label}>
+                          <dt>{label}</dt>
+                          <dd>{value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                    <div
+                      className="ippure-scale"
+                      aria-label={`IPPure 系数 ${selected.ippure.score}%`}
+                    >
+                      <div className="ippure-track">
+                        <span style={{ left: `${selected.ippure.score}%` }} />
+                      </div>
+                      <div className="ippure-ticks">
+                        {[0, 15, 25, 40, 50, 70, 100].map((n) => (
+                          <span key={n} style={{ left: `${n}%` }}>
+                            {n}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <p className="detail-note">
+                      系数越低越纯净；人机流量比为 IPPure 提供的 ASN
+                      流量统计。结果来自该节点访问 IPPure 时的出口。
+                    </p>
+                  </>
+                ) : (
+                  <p className="detail-note">
+                    {selected.ippure?.status === "error"
+                      ? `${selected.ippure.error}（已尝试 ${selected.ippure.attempts} 次，最多 3 次）`
+                      : snapshot?.ippureCollector?.error ||
+                        (snapshot?.ippureCollector?.enabled === false
+                          ? "IPPure 检测服务未启用，请配置独立代理检测服务。"
+                          : "尚无 IPPure 结果；检测服务启用后会依次检测当前批次，刷新页面可查看进度。历史批次保留当时已采集的结果。")}
+                  </p>
                 )}
                 <h3>服务解锁</h3>
                 {(selected.mediaCheck ?? snapshot?.mediaCheck) ? (

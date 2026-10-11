@@ -1,6 +1,6 @@
 {
   "name": "node-explorer",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -24,11 +24,13 @@
     "flag-icons": "^7.5.0",
     "lucide-react": "^1.55.0",
     "pg": "^8.23.1",
+    "playwright-core": "^1.64.0",
     "radix-ui": "^1.7.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "sonner": "^2.0.8",
-    "tailwind-merge": "^3.7.0"
+    "tailwind-merge": "^3.7.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.0",

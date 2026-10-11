@@ -1063,3 +1063,39 @@ select option {
     scroll-behavior: auto !important;
   }
 }
+
+.ippure-scale {
+  margin: 18px 10px 28px;
+}
+.ippure-track {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(
+    to right,
+    #166534 0% 15%,
+    #22c55e 15% 25%,
+    #84cc16 25% 40%,
+    #eab308 40% 50%,
+    #f97316 50% 70%,
+    #dc2626 70% 100%
+  );
+}
+.ippure-track > span {
+  position: absolute;
+  top: -4px;
+  height: 14px;
+  width: 3px;
+  background: var(--foreground);
+  transform: translateX(-50%);
+}
+.ippure-ticks {
+  position: relative;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.ippure-ticks > span {
+  position: absolute;
+  top: 6px;
+  transform: translateX(-50%);
+}

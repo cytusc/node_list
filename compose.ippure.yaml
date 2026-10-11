@@ -1,0 +1,35 @@
+# Dedicated Mihomo instance: its active proxy is changed by the collector.
+# Do not point the collector at a proxy instance used by other applications.
+services:
+  ippure-proxy:
+    image: metacubex/mihomo:${IPPURE_MIHOMO_TAG:-v1.19.27}
+    restart: unless-stopped
+    networks:
+      - ippure
+    volumes:
+      - ./deploy/ippure-mihomo.yaml:/root/.config/mihomo/config.yaml:ro
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  node-explorer:
+    networks:
+      - default
+      - ippure
+    depends_on:
+      ippure-proxy:
+        condition: service_started
+    environment:
+      IPPURE_CONTROLLER: http://ippure-proxy:9090
+      IPPURE_PROXY_URL: http://ippure-proxy:7890
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE: /usr/bin/chromium
+
+networks:
+  ippure:
