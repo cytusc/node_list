@@ -1,0 +1,23 @@
+services:
+  node-explorer:
+    image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-v1.0.0}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3001}:3001"
+    environment:
+      SUBS_CHECK_DIR: /data/sub
+    volumes:
+      - type: bind
+        source: ${SUBS_CHECK_HOST_DIR:-/mnt/d/code/sub}
+        target: /data/sub
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
