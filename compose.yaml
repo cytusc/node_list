@@ -3,6 +3,11 @@ services:
     image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-v1.0.0}
     restart: unless-stopped
     init: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3001}:3001"
     environment:

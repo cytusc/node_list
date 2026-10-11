@@ -1,0 +1,11 @@
+[Unit]
+Description=Update Node Explorer from the latest GitHub release
+Requires=node-list.service
+After=node-list.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/node_list
+ExecStart=/usr/bin/bash /root/node_list/deploy/update.sh
+TimeoutStartSec=600

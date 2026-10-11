@@ -65,6 +65,30 @@ docker compose up -d
 
 更新时设置新 `IMAGE_TAG` 后再次执行 `docker compose pull` 和 `docker compose up -d`；回滚时设置之前的版本标签并执行相同命令。镜像不包含用户结果和订阅文件。
 
+### Linux 开机启动与定时更新
+
+将项目放在 `/root/node_list`，在 `.env` 设置实际数据目录、绑定地址和端口，例如：
+
+```dotenv
+SUBS_CHECK_HOST_DIR=/path/to/subs-check
+BIND_ADDRESS=127.0.0.1
+WEB_PORT=3100
+```
+
+在 `release.env` 写入 `IMAGE_TAG=v1.0.0`，然后执行：
+
+```bash
+docker compose --env-file .env --env-file release.env pull
+cp deploy/node-list.service deploy/node-list-update.service deploy/node-list-update.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now node-list.service node-list-update.timer
+systemctl start node-list-update.service
+systemctl list-timers node-list-update.timer
+journalctl -u node-list-update.service
+```
+
+定时器每小时检查 GitHub 最新正式 Release，增加最多 5 分钟随机延迟。新版本先拉取镜像，等待 Docker 健康检查通过后才记录版本；启动或健康检查失败时恢复旧版本。检查失败不改变当前容器。更新仅替换镜像，不自动拉取或执行远端仓库脚本。容器日志最多保留 3 个 10 MB 文件。
+
 ## 数据含义
 
 - 节点数量是本轮保留节点数，并非输入总数；无成功率、延迟和历史趋势。
