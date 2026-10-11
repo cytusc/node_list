@@ -1,0 +1,110 @@
+export type MediaTag = {
+  platform?: string;
+  tag?: string;
+  Platform?: string;
+  Tag?: string;
+};
+export type NodeRecord = {
+  name: string;
+  baseName?: string;
+  type: string;
+  server: string;
+  port: string;
+  sni?: string;
+  tls: boolean;
+  reality?: boolean;
+  udp: boolean;
+  network: string;
+  speed: number;
+  country?: string;
+  ip?: string;
+  ipRisk?: string;
+  subTag?: string;
+  media?: MediaTag[];
+  details?: { k: string; v: string }[];
+};
+export type Snapshot = {
+  checkedAt?: string;
+  speedTest: boolean;
+  mediaCheck: boolean;
+  nodes: NodeRecord[];
+};
+export type Download = {
+  id: string;
+  label: string;
+  available: boolean;
+  updatedAt?: string;
+};
+export const platforms: Record<string, string> = {
+  openai: "OpenAI",
+  netflix: "Netflix",
+  disney: "Disney+",
+  youtube: "YouTube",
+  gemini: "Gemini",
+  claude: "Claude",
+  spotify: "Spotify",
+  tiktok: "TikTok",
+};
+const regions = new Intl.DisplayNames(["zh-CN"], { type: "region" });
+export function countryName(code?: string) {
+  if (!code || code === "unknown") return "未知地区";
+  try {
+    return regions.of(code.toUpperCase()) || code;
+  } catch {
+    return code;
+  }
+}
+export function plainName(n: NodeRecord) {
+  return (
+    (n.baseName || n.name).replace(/[\u{1F1E6}-\u{1F1FF}]/gu, "").trim() ||
+    n.name
+  );
+}
+export function speedParts(speed: number) {
+  return speed > 0
+    ? {
+        value: speed >= 1024 ? (speed / 1024).toFixed(2) : String(speed),
+        unit: speed >= 1024 ? "MB/s" : "KB/s",
+      }
+    : { value: "—", unit: "" };
+}
+export function timeLabel(date?: string) {
+  return date && Number.isFinite(Date.parse(date))
+    ? new Intl.DateTimeFormat("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+        timeZone: "Asia/Shanghai",
+      }).format(new Date(date))
+    : "暂无检测时间";
+}
+export function mediaPlatform(m: MediaTag) {
+  return m.platform || m.Platform || "";
+}
+export function mediaValue(m: MediaTag) {
+  return m.tag || m.Tag || "";
+}
+export const detailLabels: Record<string, string> = {
+  cipher: "加密方式",
+  flow: "流控",
+  "client-fingerprint": "客户端指纹",
+  alpn: "ALPN",
+  "skip-cert-verify": "跳过证书验证",
+  "ws-path": "WebSocket 路径",
+  "ws-host": "WebSocket Host",
+  "grpc-service-name": "gRPC 服务名",
+  "h2-path": "HTTP/2 路径",
+  "http-path": "HTTP 路径",
+  plugin: "插件",
+  obfs: "混淆",
+  protocol: "协议参数",
+  up: "上行带宽",
+  down: "下行带宽",
+  ports: "端口跳跃",
+  "congestion-controller": "拥塞控制",
+  "udp-relay-mode": "UDP 中继模式",
+  version: "版本",
+};
