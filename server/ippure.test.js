@@ -1,10 +1,47 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { createStore } from "./store.js";
-import { startIPPureCollector, queryIPPure } from "./ippure.js";
+import {
+  startIPPureCollector,
+  queryIPPure,
+  resolveExitIP,
+} from "./ippure.js";
+
+test("exit IP is read from IP.SB through the configured target proxy", async (t) => {
+  const controller = createServer((_request, response) => {
+    response.writeHead(204).end();
+  });
+  await new Promise((resolve) => controller.listen(0, "127.0.0.1", resolve));
+  t.after(() => controller.close());
+  const controllerUrl = `http://127.0.0.1:${controller.address().port}`;
+  const proxyUrl = "http://127.0.0.1:7890";
+  const urls = [];
+  const ip = await resolveExitIP({
+    controller: controllerUrl,
+    proxyUrl,
+    proxy: { name: "target", type: "http", server: "proxy.example.org", port: 8080 },
+    signal: new AbortController().signal,
+    launchBrowser: async ({ proxy }) => {
+      assert.deepEqual(proxy, { server: proxyUrl });
+      return {
+        newPage: async () => ({
+          goto: async (url) => {
+            urls.push(url);
+            return { ok: () => true };
+          },
+          locator: () => ({ innerText: async () => "203.0.113.17\n" }),
+        }),
+        close: async () => {},
+      };
+    },
+  });
+  assert.equal(ip, "203.0.113.17");
+  assert.deepEqual(urls, ["https://api.ip.sb/ip"]);
+});
 
 test("IPPure saves per-node results, retries failures without rechecking successes and preserves batches after reopen", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "ippure-test-"));
@@ -147,7 +184,12 @@ test("IPPure rotates successful transports, rescues exhausted failures and saves
   );
   const snapshot = { id: 1, nodes };
   for (const node of nodes.slice(0, 2)) {
-    node.ippure = { status: "success", asnOrganization: "Existing", score: 20 };
+    node.ippure = {
+      status: "success",
+      exitIPSource: "ip.sb",
+      asnOrganization: "Existing",
+      score: 20,
+    };
   }
   nodes[2].ippure = {
     status: "error",
@@ -205,8 +247,16 @@ test("IPPure uses different successful nodes on consecutive queries", async (t) 
     port: 443,
   }));
   for (const node of nodes.slice(0, 2))
-    node.ippure = { status: "success", asnOrganization: "Existing" };
-  nodes[2].ippure = { status: "error", ip: "74.82.60.52" };
+    node.ippure = {
+      status: "success",
+      exitIPSource: "ip.sb",
+      asnOrganization: "Existing",
+    };
+  nodes[2].ippure = {
+    status: "error",
+    ip: "74.82.60.52",
+    exitIPSource: "ip.sb",
+  };
   await writeFile(
     path.join(dir, "output", "all.yaml"),
     JSON.stringify({ proxies: nodes }),
@@ -236,6 +286,61 @@ test("IPPure uses different successful nodes on consecutive queries", async (t) 
     ["a", "74.82.60.52"],
     ["b", "192.0.2.4"],
   ]);
+});
+
+test("IPPure refreshes legacy results and reuses only an IP.SB-verified exit IP", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ippure-exit-source-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(path.join(dir, "output"));
+  const node = {
+    name: "target",
+    type: "ss",
+    server: "node.example.org",
+    port: 8388,
+    ippure: {
+      status: "success",
+      queryMode: "specified-exit",
+      ip: "8.8.8.8",
+      asnOrganization: "Legacy result",
+      score: 7,
+    },
+  };
+  await writeFile(
+    path.join(dir, "output", "all.yaml"),
+    JSON.stringify({ proxies: [{ ...node, password: "private" }] }),
+  );
+  const snapshot = { id: 1, nodes: [node] };
+  const calls = [];
+  const collector = startIPPureCollector({
+    subDir: dir,
+    intervalMs: 999999,
+    resolveIP: async ({ proxy }) => {
+      calls.push(["resolve", proxy.name]);
+      return "203.0.113.7";
+    },
+    store: {
+      get: async () => structuredClone(snapshot),
+      saveIPPure: async (_id, index, result) => {
+        node.ippure = result;
+      },
+    },
+    query: async ({ target }) => {
+      calls.push(["query", target]);
+      return {
+        ip: target,
+        asnOrganization: "Verified result",
+        score: 12,
+      };
+    },
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.deepEqual(calls, [
+    ["resolve", "target"],
+    ["query", "203.0.113.7"],
+  ]);
+  assert.equal(node.ippure.ip, "203.0.113.7");
+  assert.equal(node.ippure.exitIPSource, "ip.sb");
 });
 
 test("IPPure refuses a hostname as the explicit query target before changing proxy configuration", async () => {
