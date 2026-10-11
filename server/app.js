@@ -15,6 +15,7 @@ export const downloads = {
 export function createApp({ subDir, resultsFile, distDir } = {}) {
   const app = express();
   app.disable("x-powered-by");
+  app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
   const snapshotPath =
     resultsFile ||
     path.join(subDir, "config", "cache", "config", "results.json");
@@ -55,18 +56,14 @@ export function createApp({ subDir, resultsFile, distDir } = {}) {
       });
     } catch (error) {
       if (error.code === "ENOENT")
-        return res
-          .status(404)
-          .json({
-            error: "尚未找到检测结果，请确认 subs-check 已完成至少一轮检测。",
-            code: "NO_RESULTS",
-          });
-      res
-        .status(503)
-        .json({
-          error: "检测结果暂时无法读取，请稍后刷新重试。",
-          code: "READ_FAILED",
+        return res.status(404).json({
+          error: "尚未找到检测结果，请确认 subs-check 已完成至少一轮检测。",
+          code: "NO_RESULTS",
         });
+      res.status(503).json({
+        error: "检测结果暂时无法读取，请稍后刷新重试。",
+        code: "READ_FAILED",
+      });
     }
   });
   app.get("/api/downloads", async (_req, res) => {
@@ -97,11 +94,9 @@ export function createApp({ subDir, resultsFile, distDir } = {}) {
     res.set("Cache-Control", "no-store");
     res.download(path.join(subDir, "output", item.file), item.file, (error) => {
       if (error && !res.headersSent)
-        res
-          .status(404)
-          .json({
-            error: "该订阅文件尚未生成，请等待 subs-check 完成检测与转换。",
-          });
+        res.status(404).json({
+          error: "该订阅文件尚未生成，请等待 subs-check 完成检测与转换。",
+        });
     });
   });
   app.use("/api", (_req, res) =>

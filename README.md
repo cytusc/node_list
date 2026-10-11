@@ -37,6 +37,34 @@ npm start
 
 打开 http://localhost:3001 。服务默认仅监听本机。`API_PORT` 可修改后端端口；开发时需同步修改 Vite 代理地址。结果和节点凭据不复制到前端仓库，也不进入构建产物。
 
+## 容器部署与发布
+
+GitHub Actions 在推送 `v*.*.*` 标签后构建并发布 `ghcr.io/cytusc/node_list`，支持 `linux/amd64` 和 `linux/arm64`。流程执行后端测试、生产构建和已发布镜像的启动检查，再创建 GitHub Release 与生产文件压缩包。生产文件包解压后需执行 `npm ci --omit=dev` 才能使用 `npm start`。
+
+在安装 Docker Compose 的机器上运行：
+
+```bash
+SUBS_CHECK_HOST_DIR=/mnt/d/code/sub IMAGE_TAG=v1.0.0 docker compose pull
+SUBS_CHECK_HOST_DIR=/mnt/d/code/sub IMAGE_TAG=v1.0.0 docker compose up -d
+docker compose ps
+curl --fail http://127.0.0.1:3001/api/health
+```
+
+PowerShell / Docker Desktop 可设置：
+
+```powershell
+$env:SUBS_CHECK_HOST_DIR = 'D:/code/sub'
+$env:IMAGE_TAG = 'v1.0.0'
+docker compose pull
+docker compose up -d
+```
+
+打开 http://localhost:3001 。目录必须已存在，容器只读挂载整个目录，以便读取 subs-check 后续替换的结果文件。健康检查仅表示 Web 服务正常，检测结果尚未生成时页面仍会显示空状态。Linux 挂载文件须允许容器内非 root 用户读取。
+
+默认只绑定 `127.0.0.1`。需要局域网访问时设置 `BIND_ADDRESS=0.0.0.0`；`WEB_PORT` 修改宿主机端口。页面可下载含连接凭据的完整订阅，公网部署应通过带鉴权的 HTTPS 反向代理访问。
+
+更新时设置新 `IMAGE_TAG` 后再次执行 `docker compose pull` 和 `docker compose up -d`；回滚时设置之前的版本标签并执行相同命令。镜像不包含用户结果和订阅文件。
+
 ## 数据含义
 
 - 节点数量是本轮保留节点数，并非输入总数；无成功率、延迟和历史趋势。
