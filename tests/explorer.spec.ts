@@ -25,7 +25,7 @@ test("loads real local results with no browser errors", async ({
 }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  const response = await request.get("/api/results");
+  const response = await request.get("/api/results?view=aggregate");
   test.skip(!response.ok(), "Local subs-check installation is not available");
   const data = await response.json();
   await page.goto("/");
@@ -50,7 +50,7 @@ test("loads real local results with no browser errors", async ({
 
 test.describe("interactions and data states", () => {
   test.beforeEach(async ({ page }) => {
-    await page.route("**/api/results", (route) =>
+    await page.route("**/api/results?view=aggregate", (route) =>
       route.fulfill({ json: snapshot }),
     );
     await page.route("**/api/history", (route) =>
@@ -72,54 +72,41 @@ test.describe("interactions and data states", () => {
     await expect(page.locator(".title-count")).toHaveText("63");
   });
 
-  test("switches between saved history and latest results", async ({
+  test("shows aggregated nodes and refreshes without a batch selector", async ({
     page,
   }) => {
-    await page.route("**/api/history", (route) =>
-      route.fulfill({
-        json: {
-          items: [
-            {
-              id: 1,
-              checkedAt: "2026-10-10T00:00:00Z",
-              importedAt: "2026-10-10T00:00:00Z",
-              nodeCount: 1,
-            },
-          ],
-          total: 1,
-        },
-      }),
-    );
-    await page.route("**/api/results?snapshot=1", (route) =>
+    await page.route("**/api/results?view=aggregate", (route) =>
       route.fulfill({
         json: {
           ...snapshot,
-          id: 1,
-          checkedAt: "2026-10-10T00:00:00Z",
+          batchCount: 2,
           nodes: [
             {
               ...snapshot.nodes[0],
+              checkedAt: "2026-10-10T00:00:00Z",
               name: "Archived node",
               baseName: "Archived node",
             },
+            snapshot.nodes[1],
           ],
         },
       }),
     );
     await page.getByRole("button", { name: "刷新结果" }).click();
-    await expect(page.getByLabel("检测批次").locator("option")).toHaveCount(2);
-    await page.getByLabel("检测批次").selectOption("1");
-    await expect(page.locator(".title-count")).toHaveText("1");
-    await expect(page.locator(".node-row")).toContainText("Archived node");
-    await expect(page.locator(".snapshot-time")).toContainText("历史检测");
+    await expect(page.locator(".title-count")).toHaveText("2");
+    await expect(page.getByLabel("检测批次")).toHaveCount(0);
+    await expect(page.getByText(/已聚合 2 轮检测/)).toBeVisible();
     await expect(
       page.getByText("订阅下载仍使用最新生成的文件。"),
     ).toBeVisible();
+    await page
+      .getByRole("textbox", { name: "搜索节点", exact: true })
+      .fill("Archived node");
+    await page.locator(".node-name").first().click();
+    await expect(page.getByRole("dialog")).toContainText("2026/10/10 08:00");
+    await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "刷新结果" }).click();
-    await expect(page.getByLabel("检测批次")).toHaveValue("1");
-    await expect(page.locator(".title-count")).toHaveText("1");
-    await page.getByLabel("检测批次").selectOption("");
-    await expect(page.locator(".title-count")).toHaveText("63");
+    await expect(page.locator(".title-count")).toHaveText("2");
   });
 
   test("sorts, paginates, searches and distinguishes no matches", async ({
@@ -184,7 +171,7 @@ test.describe("interactions and data states", () => {
   });
 
   test("retains previous results after refresh fails", async ({ page }) => {
-    await page.route("**/api/results", (route) =>
+    await page.route("**/api/results?view=aggregate", (route) =>
       route.fulfill({
         status: 503,
         json: { error: "读取失败", code: "READ_FAILED" },
@@ -198,12 +185,12 @@ test.describe("interactions and data states", () => {
   });
 
   test("handles zero nodes and disabled speed tests", async ({ page }) => {
-    await page.route("**/api/results", (route) =>
+    await page.route("**/api/results?view=aggregate", (route) =>
       route.fulfill({ json: { ...snapshot, speedTest: false, nodes: [] } }),
     );
     await page.getByRole("button", { name: "刷新结果" }).click();
     await expect(
-      page.getByRole("heading", { name: "本轮没有保留节点" }),
+      page.getByRole("heading", { name: "暂无保留节点" }),
     ).toBeVisible();
     await expect(page.getByLabel("最低速度，MB/s")).toHaveCount(0);
     await expect(page.locator(".summary-line")).toContainText("测速未开启");
@@ -213,7 +200,7 @@ test.describe("interactions and data states", () => {
     await expect(
       page.getByRole("button", { name: "服务解锁筛选" }),
     ).toHaveCount(0);
-    await page.route("**/api/results", (route) =>
+    await page.route("**/api/results?view=aggregate", (route) =>
       route.fulfill({
         json: {
           ...snapshot,

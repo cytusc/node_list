@@ -179,3 +179,109 @@ test("database outages return JSON errors without leaking connection details", a
     assert.equal(JSON.stringify(body).includes("private"), false);
   }
 });
+
+test("aggregates all batches by connection, keeping latest checks and historical-only nodes", async (t) => {
+  const f = await fixture(t);
+  const shared = {
+    name: "Original",
+    type: "vless",
+    server: "node.example.org",
+    port: "443",
+    network: "ws",
+    tls: true,
+    details: [
+      { k: "ws-path", v: "/proxy" },
+      { k: "alpn", v: "h2" },
+    ],
+  };
+  const save = async (snapshot) => {
+    await writeFile(f.resultsFile, JSON.stringify(snapshot));
+    return (await f.get("/api/results")).json();
+  };
+  const first = await save({
+    checkedAt: "2026-10-10T00:00:00Z",
+    speedTest: true,
+    mediaCheck: true,
+    nodes: [
+      {
+        ...shared,
+        speed: 1000,
+        media: [{ platform: "openai", tag: "US" }],
+        password: "private",
+      },
+      {
+        ...shared,
+        server: "archive.example.org",
+        name: "Archived",
+        speed: 500,
+      },
+      {
+        ...shared,
+        details: [{ k: "ws-path", v: "/other" }],
+        name: "Other transport",
+      },
+    ],
+  });
+  const latest = await save({
+    checkedAt: "2026-10-11T00:00:00Z",
+    speedTest: false,
+    mediaCheck: false,
+    nodes: [
+      {
+        ...shared,
+        name: "Renamed",
+        port: 443,
+        details: [...shared.details].reverse(),
+        speed: 0,
+        ip: "192.0.2.1",
+      },
+    ],
+  });
+  // A late import of an older check must not replace a newer measurement.
+  await save({
+    checkedAt: "2026-10-09T00:00:00Z",
+    nodes: [{ ...shared, speed: 2000 }],
+  });
+  let response = await f.get("/api/results?view=aggregate");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const result = await response.json();
+  assert.equal(result.batchCount, 3);
+  assert.equal(result.nodes.length, 3);
+  assert.equal(result.checkedAt, latest.checkedAt);
+  const updated = result.nodes.find((node) => node.name === "Renamed");
+  assert.equal(updated.speed, 0);
+  assert.equal(updated.mediaCheck, false);
+  assert.equal(updated.snapshotId, latest.id);
+  assert.equal(updated.checkedAt, latest.checkedAt);
+  assert.equal(updated.media, undefined);
+  assert.equal(
+    result.nodes.find((node) => node.name === "Archived").snapshotId,
+    first.id,
+  );
+  assert.equal(result.speedTest, true);
+  assert.equal(result.mediaCheck, true);
+  assert.equal(JSON.stringify(result).includes("private"), false);
+  await rm(f.resultsFile);
+  const saved = await (await f.get("/api/results?view=aggregate")).json();
+  assert.equal(saved.nodes.length, 3);
+  assert.equal(saved.sourceWarning, "NO_RESULTS");
+  assert.equal(
+    (await f.get("/api/results?view=aggregate&snapshot=1")).status,
+    400,
+  );
+  assert.equal((await f.get("/api/results?view=unknown")).status, 400);
+});
+
+test("empty aggregated results distinguish no history from empty saved batches", async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.get("/api/results?view=aggregate")).status, 404);
+  await writeFile(
+    f.resultsFile,
+    JSON.stringify({ nodes: [], speedTest: true }),
+  );
+  const result = await (await f.get("/api/results?view=aggregate")).json();
+  assert.deepEqual(result.nodes, []);
+  assert.equal(result.batchCount, 1);
+  assert.equal(result.speedTest, true);
+});
