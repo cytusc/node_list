@@ -155,9 +155,11 @@ test.describe("interactions and data states", () => {
     page,
   }) => {
     await page.getByRole("button", { name: "显示列" }).click();
-    await page.getByRole("menuitemcheckbox", { name: "连接特性" }).click();
+    await page
+      .getByRole("menuitemcheckbox", { name: "IP 来源", exact: true })
+      .click();
     await page.keyboard.press("Escape");
-    await expect(page.locator('th[data-column="features"]')).toHaveCount(0);
+    await expect(page.locator('th[data-column="ipSource"]')).toHaveCount(0);
     await page.route("**/api/download/clash", (route) =>
       route.fulfill({ contentType: "application/yaml", body: "proxies: []\n" }),
     );

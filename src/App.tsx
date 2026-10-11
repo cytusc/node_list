@@ -242,7 +242,6 @@ const columnLabels: Record<string, string> = {
   country: "地区",
   name: "节点 / 服务器",
   type: "协议 / 传输",
-  features: "连接特性",
   media: "服务解锁",
   speed: "下载速度",
   ...Object.fromEntries(
@@ -251,9 +250,8 @@ const columnLabels: Record<string, string> = {
 };
 const columnWidths: Record<string, number> = {
   country: 130,
-  name: 240,
+  name: 155,
   type: 130,
-  features: 120,
   asnOrganization: 160,
   ipSource: 100,
   ipAttributes: 110,
@@ -504,12 +502,6 @@ export default function App() {
             <small>{row.original.network?.toUpperCase() || "—"}</small>
           </div>
         ),
-      },
-      {
-        id: "features",
-        header: "连接特性",
-        enableSorting: false,
-        cell: ({ row }) => <Features node={row.original} />,
       },
       ...ippureMetrics.map(({ key, label, column }): ColumnDef<NodeRecord> => ({
         id: column,
