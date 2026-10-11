@@ -46,8 +46,8 @@ GitHub Actions 在推送 `v*.*.*` 标签后构建并发布 `ghcr.io/cytusc/node_
 在安装 Docker Compose 的机器上运行：
 
 ```bash
-SUBS_CHECK_HOST_DIR=/mnt/d/code/sub IMAGE_TAG=v1.2.0 docker compose pull
-SUBS_CHECK_HOST_DIR=/mnt/d/code/sub IMAGE_TAG=v1.2.0 docker compose up -d
+SUBS_CHECK_HOST_DIR=/mnt/d/code/sub IMAGE_TAG=v1.2.1 docker compose pull
+SUBS_CHECK_HOST_DIR=/mnt/d/code/sub IMAGE_TAG=v1.2.1 docker compose up -d
 docker compose ps
 curl --fail http://127.0.0.1:3001/api/health
 ```
@@ -56,7 +56,7 @@ PowerShell / Docker Desktop 可设置：
 
 ```powershell
 $env:SUBS_CHECK_HOST_DIR = 'D:/code/sub'
-$env:IMAGE_TAG = 'v1.2.0'
+$env:IMAGE_TAG = 'v1.2.1'
 docker compose pull
 docker compose up -d
 ```
@@ -93,7 +93,7 @@ WEB_PORT=3100
 在 `release.env` 写入以下版本：
 
 ```dotenv
-IMAGE_TAG=v1.2.0
+IMAGE_TAG=v1.2.1
 SUBS_CHECK_TAG=1.6.5
 ```
 

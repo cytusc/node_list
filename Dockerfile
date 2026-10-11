@@ -1,4 +1,6 @@
-FROM node:22-alpine AS build
+# Frontend assets and server sources are platform-independent. Compile them on
+# the builder host to avoid running the Vite/Rolldown toolchain under QEMU.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
