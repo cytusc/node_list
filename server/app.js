@@ -2,6 +2,7 @@ import express from "express";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { createStore } from "./store.js";
+import { startIPPureCollector } from "./ippure.js";
 
 export const downloads = {
   clash: { file: "all.yaml", label: "Clash 节点", type: "application/yaml" },
@@ -20,6 +21,7 @@ export function createApp({
   databasePath,
   store: configuredStore,
   importIntervalMs = 5000,
+  ippure,
 } = {}) {
   const app = express();
   app.disable("x-powered-by");
@@ -32,8 +34,12 @@ export function createApp({
   void sync();
   const timer = setInterval(sync, importIntervalMs);
   timer.unref();
+  const collector = ippure
+    ? startIPPureCollector({ store, subDir, ...ippure })
+    : null;
   app.locals.close = async () => {
     clearInterval(timer);
+    await collector?.close();
     await sync();
     await store.close();
   };
@@ -87,7 +93,11 @@ export function createApp({
       const snapshot = aggregate
         ? await store.aggregate()
         : await store.get(id === undefined ? undefined : Number(id));
-      if (snapshot) return res.json(snapshot);
+      if (snapshot)
+        return res.json({
+          ...snapshot,
+          ippureCollector: collector?.status() || { enabled: false },
+        });
       if (id !== undefined)
         return res
           .status(404)

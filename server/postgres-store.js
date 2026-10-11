@@ -23,6 +23,11 @@ export async function createPostgresStore(config) {
       imported_at TEXT NOT NULL,
       node_count INTEGER NOT NULL,
       payload TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS node_explorer_ippure_results (
+      snapshot_id INTEGER NOT NULL REFERENCES node_explorer_snapshots(id),
+      node_index INTEGER NOT NULL, payload TEXT NOT NULL,
+      PRIMARY KEY (snapshot_id, node_index)
     )`);
   } catch (error) {
     await pool.end();
@@ -73,6 +78,21 @@ export async function createPostgresStore(config) {
         "SELECT COUNT(*) AS count FROM node_explorer_snapshots",
       );
       return { items: result.rows, total: Number(count.rows[0].count) };
+    },
+    async enrichments(id) {
+      return (
+        await pool.query(
+          'SELECT snapshot_id AS "snapshotId", node_index AS "nodeIndex", payload FROM node_explorer_ippure_results' +
+            (id === undefined ? "" : " WHERE snapshot_id = $1"),
+          id === undefined ? [] : [id],
+        )
+      ).rows;
+    },
+    async saveIPPure(id, index, result) {
+      await pool.query(
+        "INSERT INTO node_explorer_ippure_results VALUES ($1, $2, $3) ON CONFLICT(snapshot_id, node_index) DO UPDATE SET payload = excluded.payload",
+        [id, index, JSON.stringify(result)],
+      );
     },
     close() {
       return pool.end();

@@ -1,0 +1,9 @@
+mixed-port: 7890
+allow-lan: true
+bind-address: "*"
+external-controller: 0.0.0.0:9090
+mode: rule
+log-level: warning
+# Fail closed before a node has been loaded. No host ports are published.
+rules:
+  - MATCH,REJECT

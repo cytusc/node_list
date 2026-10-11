@@ -47,6 +47,15 @@ test(
     }
     const reopened = await createPostgresStore(config);
     const old = await reopened.get();
+    const ippure = {
+      status: "success",
+      score: 32,
+      label: "中性",
+      checkedAt: "2026-10-11T00:00:00Z",
+      attempts: 1,
+    };
+    await reopened.saveIPPure(old.id, 0, ippure);
+    assert.deepEqual((await reopened.get(old.id)).nodes[0].ippure, ippure);
     assert.equal(old.nodes[0].name, "Archived");
     const app = createApp({ subDir: dir, resultsFile: file, store: reopened });
     const server = app.listen(0, "127.0.0.1");
@@ -75,6 +84,7 @@ test(
     assert.equal(aggregated.batchCount, 2);
     assert.equal(aggregated.nodes[0].name, "Archived");
     assert.equal(aggregated.nodes[0].snapshotId, old.id);
+    assert.deepEqual(aggregated.nodes[0].ippure, ippure);
     await rm(file);
     const saved = await (await get(`/api/results?snapshot=${old.id}`)).json();
     assert.equal(saved.nodes[0].name, "Archived");

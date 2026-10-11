@@ -4,7 +4,21 @@ export type MediaTag = {
   Platform?: string;
   Tag?: string;
 };
+export type IPPureResult = {
+  status: "success" | "error";
+  checkedAt: string;
+  attempts: number;
+  error?: string;
+  ip?: string;
+  humanPercent?: number | null;
+  botPercent?: number | null;
+  source?: string;
+  attributes?: string[];
+  score?: number;
+  label?: string;
+};
 export type NodeRecord = {
+  ippure?: IPPureResult;
   checkedAt?: string;
   snapshotId?: number;
   speedTest?: boolean;
@@ -34,6 +48,11 @@ export type HistoryItem = {
   nodeCount: number;
 };
 export type Snapshot = {
+  ippureCollector?: {
+    enabled: boolean;
+    running?: boolean;
+    error?: string | null;
+  };
   id?: number;
   batchCount?: number;
   sourceWarning?: string | null;

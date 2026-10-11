@@ -37,6 +37,11 @@ export function createStore(databasePath = ":memory:") {
       imported_at TEXT NOT NULL,
       node_count INTEGER NOT NULL,
       payload TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS ippure_results (
+      snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+      node_index INTEGER NOT NULL, payload TEXT NOT NULL,
+      PRIMARY KEY (snapshot_id, node_index)
     );`);
   return createSnapshotStore({
     insert({ fingerprint, snapshot, payload }) {
@@ -84,6 +89,24 @@ export function createStore(databasePath = ":memory:") {
           .count,
       };
     },
+    enrichments(id) {
+      return id === undefined
+        ? db
+            .prepare(
+              "SELECT snapshot_id AS snapshotId, node_index AS nodeIndex, payload FROM ippure_results",
+            )
+            .all()
+        : db
+            .prepare(
+              "SELECT snapshot_id AS snapshotId, node_index AS nodeIndex, payload FROM ippure_results WHERE snapshot_id = ?",
+            )
+            .all(id);
+    },
+    saveIPPure(id, index, result) {
+      db.prepare(
+        "INSERT INTO ippure_results VALUES (?, ?, ?) ON CONFLICT(snapshot_id, node_index) DO UPDATE SET payload = excluded.payload",
+      ).run(id, index, JSON.stringify(result));
+    },
     close() {
       db.close();
     },
@@ -122,7 +145,17 @@ export function createSnapshotStore(adapter) {
       throw error;
     }
   }
+  async function hydrate(row, saved) {
+    if (!row) return null;
+    const snapshot = { ...JSON.parse(row.payload), id: row.id, sourceWarning };
+    for (const item of saved ?? (await adapter.enrichments(row.id))) {
+      if (snapshot.nodes[item.nodeIndex])
+        snapshot.nodes[item.nodeIndex].ippure = JSON.parse(item.payload);
+    }
+    return snapshot;
+  }
   return {
+    saveIPPure: (id, index, result) => adapter.saveIPPure(id, index, result),
     // Requests and the background collector share a single in-flight import.
     sync(file) {
       if (!pending)
@@ -133,28 +166,33 @@ export function createSnapshotStore(adapter) {
     },
     async get(id) {
       const row = await adapter.get(id);
-      return row
-        ? { ...JSON.parse(row.payload), id: row.id, sourceWarning }
-        : null;
+      return hydrate(row);
     },
     async aggregate() {
       const rows = await adapter.all();
       if (!rows.length) return null;
-      const batches = rows
-        .map((row) => ({
-          ...JSON.parse(row.payload),
-          id: row.id,
-          importedAt: row.importedAt,
-        }))
-        .sort((a, b) => {
-          const time = (batch) => {
-            const checked = Date.parse(batch.checkedAt);
-            return Number.isFinite(checked)
-              ? checked
-              : Date.parse(batch.importedAt) || 0;
-          };
-          return time(b) - time(a) || b.id - a.id;
-        });
+      const enrichments = new Map();
+      for (const item of await adapter.enrichments()) {
+        if (!enrichments.has(item.snapshotId))
+          enrichments.set(item.snapshotId, []);
+        enrichments.get(item.snapshotId).push(item);
+      }
+      const batches = (
+        await Promise.all(
+          rows.map(async (row) => ({
+            ...(await hydrate(row, enrichments.get(row.id) || [])),
+            importedAt: row.importedAt,
+          })),
+        )
+      ).sort((a, b) => {
+        const time = (batch) => {
+          const checked = Date.parse(batch.checkedAt);
+          return Number.isFinite(checked)
+            ? checked
+            : Date.parse(batch.importedAt) || 0;
+        };
+        return time(b) - time(a) || b.id - a.id;
+      });
       const nodes = new Map();
       for (const batch of batches) {
         for (const node of batch.nodes) {

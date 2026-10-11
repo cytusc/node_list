@@ -35,6 +35,16 @@ if (process.env.PGHOST) {
 const app = createApp({
   store,
   subDir,
+  ippure:
+    process.env.IPPURE_CONTROLLER && process.env.IPPURE_PROXY_URL
+      ? {
+          controller: process.env.IPPURE_CONTROLLER,
+          proxyUrl: process.env.IPPURE_PROXY_URL,
+          secret: process.env.IPPURE_CONTROLLER_SECRET,
+          executablePath:
+            process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || "/usr/bin/chromium",
+        }
+      : undefined,
   resultsFile: process.env.RESULTS_FILE,
   databasePath: path.resolve(
     process.env.DATABASE_PATH || path.join(root, "data", "nodes.sqlite"),

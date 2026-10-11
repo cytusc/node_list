@@ -170,3 +170,19 @@ TEST_POSTGRES_URL=postgresql://user:password@localhost/test_db npm test
 shadcn/ui 组件源码位于 `src/components/ui`，来源于官方 `new-york-v4` registry，保留其 MIT 许可证。
 
 `GET /api/results?view=aggregate` 返回聚合节点和 `batchCount`，每个节点带有 `checkedAt`、`snapshotId` 及检测功能状态。原有 `/api/results`（最新批次）、`/api/results?snapshot=<id>` 和 `/api/history` 接口仍可使用。
+
+### IPPure 逐节点检测
+
+在 `.env` 的 `COMPOSE_FILE` 末尾追加 `:compose.ippure.yaml`，例如：
+
+```dotenv
+COMPOSE_FILE=compose.yaml:compose.subs-check.yaml:compose.ippure.yaml
+```
+
+使用包含本次改动的页面镜像，然后运行 `deploy/compose.sh up -d`。额外的 Mihomo 容器只用于 IPPure，控制端口和代理端口不映射到宿主机。页面镜像包含 Chromium，检测时的内存占用会增加。不要将检测器连接到其他应用正在使用的 Mihomo，因为采集器会替换其完整配置。
+
+采集器每 30 秒检查当前批次，读取 `output/all.yaml` 中的完整配置，按节点名、协议、服务器、端口匹配，逐个切换代理，用 Chromium 访问 `https://ippure.com/`，展开 ASN 并提取人机流量比、IP 来源、IP 属性、IPPure 系数及文字等级。所有页面请求走该节点，无法连接时不会回退直连。无 ASN 流量统计时显示“统计数据不足”；0、15、25、40、50、70、100 是展示刻度，不是额外检测字段。系数越低越纯净。
+
+结果独立关联原批次和节点，保存到 SQLite/PostgreSQL；不会改变原始快照的去重指纹。列表可按系数排序，移动端显示系数，节点详情展示全部指标和检测时间。刷新页面可读取采集进度。成功结果不重复请求；失败间隔 30 分钟重试，最多 3 次，重启不会重置次数。新检测批次重新采集，聚合列表显示节点最新批次的 IPPure 结果。旧批次仅保留已采集结果，已被覆盖的完整代理配置不会从历史展示字段重建。订阅尚未生成或无法匹配的节点等待后续检查。
+
+非容器运行时设置 `IPPURE_CONTROLLER`、`IPPURE_PROXY_URL`、`PLAYWRIGHT_CHROMIUM_EXECUTABLE`；控制器配置了密钥时同时设置 `IPPURE_CONTROLLER_SECRET`。仅设置其中一个地址不会启动采集。多个页面实例不要共用一个检测代理，以免切换节点相互干扰。IPPure 验证页面、限流、节点故障或页面结构变化均可能导致检测失败，页面会保留失败状态。
