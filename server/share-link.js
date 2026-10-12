@@ -1,6 +1,6 @@
 // Convert archived subscriptions locally. Credentials never leave the detector
 // and the original link remains the stable connection identity in the store.
-export const SHARE_LINK_VERSION = 1;
+export const SHARE_LINK_VERSION = 2;
 
 export class ShareLinkError extends Error {
   constructor() {
@@ -15,6 +15,8 @@ const list = (value) =>
     .split(",")
     .filter(Boolean);
 const uuid = (value) => {
+  if (/^[0-9a-f]{32}$/i.test(value || ""))
+    value = `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
   if (
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
       value || "",

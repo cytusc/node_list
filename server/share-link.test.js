@@ -48,8 +48,9 @@ test("WebSocket, HTTP upgrade, XHTTP and HTML-escaped links preserve transport o
 });
 
 test("VMess JSON links preserve cipher, alterId, TLS, and WebSocket configuration", () => {
+  const compactId = id.replaceAll("-", "");
   const proxy = shareLinkProxy(
-    `vmess://${base64(JSON.stringify({ add: "example.com", port: "443", id, aid: "0", scy: "auto", net: "ws", tls: "tls", host: "ws.example", sni: "tls.example", path: "/ws" }))}`,
+    `vmess://${base64(JSON.stringify({ add: "example.com", port: "443", id: compactId, aid: "0", scy: "auto", net: "ws", tls: "tls", host: "ws.example", sni: "tls.example", path: "/ws" }))}`,
   );
   assert.equal(proxy.uuid, id);
   assert.equal(proxy.alterId, 0);

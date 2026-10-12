@@ -270,7 +270,8 @@ test("IPPure saves per-node results, retries failures without rechecking success
     checkedAt: "2020-01-01T00:00:00Z",
   });
   await collector.run();
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
+  assert.equal((await store.get()).nodes[1].ippure.attempts, 4);
   const legacy = { ...(await store.get()).nodes[0].ippure };
   delete legacy.asnOrganization;
   await store.saveIPPure(first.id, 0, legacy);
@@ -281,7 +282,7 @@ test("IPPure saves per-node results, retries failures without rechecking success
   assert.equal(preserved.score, 32);
   assert.equal(preserved.organizationAttempts, 1);
   await collector.run();
-  assert.equal(calls.length, 4); // failed backfill is throttled
+  assert.equal(calls.length, 5); // failed backfill is throttled
   await store.saveIPPure(first.id, 0, {
     ...preserved,
     organizationCheckedAt: "2020-01-01T00:00:00Z",
@@ -293,7 +294,7 @@ test("IPPure saves per-node results, retries failures without rechecking success
     "YUUSEI LTD",
   );
   await collector.run();
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 6);
   assert.deepEqual(resolutions, ["good", "bad"]); // retries and backfills reuse the saved exit IP
   await store.sync(file);
   assert.equal((await store.history(10, 0)).total, 1);
