@@ -8,6 +8,142 @@ import { createStore } from "./store.js";
 import { summarizeProxy } from "./node-sources.js";
 import { startIPPureCollector, queryIPPure } from "./ippure.js";
 
+test("Qilan share links enter historical collection without all.yaml and reuse results after refresh", async (t) => {
+  const store = createStore();
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const link = `vless://${id}@example.com:443?security=tls&type=ws&host=ws.example&path=%2Fws#Qilan`;
+  const node = {
+    name: "Qilan",
+    subTag: "Qilan",
+    type: "vless",
+    server: "example.com",
+    port: "443",
+    rawLink: link,
+  };
+  await store.syncSnapshot({
+    checkedAt: "2026-10-12T06:00:00Z",
+    nodes: [
+      node,
+      { ...node, name: "Alias", rawLink: link.replace("#Qilan", "#Alias") },
+      {
+        ...node,
+        server: "invalid.example",
+        rawLink: "vless://private@invalid.example:443",
+      },
+    ],
+  });
+  const archived = await store.get();
+  const donor = {
+    name: "donor",
+    type: "http",
+    server: "donor.example",
+    port: 443,
+  };
+  await store.syncSnapshot({
+    checkedAt: "2026-10-12T07:00:00Z",
+    nodes: [{ ...summarizeProxy(donor), rawConfig: donor }],
+  });
+  await store.saveIPPure((await store.get()).id, 0, {
+    status: "success",
+    ip: "192.0.2.5",
+    exitIPSource: "ip.sb",
+    asnOrganization: "Donor",
+  });
+  let probes = 0;
+  const collector = startIPPureCollector({
+    store,
+    subDir: "/nonexistent-qilan-subscription",
+    intervalMs: 999999,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p, i) => [p, `http://127.0.0.1:${7900 + i}`])),
+    resolveIP: async ({ proxy }) => {
+      probes++;
+      assert.equal(proxy.uuid, id);
+      assert.deepEqual(proxy["ws-opts"], {
+        path: "/ws",
+        headers: { Host: "ws.example" },
+      });
+      return { ip: "192.0.2.44", provider: "AWS CheckIP" };
+    },
+    query: async ({ proxy, target }) => {
+      assert.equal(proxy.name, "donor");
+      assert.equal(target, "192.0.2.44");
+      return { ip: target, asnOrganization: "Qilan exit" };
+    },
+  });
+  t.after(async () => {
+    await collector.close();
+    await store.close();
+  });
+  await collector.run();
+  assert.equal(probes, 1);
+  assert.equal(
+    (await store.get(archived.id)).nodes[0].ippure.status,
+    "success",
+  );
+  assert.equal((await store.get(archived.id)).nodes[1].ippure, undefined); // one probe per connection
+  assert.equal(
+    (await store.get(archived.id)).nodes[2].ippure.failureStage,
+    "share-link",
+  );
+  await store.syncSnapshot({
+    checkedAt: "2026-10-12T08:00:00Z",
+    nodes: [
+      { ...node, name: "Refreshed", details: [{ k: "latency", v: "90 ms" }] },
+    ],
+  });
+  assert.equal(
+    (await store.aggregate()).nodes.find((n) => n.name === "Refreshed").ippure
+      .ip,
+    "192.0.2.44",
+  );
+  await collector.run();
+  assert.equal(probes, 1);
+});
+
+test("one rejected Qilan configuration is isolated while other nodes are probed", async (t) => {
+  const store = createStore();
+  const id = "12345678-1234-1234-1234-123456789abc";
+  await store.syncSnapshot({
+    nodes: ["rejected", "working"].map((name) => ({
+      name,
+      subTag: "Qilan",
+      type: "vless",
+      server: `${name}.example`,
+      port: "443",
+      rawLink: `vless://${id}@${name}.example:443?security=tls`,
+    })),
+  });
+  const probes = [];
+  const collector = startIPPureCollector({
+    store,
+    subDir: "/nonexistent",
+    intervalMs: 999999,
+    configure: async ({ proxies }) => {
+      if (proxies.some((p) => p.name === "rejected"))
+        throw new Error("代理配置失败 (HTTP 400)");
+      return new Map(
+        proxies.map((p, i) => [p, `http://127.0.0.1:${7900 + i}`]),
+      );
+    },
+    resolveIP: async ({ proxy }) => {
+      probes.push(proxy.name);
+      return "192.0.2.44";
+    },
+    query: async () => ({ asnOrganization: "Test" }),
+  });
+  t.after(async () => {
+    await collector.close();
+    await store.close();
+  });
+  await collector.run();
+  assert.deepEqual(probes, ["working"]);
+  const snapshot = await store.get();
+  assert.equal(snapshot.nodes[0].ippure.failureStage, "share-link");
+  assert.equal(snapshot.nodes[1].ippure.status, "success");
+  assert.equal(collector.status().error, null);
+});
+
 test("IPPure uses archived full configuration when live subscription is unavailable", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "ippure-archived-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
