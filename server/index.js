@@ -1,4 +1,5 @@
 import path from "node:path";
+import { existsSync } from "node:fs";
 import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 import { createPostgresStore } from "./postgres-store.js";
@@ -13,6 +14,11 @@ try {
 const subDir = path.resolve(
   process.env.SUBS_CHECK_DIR || path.join(root, "data", "sub"),
 );
+const qilanSessionFile = path.resolve(
+  process.env.QILAN_SESSION_FILE ||
+    "/mnt/d/code/qilan/qilan-scraper/session.txt",
+);
+const qilanRefreshSeconds = Number(process.env.QILAN_REFRESH_INTERVAL_SECONDS);
 let store;
 if (process.env.PGHOST) {
   if (
@@ -43,6 +49,16 @@ const app = createApp({
           secret: process.env.IPPURE_CONTROLLER_SECRET,
           concurrency: Number(process.env.IPPURE_CONCURRENCY || 3),
           apiOrigin: process.env.IPPURE_API_ORIGIN || "https://api.123169.xyz",
+        }
+      : undefined,
+  qilan:
+    process.env.QILAN_SESSION || existsSync(qilanSessionFile)
+      ? {
+          session: process.env.QILAN_SESSION,
+          sessionFile: qilanSessionFile,
+          intervalMs: Number.isFinite(qilanRefreshSeconds)
+            ? Math.max(60_000, qilanRefreshSeconds * 1000)
+            : 15 * 60_000,
         }
       : undefined,
   resultsFile: process.env.RESULTS_FILE,

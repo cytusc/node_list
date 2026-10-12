@@ -15,6 +15,20 @@ npm run dev
 
 默认读取项目下的 `data/sub`，可在 `.env` 中设置 `SUBS_CHECK_DIR`。结果文件默认是该目录下的 `config/cache/config/results.json`，后端启动时及每 5 秒检查一次新结果，也会在刷新时检查；按检测时间和内容去重后写入 SQLite，页面从数据库读取。即使无人打开页面也会积累历史。下载来自 `output/all.yaml`、`output/mihomo.yaml`、`output/base64.txt`，包含完整订阅，不随页面筛选变化。
 
+### Qilan 节点来源
+
+容器运行时，在宿主机 `.env` 中配置会话文件路径，并在现有 `COMPOSE_FILE` 末尾追加 `:compose.qilan.yaml`：
+
+```dotenv
+QILAN_SESSION_HOST_FILE=/mnt/d/code/qilan/qilan-scraper/session.txt
+COMPOSE_FILE=compose.yaml:compose.subs-check.yaml:compose.qilan.yaml
+QILAN_REFRESH_INTERVAL_SECONDS=900
+```
+
+然后运行 `bash deploy/compose.sh up -d node-explorer`。`compose.qilan.yaml` 将宿主机文件只读挂载到容器的 `/run/secrets/qilan-session.txt`，并设置 `QILAN_SESSION_FILE` 指向此路径。宿主机文件必须已存在且容器用户可读；其他服务器请填写该服务器上的实际路径。已有 PostgreSQL、IPPure 等 Compose 文件继续保留在 `COMPOSE_FILE` 中。
+
+服务端可同时采集 Qilan 节点并将其作为独立历史批次展示。默认读取 `/mnt/d/code/qilan/qilan-scraper/session.txt`（文件只放 session Cookie 值）；也可设置 `QILAN_SESSION_FILE` 指向只含 Cookie 的文件，或通过 `QILAN_SESSION` 环境变量传入。Cookie 不写入仓库。采集每页最多 200 条，默认每 15 分钟刷新，可用 `QILAN_REFRESH_INTERVAL_SECONDS` 调整，最低 60 秒。Qilan 返回的分享链接保存在节点来源字段中；会话过期或服务拒绝请求时保留现有批次并记录服务端错误。
+
 每个检测批次会同时保存节点的完整源配置 `rawConfig`，以及存在且匹配的真实分享链接 `rawLink`。两者包含连接凭据，与订阅下载一样应按私有订阅管理。检测结果与源配置尚未完成匹配时会保留已有批次并等待下次导入，避免导入残缺节点。历史配置不会被后续订阅覆盖；IP 检测优先使用已归档配置。正常启动和刷新只回填来源，不删除历史节点。
 
 历史清理通过 `server/reconcile-sources.js` 显式执行，默认仅打印预演计数。先备份数据库并停止页面服务（避免采集器在节点重新排序时写入旧位置），用同一数据库环境运行 `node server/reconcile-sources.js --clash /data/sub/output/all.yaml --links /data/sub/output/base64.txt --prune`；可重复添加 `--clash` 提供历史源文件，或用 `--archive 发布时刻=文件.yaml` 提供有发布时间的历史版本以消除配置歧义。核对计数后加 `--apply`，只删除既没有可匹配链接也没有完整源配置的节点，保留批次 ID 和剩余节点的 IP 检测数据。维护脚本需要已有数据库配置：PostgreSQL 使用 `PGHOST` 等变量，SQLite 使用 `DATABASE_PATH`。

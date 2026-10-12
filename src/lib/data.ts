@@ -127,6 +127,13 @@ export function mediaValue(m: MediaTag) {
   return m.tag || m.Tag || "";
 }
 export const detailLabels: Record<string, string> = {
+  "source-id": "来源 ID",
+  latency: "延迟",
+  status: "状态",
+  "ip-type": "IP 类型",
+  isp: "运营商",
+  asn: "ASN",
+  features: "解锁能力",
   cipher: "加密方式",
   flow: "流控",
   "client-fingerprint": "客户端指纹",
