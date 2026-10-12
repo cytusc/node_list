@@ -637,35 +637,39 @@ test("failed saves do not release the batch until all concurrent requests settle
   assert.match(collector.status().error, /采集暂时不可用/);
 });
 
-test("HTTP migration gives exhausted browser failures a fresh retry budget and keeps verified exit IPs", async (t) => {
-  const node = {
-    rawConfig: { name: "old-browser-failure" },
-    ippure: {
-      status: "error",
-      ip: "192.0.2.1",
-      exitIPSource: "ip.sb",
-      exitIPMode: "ip.sb",
-      queryMode: "specified-exit",
-      attempts: 3,
-      checkedAt: new Date().toISOString(),
-    },
-  };
-  const collector = startIPPureCollector({
-    intervalMs: 999999,
-    store: {
-      get: async () => ({ id: 1, nodes: [node] }),
-      saveIPPure: async (_id, _index, data) => {
-        node.ippure = data;
+for (const transportMode of ["browser", "http"]) {
+  test(`persistent signing gives exhausted ${transportMode} failures a fresh retry budget and keeps verified exit IPs`, async (t) => {
+    const node = {
+      rawConfig: { name: "old-browser-failure" },
+      ippure: {
+        status: "error",
+        ip: "192.0.2.1",
+        exitIPSource: "ip.sb",
+        exitIPMode: "ip.sb",
+        queryMode: "specified-exit",
+        transportMode,
+        attempts: 3,
+        checkedAt: new Date().toISOString(),
       },
-    },
-    configure: async ({ proxies }) =>
-      new Map(proxies.map((p) => [p, "http://localhost:7890"])),
-    resolveIP: async () => assert.fail("verified exit IP should be reused"),
-    query: async ({ target }) => ({ ip: target, asnOrganization: "Updated" }),
+    };
+    const collector = startIPPureCollector({
+      intervalMs: 999999,
+      store: {
+        get: async () => ({ id: 1, nodes: [node] }),
+        saveIPPure: async (_id, _index, data) => {
+          node.ippure = data;
+        },
+      },
+      configure: async ({ proxies }) =>
+        new Map(proxies.map((p) => [p, "http://localhost:7890"])),
+      resolveIP: async () => assert.fail("verified exit IP should be reused"),
+      query: async ({ target }) => ({ ip: target, asnOrganization: "Updated" }),
+    });
+    t.after(() => collector.close());
+    await collector.run();
+    assert.equal(node.ippure.status, "success");
+    assert.equal(node.ippure.attempts, 1);
+    assert.equal(node.ippure.transportMode, "http");
+    assert.equal(node.ippure.signatureVersion, 2);
   });
-  t.after(() => collector.close());
-  await collector.run();
-  assert.equal(node.ippure.status, "success");
-  assert.equal(node.ippure.attempts, 1);
-  assert.equal(node.ippure.transportMode, "http");
-});
+}

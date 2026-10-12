@@ -73,6 +73,7 @@ export function startIPPureCollector({
       const old = node.ippure;
       const currentExitIP = old?.exitIPSource === "ip.sb";
       const currentExitMode = old?.exitIPMode === "ip.sb";
+      const currentSignature = old?.signatureVersion === 2;
       const backfill =
         old?.status === "success" && currentExitIP && !old.asnOrganization;
       if (old?.status === "success" && currentExitIP && !backfill) continue;
@@ -81,15 +82,22 @@ export function startIPPureCollector({
       const attempts =
         currentExitMode &&
         old?.queryMode === "specified-exit" &&
-        old?.transportMode === "http"
+        old?.transportMode === "http" &&
+        currentSignature
           ? old.attempts || 0
           : 0;
-      if ((backfill ? old.organizationAttempts || 0 : attempts) >= 3) continue;
+      const organizationAttempts = currentSignature
+        ? old.organizationAttempts || 0
+        : 0;
+      if ((backfill ? organizationAttempts : attempts) >= 3) continue;
       const lastAttempt = backfill
-        ? old.organizationCheckedAt
+        ? currentSignature
+          ? old.organizationCheckedAt
+          : undefined
         : currentExitMode &&
             old?.queryMode === "specified-exit" &&
-            old?.transportMode === "http"
+            old?.transportMode === "http" &&
+            currentSignature
           ? old.checkedAt
           : undefined;
       if (lastAttempt && Date.now() - Date.parse(lastAttempt) < 30 * 60 * 1000)
@@ -147,6 +155,7 @@ export function startIPPureCollector({
               queryMode: "specified-exit",
               exitIPMode: "ip.sb",
               transportMode: "http",
+              signatureVersion: 2,
             };
             try {
               const options = {
@@ -226,7 +235,11 @@ export function startIPPureCollector({
                 if ((await store.get())?.id !== snapshot.id) return;
                 await store.saveIPPure(snapshot.id, index, {
                   ...old,
-                  organizationAttempts: (old.organizationAttempts || 0) + 1,
+                  signatureVersion: 2,
+                  organizationAttempts:
+                    (old.signatureVersion === 2
+                      ? old.organizationAttempts || 0
+                      : 0) + 1,
                   organizationCheckedAt: result.checkedAt,
                 });
                 return;
