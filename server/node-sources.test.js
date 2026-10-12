@@ -12,6 +12,7 @@ import {
   sourceKey,
   readNodeSources,
   sourceForNode,
+  aggregateIdentity,
 } from "./node-sources.js";
 
 const proxy = {
@@ -23,6 +24,15 @@ const proxy = {
   password: "secret",
 };
 const node = summarizeProxy(proxy);
+
+test("VMess link identities ignore display labels and JSON key order, preserving credentials", () => {
+  const link = (config) => `vmess://${Buffer.from(JSON.stringify(config)).toString("base64")}`;
+  const config = { add: "example.com", port: "443", id: "credential", net: "ws", path: "/ws", ps: "Old" };
+  const identity = aggregateIdentity({ rawLink: link(config) });
+  assert.equal(identity, aggregateIdentity({ rawLink: link({ ps: "New", path: "/ws", net: "ws", id: "credential", port: "443", add: "example.com" }) }));
+  assert.notEqual(identity, aggregateIdentity({ rawLink: link({ ...config, id: "other" }) }));
+  assert.notEqual(identity, aggregateIdentity({ rawLink: link({ ...config, path: "/other" }) }));
+});
 
 for (const backend of ["sqlite", "postgres"]) {
   test(

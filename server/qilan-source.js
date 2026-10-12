@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { aggregateIdentity } from "./node-sources.js";
 
 const baseUrl = "https://www.qilan.de";
 const pageSize = 200;
@@ -81,7 +82,7 @@ export async function fetchQilanSnapshot({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!session?.trim()) throw new Error("Qilan session cookie is empty");
-  const nodes = [];
+  const nodes = new Map();
   let page = 1;
   let total;
   let newestCheck = 0;
@@ -109,8 +110,12 @@ export async function fetchQilanSnapshot({
     for (const item of payload.data) {
       const node = normalizeNode(item);
       if (!node) continue;
-      nodes.push(node);
       const checked = Date.parse(item.last_check || "");
+      const key = aggregateIdentity(node);
+      const previous = nodes.get(key);
+      const checkedTime = Number.isFinite(checked) ? checked : 0;
+      if (!previous || checkedTime > previous.checkedTime)
+        nodes.set(key, { node, checkedTime });
       if (Number.isFinite(checked)) newestCheck = Math.max(newestCheck, checked);
     }
     if (payload.data.length < pageSize) break;
@@ -118,14 +123,14 @@ export async function fetchQilanSnapshot({
     page += 1;
     await sleep(300);
   }
-  if (!nodes.length) throw new Error("Qilan returned no usable nodes");
+  if (!nodes.size) throw new Error("Qilan returned no usable nodes");
   return {
     checkedAt: newestCheck
       ? new Date(newestCheck).toISOString()
       : new Date().toISOString(),
     speedTest: false,
     mediaCheck: false,
-    nodes,
+    nodes: [...nodes.values()].map(({ node }) => node),
   };
 }
 

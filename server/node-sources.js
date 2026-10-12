@@ -36,6 +36,28 @@ export function sourceKey(node) {
 }
 
 export function aggregateIdentity(node) {
+  if (!node.rawConfig && node.rawLink) {
+    // Share links contain credentials and transport settings. Display names and
+    // Qilan's source IDs, latency, status and ISP describe a check, not a connection.
+    try {
+      let connection;
+      if (node.rawLink.startsWith("vmess://")) {
+        const { ps, name, ...config } = JSON.parse(
+          Buffer.from(node.rawLink.slice(8), "base64").toString("utf8"),
+        );
+        connection = JSON.stringify(canonical(config));
+      } else {
+        const url = new URL(node.rawLink);
+        url.hash = "";
+        url.searchParams.sort();
+        if (url.protocol === "hy2:") url.protocol = "hysteria2:";
+        connection = url.toString();
+      }
+      return "share-link:" + createHash("sha256").update(connection).digest("hex");
+    } catch {
+      // Incomplete legacy links retain the summary-based identity.
+    }
+  }
   if (!node.rawConfig) return nodeIdentity(node);
   return (
     nodeIdentity(node) +
