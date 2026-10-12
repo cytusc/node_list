@@ -19,6 +19,8 @@ npm run dev
 
 历史清理通过 `server/reconcile-sources.js` 显式执行，默认仅打印预演计数。先备份数据库并停止页面服务（避免采集器在节点重新排序时写入旧位置），用同一数据库环境运行 `node server/reconcile-sources.js --clash /data/sub/output/all.yaml --links /data/sub/output/base64.txt --prune`；可重复添加 `--clash` 提供历史源文件，或用 `--archive 发布时刻=文件.yaml` 提供有发布时间的历史版本以消除配置歧义。核对计数后加 `--apply`，只删除既没有可匹配链接也没有完整源配置的节点，保留批次 ID 和剩余节点的 IP 检测数据。维护脚本需要已有数据库配置：PostgreSQL 使用 `PGHOST` 等变量，SQLite 使用 `DATABASE_PATH`。
 
+人工确认失效的连接可通过 `store.retireNodes(nodes, reason)` 软删除。软删除记录以连接配置摘要为键，隐藏节点的首页/聚合结果并跳过出口 IP 补采；历史批次仍可查阅。恢复时由维护人员删除对应的 retired identity 记录。生产使用 PostgreSQL 的 `node_explorer_retired_nodes` 表，SQLite 使用 `retired_nodes` 表。
+
 数据库默认保存为项目目录下的 `data/nodes.sqlite`，可通过 `DATABASE_PATH` 指定可写路径。节点来源字段保存在检测批次的 JSON payload 中，数据库备份包含订阅连接凭据。
 
 自定义位置可设置 `SUBS_CHECK_DIR` 和可选的 `RESULTS_FILE`、`DATABASE_PATH` 环境变量：
@@ -185,7 +187,7 @@ COMPOSE_FILE=compose.yaml:compose.subs-check.yaml:compose.ippure.yaml
 
 使用包含本次改动的页面镜像，然后运行 `deploy/compose.sh up -d`。额外的 Mihomo 容器只用于 IPPure，控制端口和代理端口不映射到宿主机。采集直接发送 HTTP 请求，不启动 Chromium，页面镜像不再安装浏览器。不要将检测器连接到其他应用正在使用的 Mihomo，因为采集器会替换其完整配置。
 
-采集器每 30 秒检查当前批次，优先使用已归档的完整代理配置，否则匹配 `output/all.yaml`。通过待检测节点优先访问 IPv4 专用入口 `https://api-ipv4.ip.sb/ip` 确认真实 IPv4 出口，失败时通过同一节点尝试 `https://api.ip.sb/ip`（仍只接受 IPv4）；失败时记录错误，不用服务器地址替代或回退直连。随后轮换已成功查询的节点作为传输代理，按出口 IP 调用 `/api/info/ip-basic/<IP>`、`/api/info/ip-risk/<IP>`，再按 ASN 调用 `/api/info/asn/botclass/<ASN数字>`。客户端通过单连接代理会话处理 `x-k`、`x-t` 动态签名，挑战响应与签名重试复用同一条连接；旧签名方式下已耗尽重试次数的失败记录会获得新一轮重试机会。校验返回 IP、数据完整性和百分比；HTTP 200 的 `ok:false` 仍视为失败。429 和服务端错误最多退避重试 2 次，每次等待不超过 5 秒。
+采集器每 30 秒检查当前批次，优先使用已归档的完整代理配置，否则匹配 `output/all.yaml`。通过待检测节点优先访问 IPv4 专用入口 `https://api-ipv4.ip.sb/ip` 确认真实 IPv4 出口，失败后依次尝试 AWS CheckIP、ipify、ifconfig.me、icanhazip 和 IP.SB 的通用入口；节点实测中这些服务的可达性不同，AWS CheckIP 能返回此前 IP.SB 失败节点的 IPv4。ipify 官方 API 文档见 https://www.ipify.org/ ，AWS CheckIP 入口为 https://checkip.amazonaws.com/ 。所有请求均使用同一节点专属代理；只接受 IPv4 作为风险接口查询目标，绝不使用服务器地址替代或直连回退。随后轮换已成功查询的节点作为传输代理，按出口 IP 调用 `/api/info/ip-basic/<IP>`、`/api/info/ip-risk/<IP>`，再按 ASN 调用 `/api/info/asn/botclass/<ASN数字>`。客户端通过单连接代理会话处理 `x-k`、`x-t` 动态签名，挑战响应与签名重试复用同一条连接；旧签名方式下已耗尽重试次数的失败记录会获得新一轮重试机会。校验返回 IP、数据完整性和百分比；HTTP 200 的 `ok:false` 仍视为失败。429 和服务端错误最多退避重试 2 次，每次等待不超过 5 秒。
 
 默认每批并发 3 个节点，`.env` 中的 `IPPURE_CONCURRENCY` 可设为 1～10；小内存服务器建议保持 3。每批为目标节点和最多 3 个可用查询代理创建独立 Mihomo mixed listeners，各入口固定绑定节点，整批任务结束后才重载配置，避免并发出口串用。`IPPURE_PROXY_URL` 的原端口保留为拒绝入口，从下一端口开始分配隔离入口，须额外预留最多“并发数 + 3”个连续内部端口；Docker 不发布这些端口。每轮采集按出口 IP 合并重复查询、按 ASN 合并人机流量比请求，失败缓存会删除；新一轮重新建缓存，避免沿用旧数据。API 地址默认为 `https://api.123169.xyz`，可用 `IPPURE_API_ORIGIN` 覆盖。
 

@@ -362,7 +362,10 @@ test("exit discovery prefers IPv4 and only falls back through the same node", as
       calls,
       first === "192.0.2.20"
         ? ["https://api-ipv4.ip.sb/ip"]
-        : ["https://api-ipv4.ip.sb/ip", "https://api.ip.sb/ip"],
+        : [
+            "https://api-ipv4.ip.sb/ip",
+            "https://checkip.amazonaws.com/",
+          ],
     );
   }
 });
@@ -380,7 +383,7 @@ test("IPv6-only discovery reports unsupported scoring instead of querying a diff
         dispose: async () => {},
       }),
     }),
-    /暂不支持 IPv6/,
+    /IPPure 风险评分接口需要 IPv4/,
   );
   await assert.rejects(queryIPPure({ target: "2001:db8::1" }), /暂不支持 IPv6/);
 });
