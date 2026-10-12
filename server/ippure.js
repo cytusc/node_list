@@ -156,10 +156,6 @@ export function startIPPureCollector({
         currentResolution
           ? old.attempts || 0
           : 0;
-      const organizationAttempts = currentSignature
-        ? old.organizationAttempts || 0
-        : 0;
-      if ((backfill ? organizationAttempts : attempts) >= 3) continue;
       const lastAttempt = backfill
         ? currentSignature
           ? old.organizationCheckedAt
