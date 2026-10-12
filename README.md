@@ -185,7 +185,7 @@ COMPOSE_FILE=compose.yaml:compose.subs-check.yaml:compose.ippure.yaml
 
 使用包含本次改动的页面镜像，然后运行 `deploy/compose.sh up -d`。额外的 Mihomo 容器只用于 IPPure，控制端口和代理端口不映射到宿主机。采集直接发送 HTTP 请求，不启动 Chromium，页面镜像不再安装浏览器。不要将检测器连接到其他应用正在使用的 Mihomo，因为采集器会替换其完整配置。
 
-采集器每 30 秒检查当前批次，优先使用已归档的完整代理配置，否则匹配 `output/all.yaml`。通过待检测节点访问 `https://api.ip.sb/ip` 确认真实出口 IP；失败时记录错误，不用服务器地址替代或回退直连。随后轮换已成功查询的节点作为传输代理，按出口 IP 调用 `/api/info/ip-basic/<IP>`、`/api/info/ip-risk/<IP>`，再按 ASN 调用 `/api/info/asn/botclass/<ASN数字>`。客户端自动处理 `x-k`、`x-t` 动态签名，校验返回 IP、数据完整性和百分比；HTTP 200 的 `ok:false` 仍视为失败。429 和服务端错误最多退避重试 2 次，每次等待不超过 5 秒。
+采集器每 30 秒检查当前批次，优先使用已归档的完整代理配置，否则匹配 `output/all.yaml`。通过待检测节点访问 `https://api.ip.sb/ip` 确认真实出口 IP；失败时记录错误，不用服务器地址替代或回退直连。随后轮换已成功查询的节点作为传输代理，按出口 IP 调用 `/api/info/ip-basic/<IP>`、`/api/info/ip-risk/<IP>`，再按 ASN 调用 `/api/info/asn/botclass/<ASN数字>`。客户端通过单连接代理会话处理 `x-k`、`x-t` 动态签名，挑战响应与签名重试复用同一条连接；旧签名方式下已耗尽重试次数的失败记录会获得新一轮重试机会。校验返回 IP、数据完整性和百分比；HTTP 200 的 `ok:false` 仍视为失败。429 和服务端错误最多退避重试 2 次，每次等待不超过 5 秒。
 
 默认每批并发 3 个节点，`.env` 中的 `IPPURE_CONCURRENCY` 可设为 1～10；小内存服务器建议保持 3。每批为目标节点和最多 3 个可用查询代理创建独立 Mihomo mixed listeners，各入口固定绑定节点，整批任务结束后才重载配置，避免并发出口串用。`IPPURE_PROXY_URL` 的原端口保留为拒绝入口，从下一端口开始分配隔离入口，须额外预留最多“并发数 + 3”个连续内部端口；Docker 不发布这些端口。每轮采集按出口 IP 合并重复查询、按 ASN 合并人机流量比请求，失败缓存会删除；新一轮重新建缓存，避免沿用旧数据。API 地址默认为 `https://api.123169.xyz`，可用 `IPPURE_API_ORIGIN` 覆盖。
 

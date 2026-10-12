@@ -1,15 +1,50 @@
 import { createHmac } from "node:crypto";
 import { isIP } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { request } from "playwright-core";
+import { fetch as proxyFetch, ProxyAgent } from "undici";
 import { stringify } from "yaml";
 
-// APIRequestContext performs HTTP requests without launching a browser.
+// IPPure's signing session must stay on one proxy connection. A general pool
+// may send the challenge and signed retry over different tunnels.
+export function createHTTPContext({ proxy, timeout, extraHTTPHeaders }) {
+  const dispatcher = new ProxyAgent({
+    uri: proxy.server,
+    connections: 1,
+    pipelining: 1,
+  });
+  const abort = new AbortController();
+  return {
+    async get(url, { headers = {} } = {}) {
+      const response = await proxyFetch(url, {
+        dispatcher,
+        headers: { ...extraHTTPHeaders, ...headers },
+        redirect: "error",
+        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(timeout)]),
+      });
+      return {
+        headers: () => Object.fromEntries(response.headers),
+        status: () => response.status,
+        ok: () => response.ok,
+        text: () => response.text(),
+        json: () => response.json(),
+        // Drain challenges before retrying so the tunnel remains reusable.
+        dispose: async () => {
+          if (!response.bodyUsed) await response.arrayBuffer();
+        },
+      };
+    },
+    async dispose() {
+      abort.abort();
+      await dispatcher.destroy();
+    },
+  };
+}
+
 async function withHTTP(
   {
     proxyUrl,
     signal = new AbortController().signal,
-    createContext = (options) => request.newContext(options),
+    createContext = createHTTPContext,
   },
   callback,
 ) {

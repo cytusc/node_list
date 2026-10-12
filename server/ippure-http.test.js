@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
+import { connect } from "node:net";
 import { request } from "playwright-core";
 import { parse } from "yaml";
 import {
@@ -17,6 +18,69 @@ const basic = (ip = "23.22.22.12") => ({
   ip,
   asn: { number: 14618, organization: "Amazon", type: "hosting" },
   traits: { is_broadcast: false },
+});
+
+test("production HTTP transport keeps challenge, signed retry and API queries on one proxy tunnel", async (t) => {
+  const connections = new Set();
+  let calls = 0;
+  const backend = createServer((req, res) => {
+    calls++;
+    connections.add(req.socket.remotePort);
+    const key = `session-${req.socket.remotePort}`;
+    const time = req.headers["x-t"]?.split("-")[0];
+    const url = `http://127.0.0.1:${backend.address().port}${req.url}`;
+    const signed = `${time}-${createHmac("sha256", key).update(["GET", url, "", time].join("-")).digest("hex")}`;
+    if (req.headers["x-k"] !== key || req.headers["x-t"] !== signed) {
+      res.writeHead(200, { "x-k": key, "x-t": String(Date.now()) });
+      res.end(JSON.stringify({ ok: false }));
+      return;
+    }
+    assert.equal(req.headers.origin, "https://ippure.com");
+    res.end(
+      JSON.stringify({
+        ok: true,
+        data: req.url.includes("ip-basic")
+          ? basic()
+          : req.url.includes("ip-risk")
+            ? { risk_score: 36 }
+            : { human: 2, bot: 98 },
+      }),
+    );
+  });
+  await new Promise((r) => backend.listen(0, "127.0.0.1", r));
+  t.after(() => backend.close());
+  let tunnels = 0;
+  const sockets = new Set();
+  const proxy = createServer();
+  proxy.on("connect", (req, client, head) => {
+    tunnels++;
+    assert.equal(req.url, `127.0.0.1:${backend.address().port}`);
+    const upstream = connect(backend.address().port, "127.0.0.1", () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length) upstream.write(head);
+      upstream.pipe(client);
+      client.pipe(upstream);
+    });
+    sockets.add(client);
+    sockets.add(upstream);
+    client.on("error", () => upstream.destroy());
+    upstream.on("error", () => client.destroy());
+  });
+  await new Promise((r) => proxy.listen(0, "127.0.0.1", r));
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    proxy.close();
+  });
+  const result = await queryIPPure({
+    target: "23.22.22.12",
+    proxyUrl: `http://127.0.0.1:${proxy.address().port}`,
+    apiOrigin: `http://127.0.0.1:${backend.address().port}`,
+  });
+  assert.equal(result.score, 36);
+  assert.equal(result.humanPercent, 2);
+  assert.equal(calls, 4);
+  assert.equal(tunnels, 1);
+  assert.equal(connections.size, 1);
 });
 
 test("signed HTTP client negotiates a key and signs the exact URL using server time", async (t) => {

@@ -30,6 +30,7 @@
     "react-dom": "^19.3.0",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.7.0",
+    "undici": "^7.30.0",
     "yaml": "^2.9.1"
   },
   "devDependencies": {
