@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { createStore } from "./store.js";
 import { startIPPureCollector } from "./ippure.js";
+import { startQilanSource } from "./qilan-source.js";
 
 export const downloads = {
   clash: { file: "all.yaml", label: "Clash 节点", type: "application/yaml" },
@@ -24,6 +25,7 @@ export function createApp({
   store: configuredStore,
   importIntervalMs = 5000,
   ippure,
+  qilan,
 } = {}) {
   const app = express();
   app.disable("x-powered-by");
@@ -38,13 +40,16 @@ export function createApp({
   const timer = setInterval(sync, importIntervalMs);
   timer.unref();
   let collector = null;
+  let qilanSource = null;
   const collectorReady = initialSync.then(() => {
     if (ippure) collector = startIPPureCollector({ store, subDir, ...ippure });
+    if (qilan) qilanSource = startQilanSource({ store, ...qilan });
   });
   app.locals.close = async () => {
     clearInterval(timer);
     await collectorReady;
     await collector?.close();
+    await qilanSource?.close();
     await sync();
     await store.close();
   };

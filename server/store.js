@@ -197,9 +197,8 @@ export function createSnapshotStore(adapter) {
   let pending;
   let sourceWarning = null;
   let sourcesBackfilled = false;
-  async function ingest(file, linksFile) {
+  async function ingestRaw(raw, linksFile, updateSourceWarning = true) {
     try {
-      const raw = JSON.parse(await readFile(file, "utf8"));
       if (
         !Array.isArray(raw.nodes) ||
         raw.nodes.some((n) => !n || typeof n !== "object" || Array.isArray(n))
@@ -254,7 +253,16 @@ export function createSnapshotStore(adapter) {
         .digest("hex");
       const payload = JSON.stringify(snapshot);
       await adapter.insert({ fingerprint, snapshot, payload });
-      sourceWarning = null;
+      if (updateSourceWarning) sourceWarning = null;
+    } catch (error) {
+      if (updateSourceWarning)
+        sourceWarning = error.code === "ENOENT" ? "NO_RESULTS" : "READ_FAILED";
+      throw error;
+    }
+  }
+  async function ingest(file, linksFile) {
+    try {
+      return await ingestRaw(JSON.parse(await readFile(file, "utf8")), linksFile);
     } catch (error) {
       sourceWarning = error.code === "ENOENT" ? "NO_RESULTS" : "READ_FAILED";
       throw error;
@@ -334,11 +342,25 @@ export function createSnapshotStore(adapter) {
       adapter.reconcile(linkedNodes, options),
     // Requests and the background collector share a single in-flight import.
     sync(file, linksFile) {
-      if (!pending)
-        pending = ingest(file, linksFile).finally(() => {
-          pending = undefined;
+      if (!pending) {
+        let current;
+        current = ingest(file, linksFile).finally(() => {
+          if (pending === current) pending = undefined;
         });
+        pending = current;
+      }
       return pending;
+    },
+    syncSnapshot(snapshot) {
+      const next = (pending || Promise.resolve())
+        .catch(() => {})
+        .then(() => ingestRaw(snapshot, undefined, false));
+      let current;
+      current = next.finally(() => {
+        if (pending === current) pending = undefined;
+      });
+      pending = current;
+      return current;
     },
     async get(id) {
       const row = await adapter.get(id);
