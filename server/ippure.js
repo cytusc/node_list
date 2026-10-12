@@ -30,7 +30,11 @@ export function startIPPureCollector({
   let rotation = 0;
   async function collect() {
     const snapshot = await store.get();
-    if (!snapshot?.nodes.length) return;
+    if (!snapshot) return;
+    const historical = store.ippureCandidates
+      ? await store.ippureCandidates()
+      : [];
+    if (!snapshot.nodes.length && !historical.length) return;
     const document = snapshot.nodes.every((node) => node.rawConfig)
       ? { proxies: [] }
       : parse(await readFile(path.join(subDir, "output", "all.yaml"), "utf8"));
@@ -56,7 +60,15 @@ export function startIPPureCollector({
     const ipCache = new Map();
     const asnCache = new Map();
     const jobs = [];
-    for (const [index, node] of snapshot.nodes.entries()) {
+    const entries = [
+      ...snapshot.nodes.map((node, index) => ({
+        snapshotId: snapshot.id,
+        index,
+        node,
+      })),
+      ...historical.filter((item) => item.snapshotId !== snapshot.id),
+    ];
+    for (const { snapshotId, index, node } of entries) {
       if (abort.signal.aborted) return;
       const old = node.ippure;
       const currentExitIP = old?.exitIPSource === "ip.sb";
@@ -86,6 +98,7 @@ export function startIPPureCollector({
       const ownProxy = matchProxy(node);
       if (!ownProxy) continue;
       jobs.push({
+        snapshotId,
         index,
         old,
         currentExitIP,
@@ -120,6 +133,7 @@ export function startIPPureCollector({
       const outcomes = await Promise.allSettled(
         batch.map(
           async ({
+            snapshotId,
             index,
             old,
             currentExitIP,
@@ -225,7 +239,7 @@ export function startIPPureCollector({
             }
             if (abort.signal.aborted || (await store.get())?.id !== snapshot.id)
               return;
-            await store.saveIPPure(snapshot.id, index, result);
+            await store.saveIPPure(snapshotId, index, result);
           },
         ),
       );

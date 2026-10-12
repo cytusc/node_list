@@ -368,6 +368,98 @@ test("IPPure refreshes legacy results and reuses only an IP.SB-verified exit IP"
   assert.equal(node.ippure.exitIPSource, "ip.sb");
 });
 
+test("IPPure refreshes legacy successes from archived batches absent in the latest batch", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ippure-history-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(path.join(dir, "output"));
+  const oldConfig = {
+    name: "archived-target",
+    type: "ss",
+    server: "45.149.114.171",
+    port: 777,
+    cipher: "aes-128-gcm",
+    password: "private",
+  };
+  const oldFile = path.join(dir, "old.json");
+  await writeFile(
+    oldFile,
+    JSON.stringify({ nodes: [{ name: oldConfig.name, rawConfig: oldConfig }] }),
+  );
+  const store = createStore();
+  await store.sync(oldFile);
+  const old = await store.get();
+  await store.saveIPPure(old.id, 0, {
+    status: "success",
+    ip: "8.8.8.8",
+    asnOrganization: "Google LLC",
+    score: 7,
+  });
+
+  const donor = {
+    name: "current-donor",
+    type: "http",
+    server: "donor.example.org",
+    port: 443,
+  };
+  const currentFile = path.join(dir, "current.json");
+  await writeFile(
+    currentFile,
+    JSON.stringify({
+      nodes: [
+        {
+          name: donor.name,
+          type: donor.type,
+          server: donor.server,
+          port: donor.port,
+        },
+      ],
+    }),
+  );
+  await writeFile(
+    path.join(dir, "output", "all.yaml"),
+    JSON.stringify({ proxies: [donor] }),
+  );
+  await store.sync(currentFile);
+  const current = await store.get();
+  await store.saveIPPure(current.id, 0, {
+    status: "success",
+    ip: "192.0.2.8",
+    exitIPSource: "ip.sb",
+    asnOrganization: "Donor",
+  });
+
+  const calls = [];
+  const collector = startIPPureCollector({
+    concurrency: 1,
+    configure: async ({ proxies }) =>
+      new Map(
+        proxies.map((proxy, index) => [
+          proxy,
+          `http://127.0.0.1:${7890 + index}`,
+        ]),
+      ),
+    store,
+    subDir: dir,
+    intervalMs: 999999,
+    resolveIP: async ({ proxy }) => {
+      assert.equal(proxy.name, "archived-target");
+      return "203.0.113.7";
+    },
+    query: async ({ target }) => {
+      calls.push(target);
+      return { ip: target, asnOrganization: "Verified", score: 12 };
+    },
+  });
+  t.after(async () => {
+    await collector.close();
+    await store.close();
+  });
+  await collector.run();
+  assert.deepEqual(calls, ["203.0.113.7"]);
+  assert.equal((await store.get(old.id)).nodes[0].ippure.ip, "203.0.113.7");
+  assert.equal((await store.get(old.id)).nodes[0].ippure.exitIPSource, "ip.sb");
+});
+
 test("IPPure refuses a hostname as the explicit query target before changing proxy configuration", async () => {
   await assert.rejects(
     queryIPPure({ target: "voteshirleysew.club" }),
