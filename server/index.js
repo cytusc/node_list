@@ -41,14 +41,16 @@ const app = createApp({
           controller: process.env.IPPURE_CONTROLLER,
           proxyUrl: process.env.IPPURE_PROXY_URL,
           secret: process.env.IPPURE_CONTROLLER_SECRET,
-          executablePath:
-            process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || "/usr/bin/chromium",
+          concurrency: Number(process.env.IPPURE_CONCURRENCY || 3),
+          apiOrigin: process.env.IPPURE_API_ORIGIN || "https://api.123169.xyz",
         }
       : undefined,
   resultsFile: process.env.RESULTS_FILE,
   databasePath: path.resolve(
     process.env.DATABASE_PATH || path.join(root, "data", "nodes.sqlite"),
   ),
+  linksFile: path.join(subDir, "output", "base64.txt"),
+  clashFile: path.join(subDir, "output", "all.yaml"),
   distDir: path.join(root, "dist"),
 });
 const port = Number(process.env.API_PORT || 3001);

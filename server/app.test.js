@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createStore } from "./store.js";
+import { sourceKey, summarizeProxy } from "./node-sources.js";
 import { createApp } from "./app.js";
 
 async function fixture(t, options = {}) {
@@ -51,6 +53,111 @@ test("reads each snapshot afresh and strips credential fields", async (t) => {
   await writeFile(f.resultsFile, JSON.stringify({ ...snapshot, nodes: [] }));
   result = await (await f.get("/api/results")).json();
   assert.deepEqual(result.nodes, []);
+});
+
+test("stores share links, backfills matching history and removes untraceable nodes", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "node-links-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "results.json");
+  const linksFile = path.join(dir, "base64.txt");
+  const databasePath = path.join(dir, "history", "nodes.sqlite");
+  const link = "ss://cipher:secret@node.example:443#Keep";
+  const node = {
+    name: "Keep",
+    baseName: "Keep",
+    type: "ss",
+    server: "node.example",
+    port: "443",
+    network: "tcp",
+    tls: false,
+    udp: false,
+    details: [],
+  };
+  const store = createStore(databasePath);
+  try {
+    await writeFile(
+      file,
+      JSON.stringify({
+        checkedAt: "2026-10-10T00:00:00Z",
+        nodes: [node, { ...node, name: "Untraceable", server: "old.example" }],
+      }),
+    );
+    await store.sync(file);
+    const old = await store.get();
+    await store.saveIPPure(old.id, 0, { status: "success", ip: "192.0.2.1" });
+    await store.saveIPPure(old.id, 1, { status: "success", ip: "192.0.2.2" });
+
+    await writeFile(
+      file,
+      JSON.stringify({
+        checkedAt: "2026-10-11T00:00:00Z",
+        nodes: [node],
+      }),
+    );
+    await writeFile(linksFile, Buffer.from(`${link}\n`).toString("base64"));
+    await store.sync(file, linksFile);
+
+    assert.equal((await store.get(old.id)).nodes.length, 2);
+    await store.reconcileSources(
+      new Map([[sourceKey(node), { rawLink: link }]]),
+      { prune: true },
+    );
+    const history = await store.history(10, 0);
+    assert.equal(history.total, 2);
+    assert.deepEqual(
+      (await store.get(old.id)).nodes.map(({ name, rawLink }) => ({
+        name,
+        rawLink,
+      })),
+      [{ name: "Keep", rawLink: link }],
+    );
+    assert.deepEqual((await store.get(old.id)).nodes[0].ippure, {
+      status: "success",
+      ip: "192.0.2.1",
+    });
+    assert.equal((await store.get()).nodes[0].rawLink, link);
+  } finally {
+    await store.close();
+  }
+});
+
+test("API refreshes always archive node sources, including after the initial import", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "node-api-sources-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const clashFile = path.join(dir, "all.yaml");
+  const linksFile = path.join(dir, "base64.txt");
+  const proxy = {
+    name: "Keep",
+    type: "ss",
+    server: "node.example",
+    port: 443,
+    cipher: "aes-256-gcm",
+    password: "secret",
+  };
+  await writeFile(clashFile, JSON.stringify({ proxies: [proxy] }));
+  const f = await fixture(t, {
+    clashFile,
+    linksFile,
+    importIntervalMs: 999999,
+  });
+  for (const [index, route] of [
+    "/api/results",
+    "/api/results?view=aggregate",
+    "/api/history",
+  ].entries()) {
+    await writeFile(
+      f.resultsFile,
+      JSON.stringify({
+        checkedAt: `2026-10-12T0${index}:00:00Z`,
+        nodes: [summarizeProxy(proxy)],
+      }),
+    );
+    assert.equal((await f.get(route)).status, 200);
+    const result = await (await f.get("/api/results")).json();
+    assert.deepEqual(result.nodes[0].rawConfig, proxy);
+    assert.equal(result.nodes.length, 1);
+  }
+  assert.equal((await (await f.get("/api/history")).json()).total, 3);
 });
 
 test("distinguishes missing results from corrupted files without leaking paths", async (t) => {

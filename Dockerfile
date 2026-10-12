@@ -17,14 +17,9 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-# Debian Chromium reliably renders IPPure; Alpine Chromium crashes its renderer.
+# HTTP collection requires no Chromium installation.
 FROM node:22-bookworm-slim AS runtime
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends chromium \
-    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-# Chromium crash reporting needs writable config/cache paths in read-only containers.
-ENV XDG_CONFIG_HOME=/tmp/chromium-config XDG_CACHE_HOME=/tmp/chromium-cache
 ENV NODE_ENV=production HOST=0.0.0.0 API_PORT=3001 SUBS_CHECK_DIR=/data/sub DATABASE_PATH=/data/history/nodes.sqlite
 COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --from=dependencies --chown=node:node /app/package.json ./package.json
