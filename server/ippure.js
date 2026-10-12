@@ -3,12 +3,17 @@ import path from "node:path";
 import { isIP } from "node:net";
 import { parse } from "yaml";
 import { aggregateIdentity } from "./node-sources.js";
+import { EXIT_IP_VERSION, hasVerifiedExitIP } from "./exit-ip.js";
 import {
   queryIPPure,
-  resolveExitIP,
+  resolveExitIPInfo,
   configureProxyBatch,
 } from "./ippure-http.js";
-export { queryIPPure, resolveExitIP } from "./ippure-http.js";
+export {
+  queryIPPure,
+  resolveExitIP,
+  resolveExitIPInfo,
+} from "./ippure-http.js";
 
 export function startIPPureCollector({
   store,
@@ -20,7 +25,7 @@ export function startIPPureCollector({
   apiOrigin = "https://api.123169.xyz",
   configure = configureProxyBatch,
   query = queryIPPure,
-  resolveIP = resolveExitIP,
+  resolveIP = resolveExitIPInfo,
   intervalMs = 30000,
 }) {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 10)
@@ -30,7 +35,9 @@ export function startIPPureCollector({
   let lastError = null;
   let rotation = 0;
   async function collect() {
-    const snapshot = await store.get();
+    const snapshot = store.getCollectionSnapshot
+      ? await store.getCollectionSnapshot()
+      : await store.get();
     if (!snapshot) return;
     const historical = store.ippureCandidates
       ? await store.ippureCandidates()
@@ -68,6 +75,12 @@ export function startIPPureCollector({
       .filter((node) => node.ippure?.status === "success")
       .map(matchProxy)
       .filter(Boolean);
+    const transportIdentities = new Map(
+      (aggregate?.nodes || snapshot.nodes).map((node) => [
+        matchProxy(node),
+        aggregateIdentity(node),
+      ]),
+    );
     const unavailable = new Set();
     const ipCache = new Map();
     const asnCache = new Map();
@@ -75,7 +88,7 @@ export function startIPPureCollector({
     const entries = [
       ...snapshot.nodes.map((node, index) => ({
         snapshotId: snapshot.id,
-        index,
+        index: snapshot.nodeIndexes?.[index] ?? index,
         node,
       })),
       ...historical.filter((item) => item.snapshotId !== snapshot.id),
@@ -83,10 +96,10 @@ export function startIPPureCollector({
     for (const { snapshotId, index, node } of entries) {
       if (abort.signal.aborted) return;
       const old = node.ippure;
-      const currentExitIP = old?.exitIPSource === "ip.sb";
-      const currentExitMode = old?.exitIPMode === "ip.sb";
+      const currentExitIP = hasVerifiedExitIP(old);
+      const currentExitMode = old?.exitIPMode === "proxy-echo";
       const currentSignature = old?.signatureVersion === 2;
-      const currentResolution = old?.exitIPVersion === 2;
+      const currentResolution = old?.exitIPVersion === EXIT_IP_VERSION;
       const backfill =
         old?.status === "success" && currentExitIP && !old.asnOrganization;
       if (old?.status === "success" && currentExitIP && !backfill) continue;
@@ -121,6 +134,7 @@ export function startIPPureCollector({
       const ownProxy = matchProxy(node);
       if (!ownProxy) continue;
       jobs.push({
+        identity: aggregateIdentity(node),
         snapshotId,
         index,
         old,
@@ -133,8 +147,18 @@ export function startIPPureCollector({
     for (let offset = 0; offset < jobs.length; offset += concurrency) {
       if (abort.signal.aborted || (await store.get())?.id !== snapshot.id)
         return;
-      const batch = jobs.slice(offset, offset + concurrency);
-      const donors = working.filter((proxy) => !unavailable.has(proxy));
+      const retired = store.retiredNodeIdentities
+        ? await store.retiredNodeIdentities()
+        : new Set();
+      const batch = jobs
+        .slice(offset, offset + concurrency)
+        .filter((job) => !retired.has(job.identity));
+      if (!batch.length) continue;
+      const donors = working.filter(
+        (proxy) =>
+          !unavailable.has(proxy) &&
+          !retired.has(transportIdentities.get(proxy)),
+      );
       const pool =
         donors.length <= 3
           ? donors
@@ -168,10 +192,10 @@ export function startIPPureCollector({
               checkedAt: new Date().toISOString(),
               attempts: attempts + 1,
               queryMode: "specified-exit",
-              exitIPMode: "ip.sb",
+              exitIPMode: "proxy-echo",
               transportMode: "http",
               signatureVersion: 2,
-              exitIPVersion: 2,
+              exitIPVersion: EXIT_IP_VERSION,
             };
             let failureStage = "exit-ip";
             try {
@@ -183,21 +207,41 @@ export function startIPPureCollector({
                 asnCache,
                 signal: abort.signal,
               };
-              const target =
+              const resolved =
                 currentExitIP &&
                 typeof old?.ip === "string" &&
                 isIP(old.ip) === 4
-                  ? old.ip
+                  ? { ip: old.ip, provider: old.exitIPSource }
                   : await resolveIP({
                       ...options,
                       proxyUrl: urls.get(ownProxy),
                       proxy: ownProxy,
                     });
+              // Injected legacy resolvers return a string; production returns
+              // the address and the service that actually observed it.
+              const { ip: target, provider } =
+                typeof resolved === "string"
+                  ? { ip: resolved, provider: "ip.sb" }
+                  : resolved || {};
               if (typeof target !== "string" || !isIP(target))
                 throw new Error("IPPure 无法获取有效的节点出口 IP");
               result.ip = target;
-              result.exitIPSource = "ip.sb";
+              result.exitIPSource = provider;
+              result.addressFamily = isIP(target);
               result.queryTarget = target;
+              if (result.addressFamily === 6) {
+                result.status = "unsupported";
+                result.failureStage = "unsupported-ipv6";
+                result.error =
+                  "已获取 IPv6 出口，IPPure 风险评分接口暂不支持 IPv6";
+                if (
+                  abort.signal.aborted ||
+                  (await store.get())?.id !== snapshot.id
+                )
+                  return;
+                await store.saveIPPure(snapshotId, index, result);
+                return;
+              }
               failureStage = "ippure-query";
               const available = [
                 ...new Set([
@@ -230,6 +274,11 @@ export function startIPPureCollector({
                     });
 
                     if (!working.includes(proxy)) working.push(proxy);
+                    if (!transportIdentities.has(proxy))
+                      transportIdentities.set(
+                        proxy,
+                        batch.find((job) => job.ownProxy === proxy)?.identity,
+                      );
                     return data;
                   } catch (error) {
                     if (abort.signal.aborted) return;
@@ -264,14 +313,32 @@ export function startIPPureCollector({
                 });
                 return;
               }
-              result.status = "error";
-              result.failureStage = failureStage;
-              // Never persist proxy credentials or controller response bodies.
-              result.error = /IPPure|IP\.SB|代理配置/.test(error.message)
-                ? error.message.slice(0, 160)
-                : failureStage === "exit-ip"
-                  ? "节点 IPv4 出口探测失败，请检查节点连接后重试"
-                  : "IPPure 查询代理连接失败，请稍后重试";
+              if (
+                failureStage === "exit-ip" &&
+                old?.status === "unsupported" &&
+                currentExitIP &&
+                isIP(old.ip || "") === 6
+              ) {
+                // A later unreachable echo service does not erase an observed
+                // IPv6 exit or turn IPv4 scoring support into node failure.
+                Object.assign(result, {
+                  status: "unsupported",
+                  ip: old.ip,
+                  exitIPSource: old.exitIPSource,
+                  addressFamily: 6,
+                  failureStage: "unsupported-ipv6",
+                  error: old.error,
+                });
+              } else {
+                result.status = "error";
+                result.failureStage = failureStage;
+                // Never persist proxy credentials or controller response bodies.
+                result.error = /IPPure|IP\.SB|代理配置/.test(error.message)
+                  ? error.message.slice(0, 160)
+                  : failureStage === "exit-ip"
+                    ? "节点 IPv4 出口探测失败，请检查节点连接后重试"
+                    : "IPPure 查询代理连接失败，请稍后重试";
+              }
             }
             if (abort.signal.aborted || (await store.get())?.id !== snapshot.id)
               return;

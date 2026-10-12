@@ -108,7 +108,13 @@ function IPPureMetric({
   if (result?.status !== "success")
     return (
       <span className="text-muted-foreground" title={result?.error}>
-        {result?.status === "error" ? "检测失败" : "待检测"}
+        {result?.status === "unsupported"
+          ? "仅 IPv6，暂无评分"
+          : result?.status === "error"
+            ? result.ip
+              ? "风险查询失败"
+              : "出口探测失败"
+            : "待检测"}
       </span>
     );
   if (metric === "asnOrganization")
@@ -1275,11 +1281,24 @@ export default function App() {
                   </>
                 )}
                 <h3>IPPure 检测</h3>
+                {selected.ippure?.ip && (
+                  <dl>
+                    <div className="detail-field">
+                      <dt>检测出口 IP</dt>
+                      <dd>{selected.ippure.ip}</dd>
+                    </div>
+                    {selected.ippure.exitIPSource && (
+                      <div className="detail-field">
+                        <dt>出口查询服务</dt>
+                        <dd>{selected.ippure.exitIPSource}</dd>
+                      </div>
+                    )}
+                  </dl>
+                )}
                 {selected.ippure?.status === "success" ? (
                   <>
                     <dl>
                       {[
-                        ["检测出口 IP", selected.ippure.ip],
                         ["ASN", selected.ippure.asn || "待补采"],
                         [
                           "ASN 组织",
@@ -1322,18 +1341,20 @@ export default function App() {
                     </div>
                     <p className="detail-note">
                       系数越低越纯净；人机流量比为 IPPure 提供的 ASN
-                      流量统计。按该节点访问 IP.SB 得到的出口 IP 查询，IPPure
+                      流量统计。按该节点访问出口查询服务得到的 IP 查询，IPPure
                       请求可经其他可用节点转发。
                     </p>
                   </>
                 ) : (
                   <p className="detail-note">
-                    {selected.ippure?.status === "error"
-                      ? `${selected.ippure.error}（已尝试 ${selected.ippure.attempts} 次，最多 3 次）`
-                      : snapshot?.ippureCollector?.error ||
-                        (snapshot?.ippureCollector?.enabled === false
-                          ? "IPPure 检测服务未启用，请配置独立代理检测服务。"
-                          : "尚无 IPPure 结果；检测服务启用后会依次检测当前批次，刷新页面可查看进度。历史批次保留当时已采集的结果。")}
+                    {selected.ippure?.status === "unsupported"
+                      ? selected.ippure.error
+                      : selected.ippure?.status === "error"
+                        ? `${selected.ippure.error}（已尝试 ${selected.ippure.attempts} 次，最多 3 次）`
+                        : snapshot?.ippureCollector?.error ||
+                          (snapshot?.ippureCollector?.enabled === false
+                            ? "IPPure 检测服务未启用，请配置独立代理检测服务。"
+                            : "尚无 IPPure 结果；检测服务启用后会依次检测当前批次，刷新页面可查看进度。历史批次保留当时已采集的结果。")}
                   </p>
                 )}
                 <h3>服务解锁</h3>

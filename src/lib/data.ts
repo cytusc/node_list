@@ -5,11 +5,14 @@ export type MediaTag = {
   Tag?: string;
 };
 export type IPPureResult = {
-  status: "success" | "error";
+  status: "success" | "error" | "unsupported";
   checkedAt: string;
   attempts: number;
   error?: string;
   ip?: string;
+  exitIPSource?: string;
+  addressFamily?: 4 | 6;
+  failureStage?: string;
   asn?: string;
   asnOrganization?: string;
   humanPercent?: number | null;

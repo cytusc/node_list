@@ -146,10 +146,10 @@ export async function createPostgresStore(config) {
         )
       ).rows;
     },
-    async saveIPPure(id, index, result) {
+    async saveIPPure(id, index, result, identity) {
       await pool.query(
-        "INSERT INTO node_explorer_ippure_results VALUES ($1, $2, $3) ON CONFLICT(snapshot_id, node_index) DO UPDATE SET payload = excluded.payload",
-        [id, index, JSON.stringify(result)],
+        "INSERT INTO node_explorer_ippure_results SELECT $1::integer, $2::integer, $3::text WHERE NOT EXISTS (SELECT 1 FROM node_explorer_retired_nodes WHERE identity = $4) ON CONFLICT(snapshot_id, node_index) DO UPDATE SET payload = excluded.payload",
+        [id, index, JSON.stringify(result), identity],
       );
     },
     async retireNodes(identities, { retiredAt, reason }) {

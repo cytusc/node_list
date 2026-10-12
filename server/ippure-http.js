@@ -122,18 +122,21 @@ export async function configureProxyBatch({
   return urls;
 }
 
-export async function resolveExitIP(options) {
+export async function resolveExitIPInfo(options) {
   return withHTTP(options, async (context, signal) => {
     let failure;
+    let ipv6;
     // IPPure's risk endpoint accepts IPv4 only. Every public IP echo request
     // stays on the node; independent providers cover destination filtering.
-    for (const [url, provider] of [
+    for (const [url, provider, format] of [
       ["https://api-ipv4.ip.sb/ip", "IP.SB"],
       ["https://checkip.amazonaws.com/", "AWS CheckIP"],
       ["https://api.ipify.org", "ipify"],
       ["https://ifconfig.me/ip", "ifconfig.me"],
-      ["https://icanhazip.com/", "icanhazip"],
+      ["https://ipv4.icanhazip.com/", "icanhazip"],
+      ["https://www.cloudflare.com/cdn-cgi/trace", "Cloudflare", "trace"],
       ["https://api.ip.sb/ip", "IP.SB"],
+      ["https://icanhazip.com/", "icanhazip"],
     ]) {
       try {
         const response = await context.get(url);
@@ -141,14 +144,23 @@ export async function resolveExitIP(options) {
           signal.throwIfAborted();
           if (!response.ok())
             throw new Error(`${provider} 访问失败 (HTTP ${response.status()})`);
-          const ip = (await response.text()).trim();
-          if (!isIP(ip)) throw new Error(`${provider} 未返回有效的出口 IP`);
-          if (isIP(ip) !== 4) {
-            throw new Error(
-              `${provider} 返回 IPv6；IPPure 风险评分接口需要 IPv4`,
-            );
+          const body = (await response.text()).trim();
+          const ip =
+            format === "trace"
+              ? body
+                  .split(/\r?\n/)
+                  .find((line) => line.startsWith("ip="))
+                  ?.slice(3)
+                  .trim()
+              : body;
+          if (!isIP(ip || ""))
+            throw new Error(`${provider} 未返回有效的出口 IP`);
+          const data = { ip, provider, addressFamily: isIP(ip) };
+          if (data.addressFamily === 6) {
+            ipv6 ??= data;
+            continue;
           }
-          return ip;
+          return data;
         } finally {
           await response.dispose();
         }
@@ -157,8 +169,17 @@ export async function resolveExitIP(options) {
         failure = error;
       }
     }
-    throw failure;
+    if (ipv6) return ipv6;
+    throw failure || new Error("节点出口 IP 探测失败");
   });
+}
+
+// Preserve the IPv4-only public helper used by maintenance scripts.
+export async function resolveExitIP(options) {
+  const data = await resolveExitIPInfo(options);
+  if (data.addressFamily !== 4)
+    throw new Error(`${data.provider} 返回 IPv6；IPPure 风险评分接口需要 IPv4`);
+  return data.ip;
 }
 
 export function createSignedClient(context, { origin, signal, wait = delay }) {

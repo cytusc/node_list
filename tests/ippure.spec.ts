@@ -123,3 +123,51 @@ test("shows stored IPPure fields in desktop details and mobile cards", async ({
     card.getByRole("img", { name: "人机流量比 human 15.96% / bot 84.04%" }),
   ).toBeVisible();
 });
+
+test("retains an IPv6 exit and distinguishes unsupported scoring from a dead node", async ({
+  page,
+}) => {
+  await page.route("**/api/results?view=aggregate", (route) =>
+    route.fulfill({
+      json: {
+        speedTest: false,
+        mediaCheck: false,
+        batchCount: 1,
+        nodes: [
+          {
+            name: "IPv6 node",
+            type: "http",
+            server: "node.example",
+            port: "443",
+            network: "tcp",
+            tls: true,
+            udp: false,
+            speed: 0,
+            ippure: {
+              status: "unsupported",
+              attempts: 1,
+              checkedAt: "2026-10-12T00:00:00Z",
+              ip: "2001:db8::23",
+              exitIPSource: "AWS CheckIP",
+              addressFamily: 6,
+              error: "已获取 IPv6 出口，IPPure 风险评分接口暂不支持 IPv6",
+            },
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/downloads", (route) => route.fulfill({ json: [] }));
+  await page.goto("/");
+  const row = page.locator(".node-row");
+  await expect(row.locator('[data-column="ippure"]')).toHaveText(
+    "仅 IPv6，暂无评分",
+  );
+  await expect(row).not.toContainText("检测失败");
+  await page.locator(".node-name").click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("2001:db8::23");
+  await expect(dialog).toContainText("AWS CheckIP");
+  await expect(dialog).toContainText("风险评分接口暂不支持 IPv6");
+  await expect(dialog).not.toContainText("最多 3 次");
+});
