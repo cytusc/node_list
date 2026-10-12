@@ -42,6 +42,8 @@ export type NodeRecord = {
   subTag?: string;
   media?: MediaTag[];
   details?: { k: string; v: string }[];
+  rawLink?: string;
+  rawConfig?: Record<string, unknown>;
 };
 export type HistoryItem = {
   id: number;

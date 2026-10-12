@@ -1,4 +1,5 @@
 import pg from "pg";
+import { reconcileSnapshot } from "./node-sources.js";
 import { createSnapshotStore } from "./store.js";
 
 export async function createPostgresStore(config) {
@@ -49,6 +50,58 @@ export async function createPostgresStore(config) {
           payload,
         ],
       );
+    },
+    async reconcile(linkedNodes, { prune = false } = {}) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          "LOCK TABLE node_explorer_snapshots, node_explorer_ippure_results IN EXCLUSIVE MODE",
+        );
+        const rows = await client.query(
+          "SELECT id, payload FROM node_explorer_snapshots ORDER BY id",
+        );
+        const enrichments = await client.query(
+          'SELECT snapshot_id AS "snapshotId", node_index AS "nodeIndex", payload FROM node_explorer_ippure_results',
+        );
+        const bySnapshot = new Map();
+        for (const item of enrichments.rows) {
+          if (!bySnapshot.has(item.snapshotId))
+            bySnapshot.set(item.snapshotId, []);
+          bySnapshot.get(item.snapshotId).push(item);
+        }
+        for (const row of rows.rows) {
+          const { snapshot, indexes, changed } = reconcileSnapshot(
+            JSON.parse(row.payload),
+            linkedNodes,
+            prune,
+          );
+          const saved = bySnapshot.get(row.id) || [];
+          if (!changed) continue;
+          await client.query(
+            "DELETE FROM node_explorer_ippure_results WHERE snapshot_id = $1",
+            [row.id],
+          );
+          await client.query(
+            "UPDATE node_explorer_snapshots SET node_count = $1, payload = $2 WHERE id = $3",
+            [snapshot.nodes.length, JSON.stringify(snapshot), row.id],
+          );
+          for (const item of saved) {
+            const nodeIndex = indexes.get(item.nodeIndex);
+            if (nodeIndex !== undefined)
+              await client.query(
+                "INSERT INTO node_explorer_ippure_results VALUES ($1, $2, $3)",
+                [row.id, nodeIndex, item.payload],
+              );
+          }
+        }
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
     },
     async get(id) {
       const result =

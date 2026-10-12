@@ -4,74 +4,56 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { chromium } from "playwright-core";
 import { createStore } from "./store.js";
-import {
-  startIPPureCollector,
-  queryIPPure,
-  resolveExitIP,
-} from "./ippure.js";
+import { summarizeProxy } from "./node-sources.js";
+import { startIPPureCollector, queryIPPure } from "./ippure.js";
 
-test("exit IP is read from IP.SB through the configured target proxy", async (t) => {
-  const controller = createServer((_request, response) => {
-    response.writeHead(204).end();
-  });
-  await new Promise((resolve) => controller.listen(0, "127.0.0.1", resolve));
-  t.after(() => controller.close());
-  const controllerUrl = `http://127.0.0.1:${controller.address().port}`;
-  const proxyUrl = "http://127.0.0.1:7890";
-  const urls = [];
-  const ip = await resolveExitIP({
-    controller: controllerUrl,
-    proxyUrl,
-    proxy: { name: "target", type: "http", server: "proxy.example.org", port: 8080 },
-    signal: new AbortController().signal,
-    launchBrowser: async ({ proxy }) => {
-      assert.deepEqual(proxy, { server: proxyUrl });
-      return {
-        newPage: async () => ({
-          goto: async (url) => {
-            urls.push(url);
-            return { ok: () => true };
-          },
-          locator: () => ({ innerText: async () => "203.0.113.17\n" }),
-        }),
-        close: async () => {},
-      };
+test("IPPure uses archived full configuration when live subscription is unavailable", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ippure-archived-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const rawConfig = {
+    name: "archived",
+    type: "http",
+    server: "node.example",
+    port: 443,
+    tls: true,
+    username: "private",
+    password: "secret",
+  };
+  const file = path.join(dir, "results.json");
+  await writeFile(
+    file,
+    JSON.stringify({ nodes: [{ ...summarizeProxy(rawConfig), rawConfig }] }),
+  );
+  const store = createStore();
+  let resolutions = 0;
+  const collector = startIPPureCollector({
+    concurrency: 1,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p, i) => [p, `http://127.0.0.1:${7890 + i}`])),
+    store,
+    subDir: dir,
+    intervalMs: 999999,
+    resolveIP: async ({ proxy }) => {
+      assert.deepEqual(proxy, rawConfig);
+      resolutions++;
+      return "192.0.2.44";
+    },
+    query: async ({ proxy, target }) => {
+      assert.deepEqual(proxy, rawConfig);
+      assert.equal(target, "192.0.2.44");
+      return { ip: target, asnOrganization: "Test" };
     },
   });
-  assert.equal(ip, "203.0.113.17");
-  assert.deepEqual(urls, ["https://api.ip.sb/ip"]);
-});
-
-test("default browser launcher preserves the Chromium instance context", async (t) => {
-  const controller = createServer((_request, response) => {
-    response.writeHead(204).end();
+  t.after(async () => {
+    await collector.close();
+    await store.close();
   });
-  await new Promise((resolve) => controller.listen(0, "127.0.0.1", resolve));
-  t.after(() => controller.close());
-  const originalLaunch = chromium.launch;
-  t.after(() => {
-    chromium.launch = originalLaunch;
-  });
-  chromium.launch = async function (options) {
-    assert.equal(this, chromium);
-    assert.equal(options.proxy.server, "http://127.0.0.1:7890");
-    return {
-      newPage: async () => ({
-        goto: async () => ({ ok: () => true }),
-        locator: () => ({ innerText: async () => "203.0.113.19" }),
-      }),
-      close: async () => {},
-    };
-  };
-  const ip = await resolveExitIP({
-    controller: `http://127.0.0.1:${controller.address().port}`,
-    proxyUrl: "http://127.0.0.1:7890",
-    proxy: { name: "target", type: "http", server: "proxy.example.org", port: 8080 },
-    signal: new AbortController().signal,
-  });
-  assert.equal(ip, "203.0.113.19");
+  await collector.run();
+  await store.sync(file);
+  await collector.run();
+  assert.equal(resolutions, 1);
+  assert.equal((await store.get()).nodes[0].ippure.status, "success");
 });
 
 test("IPPure saves per-node results, retries failures without rechecking successes and preserves batches after reopen", async (t) => {
@@ -111,6 +93,9 @@ test("IPPure saves per-node results, retries failures without rechecking success
   let failBackfill = false;
   const resolutions = [];
   const collector = startIPPureCollector({
+    concurrency: 1,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p, i) => [p, `http://127.0.0.1:${7890 + i}`])),
     store,
     subDir: dir,
     intervalMs: 999999,
@@ -230,6 +215,9 @@ test("IPPure rotates successful transports, rescues exhausted failures and saves
   const calls = [];
   const resolutions = [];
   const collector = startIPPureCollector({
+    concurrency: 1,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p, i) => [p, `http://127.0.0.1:${7890 + i}`])),
     subDir: dir,
     intervalMs: 999999,
     resolveIP: async ({ proxy }) => {
@@ -294,6 +282,9 @@ test("IPPure uses different successful nodes on consecutive queries", async (t) 
   );
   const calls = [];
   const collector = startIPPureCollector({
+    concurrency: 1,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p, i) => [p, `http://127.0.0.1:${7890 + i}`])),
     subDir: dir,
     intervalMs: 999999,
     resolveIP: async ({ proxy }) => {
@@ -343,6 +334,9 @@ test("IPPure refreshes legacy results and reuses only an IP.SB-verified exit IP"
   const snapshot = { id: 1, nodes: [node] };
   const calls = [];
   const collector = startIPPureCollector({
+    concurrency: 1,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p, i) => [p, `http://127.0.0.1:${7890 + i}`])),
     subDir: dir,
     intervalMs: 999999,
     resolveIP: async ({ proxy }) => {
@@ -397,6 +391,9 @@ test("IPPure does not query the server address when resolving the exit IP fails"
   );
   let queries = 0;
   const collector = startIPPureCollector({
+    concurrency: 1,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p, i) => [p, `http://127.0.0.1:${7890 + i}`])),
     subDir: dir,
     intervalMs: 999999,
     store: {
@@ -418,4 +415,165 @@ test("IPPure does not query the server address when resolving the exit IP fails"
   assert.equal(node.ippure.status, "error");
   assert.equal(node.ippure.ip, undefined);
   assert.equal(node.ippure.error, "IPPure 无法获取节点出口 IP");
+});
+
+test("batch collection runs concurrently, deduplicates exit IPs and drains before reconfiguration", async (t) => {
+  const nodes = Array.from({ length: 7 }, (_, i) => ({
+    name: `node${i}`,
+    rawConfig: {
+      name: `node${i}`,
+      type: "http",
+      server: `node${i}.example`,
+      port: 443,
+    },
+  }));
+  let active = 0;
+  let maxActive = 0;
+  let configurations = 0;
+  const calls = [];
+  const collector = startIPPureCollector({
+    concurrency: 3,
+    intervalMs: 999999,
+    store: {
+      get: async () => structuredClone({ id: 1, nodes }),
+      saveIPPure: async (_id, index, data) => {
+        nodes[index].ippure = data;
+      },
+    },
+    configure: async ({ proxies }) => {
+      assert.equal(active, 0);
+      assert.ok(proxies.length <= 6);
+      configurations++;
+      return new Map(
+        proxies.map((proxy, i) => [proxy, `http://localhost:${7890 + i}`]),
+      );
+    },
+    resolveIP: async ({ proxy, proxyUrl }) => {
+      assert.ok(proxyUrl);
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 10));
+      active--;
+      return ["node0", "node1", "node3"].includes(proxy.name)
+        ? "192.0.2.1"
+        : `192.0.2.${Number(proxy.name.slice(4)) + 10}`;
+    },
+    query: async ({ target, proxyUrl }) => {
+      assert.ok(proxyUrl);
+      calls.push(target);
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 10));
+      active--;
+      return { ip: target, asnOrganization: "Test", score: 36 };
+    },
+  });
+  t.after(() => collector.close());
+  await Promise.all([collector.run(), collector.run()]);
+  assert.equal(maxActive, 3);
+  assert.equal(configurations, 3);
+  assert.equal(calls.filter((ip) => ip === "192.0.2.1").length, 1);
+  assert.equal(
+    nodes.filter((node) => node.ippure.status === "success").length,
+    7,
+  );
+  assert.equal(nodes[3].ippure.ip, "192.0.2.1");
+  await collector.run();
+  assert.equal(configurations, 3);
+});
+
+test("a changed snapshot prevents stale concurrent writes and stops further batches", async (t) => {
+  let snapshotId = 1;
+  let configured = 0;
+  const nodes = Array.from({ length: 4 }, (_, i) => ({
+    rawConfig: { name: String(i) },
+  }));
+  const collector = startIPPureCollector({
+    concurrency: 2,
+    intervalMs: 999999,
+    store: {
+      get: async () => ({ id: snapshotId, nodes }),
+      saveIPPure: async () => assert.fail("stale result written"),
+    },
+    configure: async ({ proxies }) => {
+      configured++;
+      return new Map(proxies.map((p) => [p, "http://localhost:7890"]));
+    },
+    resolveIP: async () => "192.0.2.1",
+    query: async ({ target }) => {
+      snapshotId = 2;
+      return { ip: target };
+    },
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.equal(configured, 1);
+});
+
+test("failed saves do not release the batch until all concurrent requests settle", async (t) => {
+  const nodes = [0, 1].map((i) => ({ rawConfig: { name: String(i) } }));
+  let release;
+  const blocked = new Promise((r) => {
+    release = r;
+  });
+  let completed = false;
+  const collector = startIPPureCollector({
+    concurrency: 2,
+    intervalMs: 999999,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      saveIPPure: async () => {
+        throw new Error("database unavailable");
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7890"])),
+    resolveIP: async ({ proxy }) => `192.0.2.${Number(proxy.name) + 1}`,
+    query: async ({ target }) => {
+      if (target.endsWith("2")) await blocked;
+      return { ip: target };
+    },
+  });
+  t.after(() => collector.close());
+  const running = collector.run().then(() => {
+    completed = true;
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(completed, false);
+  release();
+  await running;
+  assert.match(collector.status().error, /采集暂时不可用/);
+});
+
+test("HTTP migration gives exhausted browser failures a fresh retry budget and keeps verified exit IPs", async (t) => {
+  const node = {
+    rawConfig: { name: "old-browser-failure" },
+    ippure: {
+      status: "error",
+      ip: "192.0.2.1",
+      exitIPSource: "ip.sb",
+      exitIPMode: "ip.sb",
+      queryMode: "specified-exit",
+      attempts: 3,
+      checkedAt: new Date().toISOString(),
+    },
+  };
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    store: {
+      get: async () => ({ id: 1, nodes: [node] }),
+      saveIPPure: async (_id, _index, data) => {
+        node.ippure = data;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7890"])),
+    resolveIP: async () => assert.fail("verified exit IP should be reused"),
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Updated" }),
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.equal(node.ippure.status, "success");
+  assert.equal(node.ippure.attempts, 1);
+  assert.equal(node.ippure.transportMode, "http");
 });

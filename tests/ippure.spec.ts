@@ -1,43 +1,4 @@
 import { test, expect } from "@playwright/test";
-import { extractIPPure } from "../server/ippure.js";
-
-const html = `<div class="iptable-container">
-<div><span class="info-key">IP</span><div class="info-value"><span>82.38.64.237</span><button></button></div></div>
-<div><span class="info-key">ASN</span><div class="info-value">AS212194 - YUUSEI LTD</div><div class="botclass-value"><span>human 15.96%</span><span>bot 84.04%</span></div></div>
-<div><span class="info-key">IP来源</span><span class="info-value"><span class="ip-tag">广播IP</span></span></div>
-<div><span class="info-key">IP属性</span><span class="info-value ip-attr"><span class="ip-tag">机房IP</span></span></div>
-<div class="colormap-indicator-value">32% 中性</div></div>`;
-
-test("extracts IPPure DOM values, handles zero and missing ASN statistics, rejects partial results", async ({
-  page,
-}) => {
-  await page.setContent(html);
-  const result = await page.evaluate(extractIPPure);
-  expect(result).toEqual({
-    ip: "82.38.64.237",
-    asn: "AS212194",
-    asnOrganization: "YUUSEI LTD",
-    source: "广播IP",
-    attributes: ["机房IP"],
-    humanPercent: 15.96,
-    botPercent: 84.04,
-    score: 32,
-    label: "中性",
-  });
-  await page.locator(".colormap-indicator-value").evaluate((el) => {
-    el.textContent = "0% 极度纯净";
-  });
-  expect((await page.evaluate(extractIPPure)).score).toBe(0);
-  await page.locator(".botclass-value").evaluate((el) => el.remove());
-  expect((await page.evaluate(extractIPPure)).humanPercent).toBeNull();
-  await page.locator(".ip-attr").evaluate((el) => {
-    el.textContent = "";
-  });
-  await expect(page.evaluate(extractIPPure)).rejects.toThrow(
-    "IPPure 返回信息不完整",
-  );
-});
-
 test("shows stored IPPure fields in desktop details and mobile cards", async ({
   page,
 }) => {

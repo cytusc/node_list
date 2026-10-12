@@ -19,6 +19,8 @@ export function createApp({
   resultsFile,
   distDir,
   databasePath,
+  linksFile,
+  clashFile,
   store: configuredStore,
   importIntervalMs = 5000,
   ippure,
@@ -30,15 +32,18 @@ export function createApp({
     resultsFile ||
     path.join(subDir, "config", "cache", "config", "results.json");
   const store = configuredStore || createStore(databasePath);
-  const sync = () => store.sync(snapshotPath).catch(() => {});
-  void sync();
+  const sources = clashFile ? { clashFile, linksFile } : linksFile;
+  const sync = () => store.sync(snapshotPath, sources).catch(() => {});
+  const initialSync = sync();
   const timer = setInterval(sync, importIntervalMs);
   timer.unref();
-  const collector = ippure
-    ? startIPPureCollector({ store, subDir, ...ippure })
-    : null;
+  let collector = null;
+  const collectorReady = initialSync.then(() => {
+    if (ippure) collector = startIPPureCollector({ store, subDir, ...ippure });
+  });
   app.locals.close = async () => {
     clearInterval(timer);
+    await collectorReady;
     await collector?.close();
     await sync();
     await store.close();
@@ -86,7 +91,7 @@ export function createApp({
     try {
       let sourceError;
       try {
-        await store.sync(snapshotPath);
+        await store.sync(snapshotPath, sources);
       } catch (error) {
         sourceError = error;
       }

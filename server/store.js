@@ -3,6 +3,14 @@ import { mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import {
+  nodeIdentity,
+  aggregateIdentity,
+  sourceKey,
+  readNodeSources,
+  sourceForNode,
+  reconcileSnapshot,
+} from "./node-sources.js";
 
 const fields = [
   "name",
@@ -22,6 +30,8 @@ const fields = [
   "media",
   "subTag",
   "details",
+  "rawLink",
+  "rawConfig",
 ];
 
 export function createStore(databasePath = ":memory:") {
@@ -60,6 +70,49 @@ export function createStore(databasePath = ":memory:") {
           snapshot.nodes.length,
           payload,
         );
+    },
+    reconcile(linkedNodes, { prune = false } = {}) {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const rows = db
+          .prepare("SELECT id, payload FROM snapshots ORDER BY id")
+          .all();
+        for (const row of rows) {
+          const { snapshot, indexes, changed } = reconcileSnapshot(
+            JSON.parse(row.payload),
+            linkedNodes,
+            prune,
+          );
+          if (!changed) continue;
+          const saved = db
+            .prepare(
+              "SELECT node_index AS nodeIndex, payload FROM ippure_results WHERE snapshot_id = ?",
+            )
+            .all(row.id);
+          db.prepare("DELETE FROM ippure_results WHERE snapshot_id = ?").run(
+            row.id,
+          );
+          // Fingerprints identify the original detection input, not a migration.
+          // Keep IDs and empty batch metadata; enrichment cannot collide with an
+          // existing fingerprint or create a duplicate on the next import.
+          db.prepare(
+            "UPDATE snapshots SET node_count = ?, payload = ? WHERE id = ?",
+          ).run(snapshot.nodes.length, JSON.stringify(snapshot), row.id);
+          for (const item of saved) {
+            const nodeIndex = indexes.get(item.nodeIndex);
+            if (nodeIndex !== undefined)
+              db.prepare("INSERT INTO ippure_results VALUES (?, ?, ?)").run(
+                row.id,
+                nodeIndex,
+                item.payload,
+              );
+          }
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
     },
     get(id) {
       return id === undefined
@@ -116,7 +169,8 @@ export function createStore(databasePath = ":memory:") {
 export function createSnapshotStore(adapter) {
   let pending;
   let sourceWarning = null;
-  async function ingest(file) {
+  let sourcesBackfilled = false;
+  async function ingest(file, linksFile) {
     try {
       const raw = JSON.parse(await readFile(file, "utf8"));
       if (
@@ -125,19 +179,53 @@ export function createSnapshotStore(adapter) {
       ) {
         throw new Error("Invalid snapshot");
       }
+      const sources = linksFile ? await readNodeSources(linksFile) : null;
       const snapshot = {
         checkedAt:
           typeof raw.checkedAt === "string" ? raw.checkedAt : undefined,
         speedTest: !!raw.speedTest,
         mediaCheck: !!raw.mediaCheck,
-        nodes: raw.nodes.map((n) =>
-          Object.fromEntries(
+        nodes: raw.nodes.map((n) => {
+          const values = Object.fromEntries(
             fields.filter((k) => k in n).map((k) => [k, n[k]]),
-          ),
-        ),
+          );
+          if (sources) {
+            const source = sourceForNode(n, sources, { exactNames: true });
+            if (!source && !values.rawLink && !values.rawConfig)
+              throw new Error(
+                "Results and node sources do not match; retry after upstream finishes publishing",
+              );
+            Object.assign(values, source);
+          }
+          return values;
+        }),
       };
+      if (sources && !sourcesBackfilled) {
+        const linkedNodes = new Map();
+        for (const row of await adapter.all()) {
+          for (const node of JSON.parse(row.payload).nodes) {
+            const source = sourceForNode(node, sources);
+            if (source) linkedNodes.set(sourceKey(node), source);
+          }
+        }
+        for (const node of snapshot.nodes)
+          linkedNodes.set(sourceKey(node), {
+            ...(node.rawLink ? { rawLink: node.rawLink } : {}),
+            ...(node.rawConfig ? { rawConfig: node.rawConfig } : {}),
+          });
+        await adapter.reconcile(linkedNodes);
+        sourcesBackfilled = true;
+      }
+      // Raw sources are archived alongside a detection batch but are not part
+      // of its identity; adding provenance must preserve its IPPure results.
+      const original = {
+        ...snapshot,
+        nodes: snapshot.nodes.map(({ rawLink, rawConfig, ...node }) => node),
+      };
+      const fingerprint = createHash("sha256")
+        .update(JSON.stringify(original))
+        .digest("hex");
       const payload = JSON.stringify(snapshot);
-      const fingerprint = createHash("sha256").update(payload).digest("hex");
       await adapter.insert({ fingerprint, snapshot, payload });
       sourceWarning = null;
     } catch (error) {
@@ -156,10 +244,12 @@ export function createSnapshotStore(adapter) {
   }
   return {
     saveIPPure: (id, index, result) => adapter.saveIPPure(id, index, result),
+    reconcileSources: (linkedNodes, options) =>
+      adapter.reconcile(linkedNodes, options),
     // Requests and the background collector share a single in-flight import.
-    sync(file) {
+    sync(file, linksFile) {
       if (!pending)
-        pending = ingest(file).finally(() => {
+        pending = ingest(file, linksFile).finally(() => {
           pending = undefined;
         });
       return pending;
@@ -197,7 +287,7 @@ export function createSnapshotStore(adapter) {
       for (const batch of batches) {
         for (const node of batch.nodes) {
           // Names, exit IPs and test results can change between checks.
-          const key = nodeIdentity(node);
+          const key = aggregateIdentity(node);
           if (!nodes.has(key))
             nodes.set(key, {
               ...node,
@@ -225,23 +315,4 @@ export function createSnapshotStore(adapter) {
     history: (limit, offset) => adapter.history(limit, offset),
     close: () => adapter.close(),
   };
-}
-
-function nodeIdentity(node) {
-  const details = (node.details || [])
-    .map(({ k, v }) => [k, v])
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
-  return JSON.stringify([
-    node.type?.toLowerCase(),
-    node.server?.toLowerCase(),
-    String(node.port ?? ""),
-    node.sni?.toLowerCase() || "",
-    node.network?.toLowerCase() || "",
-    !!node.tls,
-    !!node.reality,
-    !!node.udp,
-    details,
-    // Incomplete legacy records cannot be identified by an endpoint alone.
-    node.server ? "" : node.baseName || node.name,
-  ]);
 }

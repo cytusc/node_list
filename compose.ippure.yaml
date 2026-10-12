@@ -1,4 +1,4 @@
-# Dedicated Mihomo instance: its active proxy is changed by the collector.
+# Dedicated Mihomo instance: the collector loads isolated listeners per batch.
 # Do not point the collector at a proxy instance used by other applications.
 services:
   ippure-proxy:
@@ -29,7 +29,8 @@ services:
     environment:
       IPPURE_CONTROLLER: http://ippure-proxy:9090
       IPPURE_PROXY_URL: http://ippure-proxy:7890
-      PLAYWRIGHT_CHROMIUM_EXECUTABLE: /usr/bin/chromium
+      IPPURE_CONCURRENCY: ${IPPURE_CONCURRENCY:-3}
+      IPPURE_API_ORIGIN: ${IPPURE_API_ORIGIN:-https://api.123169.xyz}
 
 networks:
   ippure:
