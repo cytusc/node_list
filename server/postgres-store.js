@@ -29,6 +29,11 @@ export async function createPostgresStore(config) {
       snapshot_id INTEGER NOT NULL REFERENCES node_explorer_snapshots(id),
       node_index INTEGER NOT NULL, payload TEXT NOT NULL,
       PRIMARY KEY (snapshot_id, node_index)
+    );
+    CREATE TABLE IF NOT EXISTS node_explorer_retired_nodes (
+      identity TEXT PRIMARY KEY,
+      retired_at TEXT NOT NULL,
+      reason TEXT NOT NULL
     )`);
   } catch (error) {
     await pool.end();
@@ -146,6 +151,30 @@ export async function createPostgresStore(config) {
         "INSERT INTO node_explorer_ippure_results VALUES ($1, $2, $3) ON CONFLICT(snapshot_id, node_index) DO UPDATE SET payload = excluded.payload",
         [id, index, JSON.stringify(result)],
       );
+    },
+    async retireNodes(identities, { retiredAt, reason }) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        for (const identity of identities)
+          await client.query(
+            "INSERT INTO node_explorer_retired_nodes(identity, retired_at, reason) VALUES ($1, $2, $3) ON CONFLICT(identity) DO NOTHING",
+            [identity, retiredAt, reason],
+          );
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+    async retiredNodes() {
+      return (
+        await pool.query(
+          'SELECT identity, retired_at AS "retiredAt", reason FROM node_explorer_retired_nodes',
+        )
+      ).rows;
     },
     close() {
       return pool.end();

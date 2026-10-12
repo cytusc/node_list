@@ -52,6 +52,11 @@ export function createStore(databasePath = ":memory:") {
       snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
       node_index INTEGER NOT NULL, payload TEXT NOT NULL,
       PRIMARY KEY (snapshot_id, node_index)
+    );
+    CREATE TABLE IF NOT EXISTS retired_nodes (
+      identity TEXT PRIMARY KEY,
+      retired_at TEXT NOT NULL,
+      reason TEXT NOT NULL
     );`);
   return createSnapshotStore({
     insert({ fingerprint, snapshot, payload }) {
@@ -160,6 +165,22 @@ export function createStore(databasePath = ":memory:") {
         "INSERT INTO ippure_results VALUES (?, ?, ?) ON CONFLICT(snapshot_id, node_index) DO UPDATE SET payload = excluded.payload",
       ).run(id, index, JSON.stringify(result));
     },
+    retireNodes(identities, { retiredAt, reason }) {
+      const save = db.prepare(
+        "INSERT INTO retired_nodes(identity, retired_at, reason) VALUES (?, ?, ?) ON CONFLICT(identity) DO NOTHING",
+      );
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        for (const identity of identities) save.run(identity, retiredAt, reason);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    },
+    retiredNodes() {
+      return db.prepare("SELECT identity, retired_at AS retiredAt, reason FROM retired_nodes").all();
+    },
     close() {
       db.close();
     },
@@ -242,8 +263,26 @@ export function createSnapshotStore(adapter) {
     }
     return snapshot;
   }
+  async function visible(snapshot, { includeRetired = false } = {}) {
+    if (!snapshot || includeRetired) return snapshot;
+    const retired = new Set((await adapter.retiredNodes()).map((item) => item.identity));
+    return {
+      ...snapshot,
+      nodes: snapshot.nodes.filter((node) => !retired.has(aggregateIdentity(node))),
+    };
+  }
   return {
     saveIPPure: (id, index, result) => adapter.saveIPPure(id, index, result),
+    async retireNodes(nodes, reason = "GitHub probe failed twice") {
+      const identities = [...new Set(nodes.map(aggregateIdentity))];
+      if (identities.some((identity) => !identity))
+        throw new Error("Cannot retire a node without a stable identity");
+      await adapter.retireNodes(identities, {
+        retiredAt: new Date().toISOString(),
+        reason,
+      });
+      return identities.length;
+    },
     reconcileSources: (linkedNodes, options) =>
       adapter.reconcile(linkedNodes, options),
     // Requests and the background collector share a single in-flight import.
@@ -256,7 +295,7 @@ export function createSnapshotStore(adapter) {
     },
     async get(id) {
       const row = await adapter.get(id);
-      return hydrate(row);
+      return visible(await hydrate(row), { includeRetired: id !== undefined });
     },
     async aggregate() {
       const rows = await adapter.all();
@@ -267,6 +306,7 @@ export function createSnapshotStore(adapter) {
           enrichments.set(item.snapshotId, []);
         enrichments.get(item.snapshotId).push(item);
       }
+      const retired = new Set((await adapter.retiredNodes()).map((item) => item.identity));
       const batches = (
         await Promise.all(
           rows.map(async (row) => ({
@@ -288,6 +328,7 @@ export function createSnapshotStore(adapter) {
         for (const node of batch.nodes) {
           // Names, exit IPs and test results can change between checks.
           const key = aggregateIdentity(node);
+          if (retired.has(key)) continue;
           if (!nodes.has(key))
             nodes.set(key, {
               ...node,
@@ -321,6 +362,7 @@ export function createSnapshotStore(adapter) {
         enrichments.get(item.snapshotId).push(item);
       }
       const candidates = [];
+      const retired = new Set((await adapter.retiredNodes()).map((item) => item.identity));
       for (const row of rows) {
         const snapshot = JSON.parse(row.payload);
         for (const item of enrichments.get(row.id) || []) {
@@ -329,6 +371,7 @@ export function createSnapshotStore(adapter) {
         }
         snapshot.nodes.forEach((node, index) => {
           if (
+            !retired.has(aggregateIdentity(node)) &&
             (node.ippure?.status !== "success" ||
               node.ippure.exitIPSource !== "ip.sb" ||
               !node.ippure.asnOrganization) &&

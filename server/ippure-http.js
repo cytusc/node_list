@@ -125,20 +125,29 @@ export async function configureProxyBatch({
 export async function resolveExitIP(options) {
   return withHTTP(options, async (context, signal) => {
     let failure;
-    // IPPure's risk endpoint accepts IPv4 only. Both probes must use the node.
-    for (const url of ["https://api-ipv4.ip.sb/ip", "https://api.ip.sb/ip"]) {
+    // IPPure's risk endpoint accepts IPv4 only. Every public IP echo request
+    // stays on the node; independent providers cover destination filtering.
+    for (const [url, provider] of [
+      ["https://api-ipv4.ip.sb/ip", "IP.SB"],
+      ["https://checkip.amazonaws.com/", "AWS CheckIP"],
+      ["https://api.ipify.org", "ipify"],
+      ["https://ifconfig.me/ip", "ifconfig.me"],
+      ["https://icanhazip.com/", "icanhazip"],
+      ["https://api.ip.sb/ip", "IP.SB"],
+    ]) {
       try {
         const response = await context.get(url);
         try {
           signal.throwIfAborted();
           if (!response.ok())
-            throw new Error(`IP.SB 访问失败 (HTTP ${response.status()})`);
+            throw new Error(`${provider} 访问失败 (HTTP ${response.status()})`);
           const ip = (await response.text()).trim();
-          if (!isIP(ip)) throw new Error("IP.SB 未返回有效的出口 IP");
-          if (isIP(ip) !== 4)
+          if (!isIP(ip)) throw new Error(`${provider} 未返回有效的出口 IP`);
+          if (isIP(ip) !== 4) {
             throw new Error(
-              "IP.SB 未返回 IPv4 出口，IPPure 风险评分接口暂不支持 IPv6",
+              `${provider} 返回 IPv6；IPPure 风险评分接口需要 IPv4`,
             );
+          }
           return ip;
         } finally {
           await response.dispose();
