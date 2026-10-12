@@ -362,10 +362,7 @@ test("exit discovery prefers IPv4 and only falls back through the same node", as
       calls,
       first === "192.0.2.20"
         ? ["https://api-ipv4.ip.sb/ip"]
-        : [
-            "https://api-ipv4.ip.sb/ip",
-            "https://checkip.amazonaws.com/",
-          ],
+        : ["https://api-ipv4.ip.sb/ip", "https://checkip.amazonaws.com/"],
     );
   }
 });

@@ -171,7 +171,8 @@ export function createStore(databasePath = ":memory:") {
       );
       db.exec("BEGIN IMMEDIATE");
       try {
-        for (const identity of identities) save.run(identity, retiredAt, reason);
+        for (const identity of identities)
+          save.run(identity, retiredAt, reason);
         db.exec("COMMIT");
       } catch (error) {
         db.exec("ROLLBACK");
@@ -179,7 +180,11 @@ export function createStore(databasePath = ":memory:") {
       }
     },
     retiredNodes() {
-      return db.prepare("SELECT identity, retired_at AS retiredAt, reason FROM retired_nodes").all();
+      return db
+        .prepare(
+          "SELECT identity, retired_at AS retiredAt, reason FROM retired_nodes",
+        )
+        .all();
     },
     close() {
       db.close();
@@ -265,10 +270,14 @@ export function createSnapshotStore(adapter) {
   }
   async function visible(snapshot, { includeRetired = false } = {}) {
     if (!snapshot || includeRetired) return snapshot;
-    const retired = new Set((await adapter.retiredNodes()).map((item) => item.identity));
+    const retired = new Set(
+      (await adapter.retiredNodes()).map((item) => item.identity),
+    );
     return {
       ...snapshot,
-      nodes: snapshot.nodes.filter((node) => !retired.has(aggregateIdentity(node))),
+      nodes: snapshot.nodes.filter(
+        (node) => !retired.has(aggregateIdentity(node)),
+      ),
     };
   }
   return {
@@ -306,7 +315,9 @@ export function createSnapshotStore(adapter) {
           enrichments.set(item.snapshotId, []);
         enrichments.get(item.snapshotId).push(item);
       }
-      const retired = new Set((await adapter.retiredNodes()).map((item) => item.identity));
+      const retired = new Set(
+        (await adapter.retiredNodes()).map((item) => item.identity),
+      );
       const batches = (
         await Promise.all(
           rows.map(async (row) => ({
@@ -362,7 +373,9 @@ export function createSnapshotStore(adapter) {
         enrichments.get(item.snapshotId).push(item);
       }
       const candidates = [];
-      const retired = new Set((await adapter.retiredNodes()).map((item) => item.identity));
+      const retired = new Set(
+        (await adapter.retiredNodes()).map((item) => item.identity),
+      );
       for (const row of rows) {
         const snapshot = JSON.parse(row.payload);
         for (const item of enrichments.get(row.id) || []) {
