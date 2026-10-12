@@ -1240,7 +1240,8 @@ export default function App() {
                     ["端口", selected.port],
                     ["传输方式", selected.network],
                     ["SNI", selected.sni],
-                    ["出口 IP", selected.ip],
+                    ["出口 IP", selected.ippure?.ip],
+                    ["上游检测 IP", selected.ip],
                     ["来源标签", selected.subTag],
                     ["IP 风险", selected.ipRisk],
                   ]
