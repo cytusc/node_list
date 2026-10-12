@@ -21,6 +21,14 @@ npm run dev
 
 人工确认失效的连接可通过 `store.retireNodes(nodes, reason)` 软删除。软删除记录以连接配置摘要为键，隐藏节点的首页/聚合结果并跳过出口 IP 补采；历史批次仍可查阅。恢复时由维护人员删除对应的 retired identity 记录。生产使用 PostgreSQL 的 `node_explorer_retired_nodes` 表，SQLite 使用 `retired_nodes` 表。
 
+### 定时 GitHub 巡检
+
+在服务器 `.env` 的 `COMPOSE_FILE` 追加 `:compose.patrol.yaml`；使用 PostgreSQL 时还需追加 `:compose.patrol.pgsql.yaml`（并保留已有的 `compose.pgsql.yaml`）。运行 `bash deploy/compose.sh up -d github-patrol github-patrol-proxy` 启动独立巡检容器和专用 Mihomo，无需暴露额外主机端口。巡检读取与页面相同的数据库，扫描首页聚合列表中的连接；历史配置保留，已经退役的节点不再巡检。不要扩容该巡检服务或将其控制器指向 IPPure 使用的 Mihomo。
+
+启动后立即扫描；每轮结束后默认等待 30 分钟，再扫描更新后的节点列表。`GITHUB_PATROL_INTERVAL_SECONDS=1800`、`GITHUB_PATROL_CONCURRENCY=2`、`GITHUB_PATROL_TIMEOUT_SECONDS=12`、`GITHUB_PATROL_RETRY_SECONDS=10` 可在 `.env` 中调整。两个节点并发，每次通过各自隔离代理访问 `https://github.com/`，HTTP 200 算成功；失败时等待 10 秒，用新代理连接再次确认。两次失败且服务器直连 GitHub、正常节点的代理对照均成功，才调用软删除。对照失败、没有正常代理、缺少完整配置或代理控制器异常时，不对未确认的节点做删除。所有请求结束后才重载代理配置，巡检不占用 IPPure 代理实例。
+
+巡检摘要保存到共享历史卷的 `github-patrol-status.json`，包含心跳时间、当前进度、完成时间、下次运行时间和成功/退役/暂缓/跳过计数；不包含完整连接配置。使用 `bash deploy/compose.sh logs --tail 20 github-patrol` 查看每轮汇总；容器健康检查读取心跳，巡检过程中每 30 秒更新。容器重启会立即重新巡检，已软删除的记录仍保留在数据库。控制器尚未启动或数据库暂时不可用时，本轮中止并在 60 秒后重试。
+
 数据库默认保存为项目目录下的 `data/nodes.sqlite`，可通过 `DATABASE_PATH` 指定可写路径。节点来源字段保存在检测批次的 JSON payload 中，数据库备份包含订阅连接凭据。
 
 自定义位置可设置 `SUBS_CHECK_DIR` 和可选的 `RESULTS_FILE`、`DATABASE_PATH` 环境变量：
