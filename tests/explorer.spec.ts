@@ -151,6 +151,86 @@ test.describe("interactions and data states", () => {
     await expect(page.getByRole("dialog")).not.toBeVisible();
   });
 
+  for (const mode of ["modern", "missing", "denied", "failed"] as const) {
+    test(`copies detail fields and server addresses (${mode})`, async ({
+      page,
+    }) => {
+      await page.addInitScript((mode) => {
+        const writes: string[] = [];
+        Object.assign(window, { clipboardWrites: writes });
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value:
+            mode === "missing"
+              ? undefined
+              : {
+                  writeText: async (text: string) => {
+                    if (mode !== "modern") {
+                      throw new DOMException(
+                        "Permission denied",
+                        "NotAllowedError",
+                      );
+                    }
+                    writes.push(text);
+                  },
+                },
+        });
+        const execCommand = document.execCommand.bind(document);
+        document.execCommand = (command) => {
+          if (command !== "copy") return execCommand(command);
+          if (mode === "failed") return false;
+          const input = document.activeElement;
+          if (
+            !(input instanceof HTMLTextAreaElement) ||
+            !input.closest('[role="dialog"]')
+          ) {
+            throw new Error("Copy input must be focused inside the dialog");
+          }
+          const copied = execCommand(command);
+          if (copied)
+            writes.push(
+              input.value.slice(input.selectionStart, input.selectionEnd),
+            );
+          return copied;
+        };
+      }, mode);
+      await page.reload();
+      await page.locator(".node-name").first().click();
+      const dialog = page.getByRole("dialog");
+      const transport = dialog.getByRole("button", {
+        name: "复制传输方式",
+        exact: true,
+      });
+      await transport.click();
+      if (mode === "failed") {
+        await expect(
+          page.getByText("复制失败，请手动选择并复制内容"),
+        ).toBeVisible();
+        await expect(transport).toBeFocused();
+        await expect(dialog.locator("textarea")).toHaveCount(0);
+        return;
+      }
+      await expect(page.getByText("已复制到剪贴板").first()).toBeVisible();
+      await expect(transport).toBeFocused();
+      await dialog
+        .getByRole("button", { name: "复制完整名称", exact: true })
+        .click();
+      await dialog
+        .getByRole("button", { name: "复制服务器地址", exact: true })
+        .click();
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              (window as Window & { clipboardWrites?: string[] })
+                .clipboardWrites,
+          ),
+        )
+        .toEqual(["tcp", "Node 63", "node-63.example.org:443"]);
+      await expect(dialog.locator("textarea")).toHaveCount(0);
+    });
+  }
+
   test("shows column preferences and downloads the complete subscription", async ({
     page,
   }) => {

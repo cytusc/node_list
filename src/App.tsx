@@ -40,6 +40,7 @@ import {
   type VisibilityState,
 } from "@tanstack/react-table";
 import { toast, Toaster } from "sonner";
+import { copyText } from "@/lib/clipboard";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -236,9 +237,9 @@ function optionsFor(
       label: key === "country" ? countryName(value) : value.toUpperCase(),
     }));
 }
-async function copy(text: string) {
+async function copy(text: string, source: HTMLElement) {
   try {
-    await navigator.clipboard.writeText(text);
+    await copyText(text, source);
     toast.success("已复制到剪贴板");
   } catch {
     toast.error("复制失败，请手动选择并复制内容");
@@ -1256,7 +1257,9 @@ export default function App() {
                             size="icon"
                             className="size-6 shrink-0"
                             aria-label={`复制${label}`}
-                            onClick={() => void copy(value!)}
+                            onClick={(event) =>
+                              void copy(value!, event.currentTarget)
+                            }
                           >
                             <Copy className="size-3" />
                           </Button>
@@ -1381,8 +1384,11 @@ export default function App() {
               <div className="detail-footer">
                 <Button
                   className="w-full"
-                  onClick={() =>
-                    void copy(`${selected.server}:${selected.port}`)
+                  onClick={(event) =>
+                    void copy(
+                      `${selected.server}:${selected.port}`,
+                      event.currentTarget,
+                    )
                   }
                 >
                   <Copy className="size-4" />
