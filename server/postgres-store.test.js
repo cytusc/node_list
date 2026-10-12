@@ -6,6 +6,7 @@ import path from "node:path";
 import pg from "pg";
 import { createPostgresStore } from "./postgres-store.js";
 import { createApp } from "./app.js";
+import { summarizeProxy } from "./node-sources.js";
 
 test(
   "PostgreSQL persists batches, handles concurrent duplicates and serves history APIs",
@@ -89,5 +90,58 @@ test(
     const saved = await (await get(`/api/results?snapshot=${old.id}`)).json();
     assert.equal(saved.nodes[0].name, "Archived");
     assert.equal(saved.sourceWarning, "NO_RESULTS");
+  },
+);
+
+test(
+  "PostgreSQL keeps original collection indexes and blocks retired enrichment writes",
+  { skip: !process.env.TEST_POSTGRES_URL },
+  async (t) => {
+    const admin = new pg.Pool({
+      connectionString: process.env.TEST_POSTGRES_URL,
+    });
+    const schema = `node_explorer_retired_test_${process.pid}_${Date.now()}`;
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const store = await createPostgresStore({
+      connectionString: process.env.TEST_POSTGRES_URL,
+      options: `-c search_path=${schema}`,
+    });
+    const dir = await mkdtemp(path.join(os.tmpdir(), "node-pg-retired-"));
+    t.after(async () => {
+      await store.close();
+      await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+      await admin.end();
+      await rm(dir, { recursive: true, force: true });
+    });
+    const file = path.join(dir, "results.json");
+    const configs = ["retired", "active"].map((name) => ({
+      name,
+      type: "http",
+      server: `${name}.example`,
+      port: 443,
+    }));
+    await writeFile(
+      file,
+      JSON.stringify({
+        nodes: configs.map((rawConfig) => ({
+          ...summarizeProxy(rawConfig),
+          rawConfig,
+        })),
+      }),
+    );
+    await store.sync(file);
+    const original = await store.get();
+    await store.retireNodes([original.nodes[0]]);
+    const snapshot = await store.getCollectionSnapshot();
+    assert.deepEqual(snapshot.nodeIndexes, [1]);
+    await store.saveIPPure(original.id, 1, {
+      status: "success",
+      ip: "192.0.2.23",
+    });
+    await store.saveIPPure(original.id, 0, { status: "error" });
+    const archived = await store.get(original.id);
+    assert.equal(archived.nodes[0].ippure, undefined);
+    assert.equal(archived.nodes[1].ippure.ip, "192.0.2.23");
+    assert.equal((await store.get()).nodes.length, 1);
   },
 );

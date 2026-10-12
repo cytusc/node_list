@@ -735,7 +735,7 @@ test("archived browser errors and pending nodes enter collection and exhausted I
     assert.equal(node.ippure.status, "success");
     assert.equal(node.ippure.ip, "192.0.2.10");
     assert.equal(node.ippure.attempts, 1);
-    assert.equal(node.ippure.exitIPVersion, 2);
+    assert.equal(node.ippure.exitIPVersion, 3);
   }
   assert.deepEqual(await store.ippureCandidates(), []);
 });
@@ -814,4 +814,193 @@ test("visible archived failures run before hidden duplicate failures and reuse a
   t.after(() => collector.close());
   await collector.run();
   assert.deepEqual(calls, ["visible", "hidden"]);
+});
+
+test("retiring earlier rows preserves enrichment indexes and never writes to retired nodes", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ippure-retired-index-"));
+  const store = createStore();
+  t.after(async () => {
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const configs = [
+    "retired-first",
+    "active-middle",
+    "retired-middle",
+    "active-last",
+  ].map((name) => ({
+    name,
+    type: "http",
+    server: `${name}.example`,
+    port: 443,
+  }));
+  const file = path.join(dir, "results.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      nodes: configs.map((rawConfig) => ({
+        ...summarizeProxy(rawConfig),
+        rawConfig,
+      })),
+    }),
+  );
+  await store.sync(file);
+  const original = await store.get();
+  await store.retireNodes([original.nodes[0], original.nodes[2]]);
+  const calls = [];
+  const collector = startIPPureCollector({
+    store,
+    subDir: dir,
+    intervalMs: 999999,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => {
+      calls.push(proxy.name);
+      return {
+        ip: proxy.name === "active-middle" ? "192.0.2.10" : "192.0.2.11",
+        provider: "AWS CheckIP",
+        addressFamily: 4,
+      };
+    },
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.deepEqual(calls, ["active-middle", "active-last"]);
+  const archived = await store.get(original.id);
+  assert.equal(archived.nodes[0].ippure, undefined);
+  assert.equal(archived.nodes[2].ippure, undefined);
+  assert.equal(archived.nodes[1].ippure.ip, "192.0.2.10");
+  assert.equal(archived.nodes[3].ippure.ip, "192.0.2.11");
+  assert.equal(archived.nodes[1].ippure.exitIPSource, "AWS CheckIP");
+  assert.deepEqual(await store.ippureCandidates(), []);
+  await collector.run();
+  assert.equal(calls.length, 2);
+  await store.retireNodes([archived.nodes[1]]);
+  await store.saveIPPure(original.id, 1, {
+    status: "error",
+    error: "late write",
+  });
+  assert.equal(
+    (await store.get(original.id)).nodes[1].ippure.status,
+    "success",
+  );
+});
+
+test("IPv6-only nodes keep their real exit without sending unsupported addresses to risk scoring", async (t) => {
+  const saves = [];
+  let queries = 0;
+  const collector = startIPPureCollector({
+    store: {
+      get: async () => ({
+        id: 1,
+        nodes: [{ name: "ipv6", rawConfig: { name: "ipv6" } }],
+      }),
+      saveIPPure: async (...args) => saves.push(args),
+    },
+    intervalMs: 999999,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async () => ({
+      ip: "2001:db8::23",
+      provider: "AWS CheckIP",
+      addressFamily: 6,
+    }),
+    query: async () => {
+      queries++;
+      throw new Error("must not query IPv6");
+    },
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.equal(queries, 0);
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0][2].ip, "2001:db8::23");
+  assert.equal(saves[0][2].status, "unsupported");
+  assert.equal(saves[0][2].failureStage, "unsupported-ipv6");
+});
+
+test("a node retired during an earlier batch is removed from pending probes", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ippure-retired-pending-"));
+  const store = createStore();
+  const file = path.join(dir, "results.json");
+  const configs = ["first", "retire-before-probe"].map((name) => ({
+    name,
+    type: "http",
+    server: `${name}.example`,
+    port: 443,
+  }));
+  await writeFile(
+    file,
+    JSON.stringify({
+      nodes: configs.map((rawConfig) => ({
+        ...summarizeProxy(rawConfig),
+        rawConfig,
+      })),
+    }),
+  );
+  await store.sync(file);
+  const original = await store.get();
+  const calls = [];
+  const collector = startIPPureCollector({
+    store,
+    subDir: dir,
+    concurrency: 1,
+    intervalMs: 999999,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => {
+      calls.push(proxy.name);
+      return "192.0.2.10";
+    },
+    query: async ({ target }) => {
+      await store.retireNodes([original.nodes[1]]);
+      return { ip: target, asnOrganization: "Verified" };
+    },
+  });
+  t.after(async () => {
+    await collector.close();
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  await collector.run();
+  assert.deepEqual(calls, ["first"]);
+  assert.equal((await store.get(original.id)).nodes[1].ippure, undefined);
+});
+
+test("an unavailable echo service on retry does not erase a previously observed IPv6 exit", async (t) => {
+  const saves = [];
+  const old = {
+    status: "unsupported",
+    ip: "2001:db8::23",
+    exitIPMode: "proxy-echo",
+    exitIPVersion: 3,
+    exitIPSource: "AWS CheckIP",
+    queryMode: "specified-exit",
+    transportMode: "http",
+    signatureVersion: 2,
+    attempts: 1,
+    checkedAt: "2026-10-11T00:00:00Z",
+    error: "已获取 IPv6 出口，IPPure 风险评分接口暂不支持 IPv6",
+  };
+  const collector = startIPPureCollector({
+    store: {
+      get: async () => ({
+        id: 1,
+        nodes: [{ rawConfig: { name: "ipv6" }, ippure: old }],
+      }),
+      saveIPPure: async (...args) => saves.push(args),
+    },
+    intervalMs: 999999,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async () => {
+      throw new Error("unreachable");
+    },
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.equal(saves[0][2].ip, old.ip);
+  assert.equal(saves[0][2].status, "unsupported");
+  assert.equal(saves[0][2].attempts, 2);
 });

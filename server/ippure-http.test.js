@@ -11,6 +11,7 @@ import {
   normalizeIPPure,
   queryIPPure,
   resolveExitIP,
+  resolveExitIPInfo,
 } from "./ippure-http.js";
 
 const signal = () => new AbortController().signal;
@@ -383,4 +384,44 @@ test("IPv6-only discovery reports unsupported scoring instead of querying a diff
     /IPPure 风险评分接口需要 IPv4/,
   );
   await assert.rejects(queryIPPure({ target: "2001:db8::1" }), /暂不支持 IPv6/);
+});
+
+test("exit discovery retains IPv6 when IPv4 services fail and records the actual observer", async () => {
+  const calls = [];
+  const data = await resolveExitIPInfo({
+    proxyUrl: "http://localhost:7891",
+    createContext: () => ({
+      get: async (url) => {
+        calls.push(url);
+        if (url === "https://checkip.amazonaws.com/")
+          return response("2001:db8::23");
+        throw new Error("unreachable");
+      },
+      dispose: async () => {},
+    }),
+  });
+  assert.deepEqual(data, {
+    ip: "2001:db8::23",
+    provider: "AWS CheckIP",
+    addressFamily: 6,
+  });
+  assert.ok(calls.includes("https://api.ipify.org"));
+});
+
+test("Cloudflare trace is parsed without confusing metadata with an exit address", async () => {
+  const data = await resolveExitIPInfo({
+    proxyUrl: "http://localhost:7891",
+    createContext: () => ({
+      get: async (url) => {
+        if (!url.includes("cdn-cgi/trace")) throw new Error("unreachable");
+        return response("fl=123\nip=192.0.2.23\nwarp=on\n");
+      },
+      dispose: async () => {},
+    }),
+  });
+  assert.deepEqual(data, {
+    ip: "192.0.2.23",
+    provider: "Cloudflare",
+    addressFamily: 4,
+  });
 });

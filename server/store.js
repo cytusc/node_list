@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { EXIT_IP_VERSION, hasVerifiedExitIP } from "./exit-ip.js";
 import {
   nodeIdentity,
   aggregateIdentity,
@@ -160,10 +161,10 @@ export function createStore(databasePath = ":memory:") {
             )
             .all(id);
     },
-    saveIPPure(id, index, result) {
+    saveIPPure(id, index, result, identity) {
       db.prepare(
-        "INSERT INTO ippure_results VALUES (?, ?, ?) ON CONFLICT(snapshot_id, node_index) DO UPDATE SET payload = excluded.payload",
-      ).run(id, index, JSON.stringify(result));
+        "INSERT INTO ippure_results SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM retired_nodes WHERE identity = ?) ON CONFLICT(snapshot_id, node_index) DO UPDATE SET payload = excluded.payload",
+      ).run(id, index, JSON.stringify(result), identity);
     },
     retireNodes(identities, { retiredAt, reason }) {
       const save = db.prepare(
@@ -259,29 +260,61 @@ export function createSnapshotStore(adapter) {
       throw error;
     }
   }
-  async function hydrate(row, saved) {
+  async function hydrate(row, saved, retiredRows) {
     if (!row) return null;
     const snapshot = { ...JSON.parse(row.payload), id: row.id, sourceWarning };
     for (const item of saved ?? (await adapter.enrichments(row.id))) {
       if (snapshot.nodes[item.nodeIndex])
         snapshot.nodes[item.nodeIndex].ippure = JSON.parse(item.payload);
     }
+    // Before collection preserved original indexes, a filtered current batch
+    // could attach later nodes' results to earlier rows. Retain the database
+    // records, but rediscover ambiguous exits written after that retirement.
+    const retirements = new Map(
+      (retiredRows ?? (await adapter.retiredNodes())).map((item) => [
+        item.identity,
+        Date.parse(item.retiredAt),
+      ]),
+    );
+    let earliestRetirement = Infinity;
+    for (const node of snapshot.nodes) {
+      const retiredAt = retirements.get(aggregateIdentity(node));
+      if (Number.isFinite(retiredAt))
+        earliestRetirement = Math.min(earliestRetirement, retiredAt);
+      if (
+        node.ippure?.exitIPVersion !== EXIT_IP_VERSION &&
+        Date.parse(node.ippure?.checkedAt) >= earliestRetirement
+      )
+        delete node.ippure;
+    }
     return snapshot;
   }
-  async function visible(snapshot, { includeRetired = false } = {}) {
+  async function visible(
+    snapshot,
+    { includeRetired = false, preserveIndexes = false } = {},
+  ) {
     if (!snapshot || includeRetired) return snapshot;
     const retired = new Set(
       (await adapter.retiredNodes()).map((item) => item.identity),
     );
+    const entries = snapshot.nodes
+      .map((node, index) => ({ node, index }))
+      .filter(({ node }) => !retired.has(aggregateIdentity(node)));
     return {
       ...snapshot,
-      nodes: snapshot.nodes.filter(
-        (node) => !retired.has(aggregateIdentity(node)),
-      ),
+      nodes: entries.map(({ node }) => node),
+      ...(preserveIndexes
+        ? { nodeIndexes: entries.map(({ index }) => index) }
+        : {}),
     };
   }
   return {
-    saveIPPure: (id, index, result) => adapter.saveIPPure(id, index, result),
+    async saveIPPure(id, index, result) {
+      const row = await adapter.get(id);
+      const node = row && JSON.parse(row.payload).nodes[index];
+      if (!node) return;
+      await adapter.saveIPPure(id, index, result, aggregateIdentity(node));
+    },
     async retireNodes(nodes, reason = "GitHub probe failed twice") {
       const identities = [...new Set(nodes.map(aggregateIdentity))];
       if (identities.some((identity) => !identity))
@@ -291,6 +324,11 @@ export function createSnapshotStore(adapter) {
         reason,
       });
       return identities.length;
+    },
+    async retiredNodeIdentities() {
+      return new Set(
+        (await adapter.retiredNodes()).map((item) => item.identity),
+      );
     },
     reconcileSources: (linkedNodes, options) =>
       adapter.reconcile(linkedNodes, options),
@@ -306,6 +344,11 @@ export function createSnapshotStore(adapter) {
       const row = await adapter.get(id);
       return visible(await hydrate(row), { includeRetired: id !== undefined });
     },
+    async getCollectionSnapshot() {
+      return visible(await hydrate(await adapter.get()), {
+        preserveIndexes: true,
+      });
+    },
     async aggregate() {
       const rows = await adapter.all();
       if (!rows.length) return null;
@@ -315,13 +358,12 @@ export function createSnapshotStore(adapter) {
           enrichments.set(item.snapshotId, []);
         enrichments.get(item.snapshotId).push(item);
       }
-      const retired = new Set(
-        (await adapter.retiredNodes()).map((item) => item.identity),
-      );
+      const retiredRows = await adapter.retiredNodes();
+      const retired = new Set(retiredRows.map((item) => item.identity));
       const batches = (
         await Promise.all(
           rows.map(async (row) => ({
-            ...(await hydrate(row, enrichments.get(row.id) || [])),
+            ...(await hydrate(row, enrichments.get(row.id) || [], retiredRows)),
             importedAt: row.importedAt,
           })),
         )
@@ -373,20 +415,19 @@ export function createSnapshotStore(adapter) {
         enrichments.get(item.snapshotId).push(item);
       }
       const candidates = [];
-      const retired = new Set(
-        (await adapter.retiredNodes()).map((item) => item.identity),
-      );
+      const retiredRows = await adapter.retiredNodes();
+      const retired = new Set(retiredRows.map((item) => item.identity));
       for (const row of rows) {
-        const snapshot = JSON.parse(row.payload);
-        for (const item of enrichments.get(row.id) || []) {
-          const node = snapshot.nodes[item.nodeIndex];
-          if (node) node.ippure = JSON.parse(item.payload);
-        }
+        const snapshot = await hydrate(
+          row,
+          enrichments.get(row.id) || [],
+          retiredRows,
+        );
         snapshot.nodes.forEach((node, index) => {
           if (
             !retired.has(aggregateIdentity(node)) &&
             (node.ippure?.status !== "success" ||
-              node.ippure.exitIPSource !== "ip.sb" ||
+              !hasVerifiedExitIP(node.ippure) ||
               !node.ippure.asnOrganization) &&
             node.rawConfig
           )
