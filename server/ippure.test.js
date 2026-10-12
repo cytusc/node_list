@@ -772,3 +772,46 @@ test("failed organization backfill updates its archived snapshot only", async (t
   assert.equal(saves[0][2].score, 7);
   assert.equal(saves[0][2].organizationAttempts, 1);
 });
+
+test("visible archived failures run before hidden duplicate failures and reuse archived successful transports", async (t) => {
+  const donor = {
+    name: "donor",
+    rawConfig: { name: "donor" },
+    ippure: { status: "success" },
+  };
+  const hidden = { name: "hidden", rawConfig: { name: "hidden" } };
+  const visible = {
+    name: "visible",
+    rawConfig: { name: "visible" },
+    snapshotId: 2,
+  };
+  const calls = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 1,
+    store: {
+      get: async () => ({ id: 3, nodes: [] }),
+      aggregate: async () => ({
+        nodes: [visible, { ...donor, snapshotId: 1 }],
+      }),
+      ippureCandidates: async () => [
+        { snapshotId: 1, index: 0, node: hidden },
+        { snapshotId: 2, index: 0, node: visible },
+      ],
+      saveIPPure: async () => {},
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => {
+      calls.push(proxy.name);
+      return proxy.name === "visible" ? "192.0.2.1" : "192.0.2.2";
+    },
+    query: async ({ proxy, target }) => {
+      assert.equal(proxy.name, "donor");
+      return { ip: target, asnOrganization: "Verified" };
+    },
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.deepEqual(calls, ["visible", "hidden"]);
+});

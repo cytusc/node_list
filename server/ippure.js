@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { isIP } from "node:net";
 import { parse } from "yaml";
+import { aggregateIdentity } from "./node-sources.js";
 import {
   queryIPPure,
   resolveExitIP,
@@ -34,6 +35,17 @@ export function startIPPureCollector({
     const historical = store.ippureCandidates
       ? await store.ippureCandidates()
       : [];
+    const aggregate = store.aggregate ? await store.aggregate() : undefined;
+    const visible = new Set(
+      (aggregate?.nodes || []).map(
+        (node) => `${node.snapshotId}:${aggregateIdentity(node)}`,
+      ),
+    );
+    historical.sort(
+      (a, b) =>
+        Number(visible.has(`${b.snapshotId}:${aggregateIdentity(b.node)}`)) -
+        Number(visible.has(`${a.snapshotId}:${aggregateIdentity(a.node)}`)),
+    );
     if (!snapshot.nodes.length && !historical.length) return;
     const document = snapshot.nodes.every((node) => node.rawConfig)
       ? { proxies: [] }
@@ -52,7 +64,7 @@ export function startIPPureCollector({
       return matches.length === 1 ? matches[0] : undefined;
     };
     // Query transport and the node receiving the result are independent.
-    const working = snapshot.nodes
+    const working = (aggregate?.nodes || snapshot.nodes)
       .filter((node) => node.ippure?.status === "success")
       .map(matchProxy)
       .filter(Boolean);
