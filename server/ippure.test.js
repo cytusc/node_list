@@ -673,3 +673,102 @@ for (const transportMode of ["browser", "http"]) {
     assert.equal(node.ippure.signatureVersion, 2);
   });
 }
+
+test("archived browser errors and pending nodes enter collection and exhausted IPv6 errors rediscover IPv4", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ippure-recovery-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = createStore();
+  const file = path.join(dir, "results.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      nodes: ["legacy", "pending", "ipv6"].map((name) => ({
+        name,
+        rawConfig: { name, type: "http", server: `${name}.example`, port: 443 },
+      })),
+    }),
+  );
+  await store.sync(file);
+  const archived = await store.get();
+  await store.saveIPPure(archived.id, 0, {
+    status: "error",
+    transportMode: "browser",
+    attempts: 3,
+  });
+  await store.saveIPPure(archived.id, 2, {
+    status: "error",
+    ip: "2001:db8::1",
+    exitIPSource: "ip.sb",
+    exitIPMode: "ip.sb",
+    queryMode: "specified-exit",
+    transportMode: "http",
+    signatureVersion: 2,
+    attempts: 3,
+    checkedAt: new Date().toISOString(),
+  });
+  await writeFile(file, JSON.stringify({ nodes: [] }));
+  await store.sync(file);
+  assert.deepEqual(
+    (await store.ippureCandidates()).map((x) => x.index),
+    [0, 1, 2],
+  );
+  const resolutions = [];
+  const collector = startIPPureCollector({
+    store,
+    subDir: dir,
+    intervalMs: 999999,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => {
+      resolutions.push(proxy.name);
+      return "192.0.2.10";
+    },
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+  });
+  t.after(async () => {
+    await collector.close();
+    await store.close();
+  });
+  await collector.run();
+  assert.deepEqual(resolutions, ["legacy", "pending", "ipv6"]);
+  for (const node of (await store.get(archived.id)).nodes) {
+    assert.equal(node.ippure.status, "success");
+    assert.equal(node.ippure.ip, "192.0.2.10");
+    assert.equal(node.ippure.attempts, 1);
+    assert.equal(node.ippure.exitIPVersion, 2);
+  }
+  assert.deepEqual(await store.ippureCandidates(), []);
+});
+
+test("failed organization backfill updates its archived snapshot only", async (t) => {
+  const node = {
+    rawConfig: { name: "archive" },
+    ippure: {
+      status: "success",
+      ip: "192.0.2.1",
+      exitIPSource: "ip.sb",
+      score: 7,
+    },
+  };
+  const saves = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    store: {
+      get: async () => ({ id: 2, nodes: [] }),
+      ippureCandidates: async () => [{ snapshotId: 1, index: 0, node }],
+      saveIPPure: async (...args) => saves.push(args),
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    query: async () => {
+      throw new Error("network");
+    },
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.equal(saves.length, 1);
+  assert.deepEqual(saves[0].slice(0, 2), [1, 0]);
+  assert.equal(saves[0][2].status, "success");
+  assert.equal(saves[0][2].score, 7);
+  assert.equal(saves[0][2].organizationAttempts, 1);
+});
