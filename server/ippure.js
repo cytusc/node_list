@@ -119,9 +119,14 @@ export function startIPPureCollector({
       const priority = (entry) => {
         if (entry.node.rawConfig || !entry.node.rawLink) return 0;
         const key = aggregateIdentity(entry.node);
-        const pending = !(aggregateResults.get(key) || entry.node.ippure);
+        const saved = aggregateResults.get(key) || entry.node.ippure;
+        const outdatedLink =
+          saved?.failureStage === "share-link" &&
+          saved.shareLinkVersion !== SHARE_LINK_VERSION;
+        const pending = !saved || outdatedLink;
         return (
-          (pending ? 2 : 0) + Number(visible.has(`${entry.snapshotId}:${key}`))
+          (outdatedLink ? 4 : pending ? 2 : 0) +
+          Number(visible.has(`${entry.snapshotId}:${key}`))
         );
       };
       return priority(b) - priority(a);
