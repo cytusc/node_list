@@ -312,6 +312,35 @@ export function createSnapshotStore(adapter) {
         sourceWarning,
       };
     },
+    async ippureCandidates() {
+      const rows = await adapter.all();
+      const enrichments = new Map();
+      for (const item of await adapter.enrichments()) {
+        if (!enrichments.has(item.snapshotId))
+          enrichments.set(item.snapshotId, []);
+        enrichments.get(item.snapshotId).push(item);
+      }
+      const candidates = [];
+      for (const row of rows) {
+        const snapshot = JSON.parse(row.payload);
+        for (const item of enrichments.get(row.id) || []) {
+          const node = snapshot.nodes[item.nodeIndex];
+          if (node) node.ippure = JSON.parse(item.payload);
+        }
+        snapshot.nodes.forEach((node, index) => {
+          if (
+            ((node.ippure?.status === "success" &&
+              node.ippure.exitIPSource !== "ip.sb") ||
+              (node.ippure?.status === "error" &&
+                node.ippure.queryMode === "specified-exit" &&
+                node.ippure.transportMode === "http")) &&
+            node.rawConfig
+          )
+            candidates.push({ snapshotId: row.id, index, node });
+        });
+      }
+      return candidates;
+    },
     history: (limit, offset) => adapter.history(limit, offset),
     close: () => adapter.close(),
   };
