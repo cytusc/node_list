@@ -26,7 +26,10 @@ test("retired nodes stay hidden from current and aggregate views and IP checks",
   const archived = await store.get();
   assert.equal(archived.nodes.length, 1);
 
-  assert.equal(await store.retireNodes(archived.nodes, "GitHub unavailable"), 1);
+  assert.equal(
+    await store.retireNodes(archived.nodes, "GitHub unavailable"),
+    1,
+  );
   assert.equal((await store.get()).nodes.length, 0);
   assert.equal((await store.get(archived.id)).nodes.length, 1);
   assert.equal((await store.aggregate()).nodes.length, 0);
@@ -34,7 +37,10 @@ test("retired nodes stay hidden from current and aggregate views and IP checks",
 
   await writeFile(
     file,
-    JSON.stringify({ checkedAt: "2026-10-12T00:00:00Z", nodes: [{ ...summarizeProxy(proxy), rawConfig: proxy, speed: 100 }] }),
+    JSON.stringify({
+      checkedAt: "2026-10-12T00:00:00Z",
+      nodes: [{ ...summarizeProxy(proxy), rawConfig: proxy, speed: 100 }],
+    }),
   );
   await store.sync(file);
   assert.equal((await store.get()).nodes.length, 0);
