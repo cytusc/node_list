@@ -19,6 +19,7 @@ test("shows stored IPPure fields in desktop details and mobile cards", async ({
             tls: true,
             udp: false,
             speed: 0,
+            ip: "8.8.8.8",
             ippure: {
               status: "success",
               attempts: 1,
@@ -107,6 +108,16 @@ test("shows stored IPPure fields in desktop details and mobile cards", async ({
   ])
     await expect(dialog).toContainText(text);
   await expect(dialog.getByLabel("IPPure 系数 32%")).toBeVisible();
+  await expect(
+    dialog
+      .locator(".detail-field")
+      .filter({ has: page.locator("dt", { hasText: /^出口 IP$/ }) }),
+  ).toContainText("82.38.64.237");
+  await expect(
+    dialog
+      .locator(".detail-field")
+      .filter({ has: page.locator("dt", { hasText: /^上游检测 IP$/ }) }),
+  ).toContainText("8.8.8.8");
   await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 390, height: 844 });
   const card = page.locator(".mobile-node");
