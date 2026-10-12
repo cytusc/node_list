@@ -4,6 +4,7 @@ import { isIP } from "node:net";
 import { parse } from "yaml";
 import { aggregateIdentity } from "./node-sources.js";
 import { EXIT_IP_VERSION, hasVerifiedExitIP } from "./exit-ip.js";
+import { shareLinkProxy, SHARE_LINK_VERSION } from "./share-link.js";
 import {
   queryIPPure,
   resolveExitIPInfo,
@@ -54,13 +55,26 @@ export function startIPPureCollector({
         Number(visible.has(`${a.snapshotId}:${aggregateIdentity(a.node)}`)),
     );
     if (!snapshot.nodes.length && !historical.length) return;
-    const document = snapshot.nodes.every((node) => node.rawConfig)
+    const document = snapshot.nodes.every(
+      (node) => node.rawConfig || node.rawLink,
+    )
       ? { proxies: [] }
       : parse(await readFile(path.join(subDir, "output", "all.yaml"), "utf8"));
     if (!Array.isArray(document?.proxies))
       throw new Error("Clash 订阅缺少 proxies");
+    const parsedLinks = new WeakMap();
     const matchProxy = (node) => {
       if (node.rawConfig) return node.rawConfig;
+      if (node.rawLink) {
+        if (!parsedLinks.has(node)) {
+          try {
+            parsedLinks.set(node, shareLinkProxy(node.rawLink, node.name));
+          } catch {
+            parsedLinks.set(node, undefined);
+          }
+        }
+        return parsedLinks.get(node);
+      }
       const matches = document.proxies.filter(
         (p) =>
           p.name === node.name &&
@@ -85,6 +99,12 @@ export function startIPPureCollector({
     const ipCache = new Map();
     const asnCache = new Map();
     const jobs = [];
+    const aggregateResults = new Map(
+      (aggregate?.nodes || []).map((node) => [
+        aggregateIdentity(node),
+        node.ippure,
+      ]),
+    );
     const entries = [
       ...snapshot.nodes.map((node, index) => ({
         snapshotId: snapshot.id,
@@ -93,9 +113,32 @@ export function startIPPureCollector({
       })),
       ...historical.filter((item) => item.snapshotId !== snapshot.id),
     ];
+    // New source batches must not restart probes at the same first few nodes.
+    // Probe each connection once per run and prioritize never-checked visible nodes.
+    entries.sort((a, b) => {
+      const priority = (entry) => {
+        if (entry.node.rawConfig || !entry.node.rawLink) return 0;
+        const key = aggregateIdentity(entry.node);
+        const pending = !(aggregateResults.get(key) || entry.node.ippure);
+        return (
+          (pending ? 2 : 0) + Number(visible.has(`${entry.snapshotId}:${key}`))
+        );
+      };
+      return priority(b) - priority(a);
+    });
+    const seen = new Set();
     for (const { snapshotId, index, node } of entries) {
       if (abort.signal.aborted) return;
-      const old = node.ippure;
+      const identity = aggregateIdentity(node);
+      const shareOnly = !node.rawConfig && !!node.rawLink;
+      if (shareOnly && seen.has(identity)) continue;
+      if (shareOnly) seen.add(identity);
+      const old = (shareOnly && aggregateResults.get(identity)) || node.ippure;
+      if (
+        old?.failureStage === "share-link" &&
+        old.shareLinkVersion === SHARE_LINK_VERSION
+      )
+        continue;
       const currentExitIP = hasVerifiedExitIP(old);
       const currentExitMode = old?.exitIPMode === "proxy-echo";
       const currentSignature = old?.signatureVersion === 2;
@@ -132,7 +175,18 @@ export function startIPPureCollector({
         continue;
       // A rewritten subscription may belong to a different detection round.
       const ownProxy = matchProxy(node);
-      if (!ownProxy) continue;
+      if (!ownProxy) {
+        if (node.rawLink)
+          await store.saveIPPure(snapshotId, index, {
+            status: "unsupported",
+            checkedAt: new Date().toISOString(),
+            attempts: 0,
+            failureStage: "share-link",
+            shareLinkVersion: SHARE_LINK_VERSION,
+            error: "节点分享链接格式或连接参数不受当前检测服务支持",
+          });
+        continue;
+      }
       jobs.push({
         identity: aggregateIdentity(node),
         snapshotId,
@@ -142,6 +196,7 @@ export function startIPPureCollector({
         backfill,
         attempts,
         ownProxy,
+        shareOnly,
       });
     }
     for (let offset = 0; offset < jobs.length; offset += concurrency) {
@@ -150,7 +205,7 @@ export function startIPPureCollector({
       const retired = store.retiredNodeIdentities
         ? await store.retiredNodeIdentities()
         : new Set();
-      const batch = jobs
+      let batch = jobs
         .slice(offset, offset + concurrency)
         .filter((job) => !retired.has(job.identity));
       if (!batch.length) continue;
@@ -166,16 +221,56 @@ export function startIPPureCollector({
               { length: 3 },
               (_, i) => donors[(rotation + i) % donors.length],
             );
-      const proxies = [
+      let proxies = [
         ...new Set([...batch.map((job) => job.ownProxy), ...pool]),
       ];
-      const urls = await configure({
-        controller,
-        proxyUrl,
-        secret,
-        proxies,
-        signal: abort.signal,
-      });
+      const configureBatch = (selected) =>
+        configure({
+          controller,
+          proxyUrl,
+          secret,
+          proxies: selected,
+          signal: abort.signal,
+        });
+      let urls;
+      try {
+        urls = await configureBatch(proxies);
+      } catch (error) {
+        // A malformed archived link must not prevent every other node in the
+        // batch from being detected. Isolate only explicit configuration errors;
+        // controller outages retain the collector's normal retry behavior.
+        if (
+          !/代理配置失败 \(HTTP (400|422)\)/.test(error.message) ||
+          !batch.some((job) => job.shareOnly)
+        )
+          throw error;
+        const valid = [];
+        for (const job of batch) {
+          if (!job.shareOnly) {
+            valid.push(job);
+            continue;
+          }
+          try {
+            await configureBatch([job.ownProxy]);
+            valid.push(job);
+          } catch (failure) {
+            if (!/代理配置失败 \(HTTP (400|422)\)/.test(failure.message))
+              throw failure;
+            await store.saveIPPure(job.snapshotId, job.index, {
+              status: "unsupported",
+              checkedAt: new Date().toISOString(),
+              attempts: 0,
+              failureStage: "share-link",
+              shareLinkVersion: SHARE_LINK_VERSION,
+              error: "节点分享链接配置被当前检测服务拒绝",
+            });
+          }
+        }
+        batch = valid;
+        if (!batch.length) continue;
+        proxies = [...new Set([...batch.map((job) => job.ownProxy), ...pool])];
+        urls = await configureBatch(proxies);
+      }
       // A configuration reload happens only after all jobs in this batch finish.
       const outcomes = await Promise.allSettled(
         batch.map(

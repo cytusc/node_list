@@ -415,6 +415,26 @@ export function createSnapshotStore(adapter) {
         }
       }
       const result = [...nodes.values()];
+      // A source refresh archives a new row without changing the connection.
+      // Keep its most recent IP enrichment visible across detection batches.
+      const latestEnrichments = new Map();
+      for (const batch of batches)
+        for (const node of batch.nodes) {
+          if (!node.ippure || node.rawConfig || !node.rawLink) continue;
+          const key = aggregateIdentity(node),
+            previous = latestEnrichments.get(key);
+          if (
+            !previous ||
+            (Date.parse(node.ippure.checkedAt) || 0) >
+              (Date.parse(previous.checkedAt) || 0)
+          )
+            latestEnrichments.set(key, node.ippure);
+        }
+      for (const node of result) {
+        if (node.rawConfig || !node.rawLink) continue;
+        const saved = latestEnrichments.get(aggregateIdentity(node));
+        if (saved) node.ippure = saved;
+      }
       return {
         checkedAt: batches[0].checkedAt,
         batchCount: batches.length,
@@ -451,7 +471,7 @@ export function createSnapshotStore(adapter) {
             (node.ippure?.status !== "success" ||
               !hasVerifiedExitIP(node.ippure) ||
               !node.ippure.asnOrganization) &&
-            node.rawConfig
+            (node.rawConfig || node.rawLink)
           )
             candidates.push({ snapshotId: row.id, index, node });
         });

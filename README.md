@@ -34,6 +34,8 @@ QILAN_USER_AGENT=Mozilla/5.0
 
 每个检测批次会同时保存节点的完整源配置 `rawConfig`，以及存在且匹配的真实分享链接 `rawLink`。两者包含连接凭据，与订阅下载一样应按私有订阅管理。检测结果与源配置尚未完成匹配时会保留已有批次并等待下次导入，避免导入残缺节点。历史配置不会被后续订阅覆盖；IP 检测优先使用已归档配置。正常启动和刷新只回填来源，不删除历史节点。
 
+只有分享链接的 Qilan 节点也参与出口 IP 和 IPPure 检测，包括已归档的历史节点。检测器在本地将链接转换为 Mihomo 配置，无需节点存在于 subs-check 的 `all.yaml` 中。同一连接的新批次复用最近的出口检测结果，未检测节点优先补采；无法转换的链接会明确显示“连接配置不支持”。
+
 历史清理通过 `server/reconcile-sources.js` 显式执行，默认仅打印预演计数。先备份数据库并停止页面服务（避免采集器在节点重新排序时写入旧位置），用同一数据库环境运行 `node server/reconcile-sources.js --clash /data/sub/output/all.yaml --links /data/sub/output/base64.txt --prune`；可重复添加 `--clash` 提供历史源文件，或用 `--archive 发布时刻=文件.yaml` 提供有发布时间的历史版本以消除配置歧义。核对计数后加 `--apply`，只删除既没有可匹配链接也没有完整源配置的节点，保留批次 ID 和剩余节点的 IP 检测数据。维护脚本需要已有数据库配置：PostgreSQL 使用 `PGHOST` 等变量，SQLite 使用 `DATABASE_PATH`。
 
 人工确认失效的连接可通过 `store.retireNodes(nodes, reason)` 软删除。软删除记录以连接配置摘要为键，隐藏节点的首页/聚合结果并跳过出口 IP 补采；历史批次仍可查阅。恢复时由维护人员删除对应的 retired identity 记录。生产使用 PostgreSQL 的 `node_explorer_retired_nodes` 表，SQLite 使用 `retired_nodes` 表。

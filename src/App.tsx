@@ -110,7 +110,9 @@ function IPPureMetric({
     return (
       <span className="text-muted-foreground" title={result?.error}>
         {result?.status === "unsupported"
-          ? "仅 IPv6，暂无评分"
+          ? result.failureStage === "share-link"
+            ? "连接配置不支持"
+            : "仅 IPv6，暂无评分"
           : result?.status === "error"
             ? result.ip
               ? "风险查询失败"
@@ -1358,7 +1360,7 @@ export default function App() {
                         : snapshot?.ippureCollector?.error ||
                           (snapshot?.ippureCollector?.enabled === false
                             ? "IPPure 检测服务未启用，请配置独立代理检测服务。"
-                            : "尚无 IPPure 结果；检测服务启用后会依次检测当前批次，刷新页面可查看进度。历史批次保留当时已采集的结果。")}
+                            : "尚无 IPPure 结果；检测服务会依次检测当前及历史节点，刷新页面可查看进度。同一连接复用最近的出口检测结果。")}
                   </p>
                 )}
                 <h3>服务解锁</h3>
