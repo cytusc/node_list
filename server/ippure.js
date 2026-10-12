@@ -113,29 +113,30 @@ export function startIPPureCollector({
       })),
       ...historical.filter((item) => item.snapshotId !== snapshot.id),
     ];
+    // Cache identity once; recomputing share-link hashes inside the sort
+    // comparator makes larger histories block the event loop.
+    for (const entry of entries) {
+      const { node, snapshotId } = entry;
+      entry.identity = aggregateIdentity(node);
+      entry.shareOnly = !node.rawConfig && !!node.rawLink;
+      if (!entry.shareOnly) {
+        entry.priority = 0;
+        continue;
+      }
+      const saved = aggregateResults.get(entry.identity) || node.ippure;
+      const outdatedLink =
+        saved?.failureStage === "share-link" &&
+        saved.shareLinkVersion !== SHARE_LINK_VERSION;
+      entry.priority =
+        (outdatedLink ? 4 : !saved ? 2 : 0) +
+        Number(visible.has(`${snapshotId}:${entry.identity}`));
+    }
     // New source batches must not restart probes at the same first few nodes.
     // Probe each connection once per run and prioritize never-checked visible nodes.
-    entries.sort((a, b) => {
-      const priority = (entry) => {
-        if (entry.node.rawConfig || !entry.node.rawLink) return 0;
-        const key = aggregateIdentity(entry.node);
-        const saved = aggregateResults.get(key) || entry.node.ippure;
-        const outdatedLink =
-          saved?.failureStage === "share-link" &&
-          saved.shareLinkVersion !== SHARE_LINK_VERSION;
-        const pending = !saved || outdatedLink;
-        return (
-          (outdatedLink ? 4 : pending ? 2 : 0) +
-          Number(visible.has(`${entry.snapshotId}:${key}`))
-        );
-      };
-      return priority(b) - priority(a);
-    });
+    entries.sort((a, b) => b.priority - a.priority);
     const seen = new Set();
-    for (const { snapshotId, index, node } of entries) {
+    for (const { snapshotId, index, node, identity, shareOnly } of entries) {
       if (abort.signal.aborted) return;
-      const identity = aggregateIdentity(node);
-      const shareOnly = !node.rawConfig && !!node.rawLink;
       if (shareOnly && seen.has(identity)) continue;
       if (shareOnly) seen.add(identity);
       const old = (shareOnly && aggregateResults.get(identity)) || node.ippure;
