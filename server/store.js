@@ -329,11 +329,9 @@ export function createSnapshotStore(adapter) {
         }
         snapshot.nodes.forEach((node, index) => {
           if (
-            ((node.ippure?.status === "success" &&
-              node.ippure.exitIPSource !== "ip.sb") ||
-              (node.ippure?.status === "error" &&
-                node.ippure.queryMode === "specified-exit" &&
-                node.ippure.transportMode === "http")) &&
+            (node.ippure?.status !== "success" ||
+              node.ippure.exitIPSource !== "ip.sb" ||
+              !node.ippure.asnOrganization) &&
             node.rawConfig
           )
             candidates.push({ snapshotId: row.id, index, node });

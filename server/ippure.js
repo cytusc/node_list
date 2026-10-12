@@ -74,6 +74,7 @@ export function startIPPureCollector({
       const currentExitIP = old?.exitIPSource === "ip.sb";
       const currentExitMode = old?.exitIPMode === "ip.sb";
       const currentSignature = old?.signatureVersion === 2;
+      const currentResolution = old?.exitIPVersion === 2;
       const backfill =
         old?.status === "success" && currentExitIP && !old.asnOrganization;
       if (old?.status === "success" && currentExitIP && !backfill) continue;
@@ -83,7 +84,8 @@ export function startIPPureCollector({
         currentExitMode &&
         old?.queryMode === "specified-exit" &&
         old?.transportMode === "http" &&
-        currentSignature
+        currentSignature &&
+        currentResolution
           ? old.attempts || 0
           : 0;
       const organizationAttempts = currentSignature
@@ -97,7 +99,8 @@ export function startIPPureCollector({
         : currentExitMode &&
             old?.queryMode === "specified-exit" &&
             old?.transportMode === "http" &&
-            currentSignature
+            currentSignature &&
+            currentResolution
           ? old.checkedAt
           : undefined;
       if (lastAttempt && Date.now() - Date.parse(lastAttempt) < 30 * 60 * 1000)
@@ -156,7 +159,9 @@ export function startIPPureCollector({
               exitIPMode: "ip.sb",
               transportMode: "http",
               signatureVersion: 2,
+              exitIPVersion: 2,
             };
+            let failureStage = "exit-ip";
             try {
               const options = {
                 controller,
@@ -167,7 +172,9 @@ export function startIPPureCollector({
                 signal: abort.signal,
               };
               const target =
-                currentExitIP && typeof old?.ip === "string" && isIP(old.ip)
+                currentExitIP &&
+                typeof old?.ip === "string" &&
+                isIP(old.ip) === 4
                   ? old.ip
                   : await resolveIP({
                       ...options,
@@ -179,6 +186,7 @@ export function startIPPureCollector({
               result.ip = target;
               result.exitIPSource = "ip.sb";
               result.queryTarget = target;
+              failureStage = "ippure-query";
               const available = [
                 ...new Set([
                   ...pool,
@@ -233,7 +241,7 @@ export function startIPPureCollector({
               if (backfill) {
                 // Keep previously collected metrics if the organization refresh fails.
                 if ((await store.get())?.id !== snapshot.id) return;
-                await store.saveIPPure(snapshot.id, index, {
+                await store.saveIPPure(snapshotId, index, {
                   ...old,
                   signatureVersion: 2,
                   organizationAttempts:
@@ -245,10 +253,13 @@ export function startIPPureCollector({
                 return;
               }
               result.status = "error";
+              result.failureStage = failureStage;
               // Never persist proxy credentials or controller response bodies.
               result.error = /IPPure|IP\.SB|代理配置/.test(error.message)
                 ? error.message.slice(0, 160)
-                : "节点访问或接口查询失败，请稍后重试";
+                : failureStage === "exit-ip"
+                  ? "节点 IPv4 出口探测失败，请检查节点连接后重试"
+                  : "IPPure 查询代理连接失败，请稍后重试";
             }
             if (abort.signal.aborted || (await store.get())?.id !== snapshot.id)
               return;

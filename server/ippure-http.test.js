@@ -281,7 +281,7 @@ test("exit resolution never falls back to a direct request and abort disposes it
       assert.equal(proxy.server, "http://localhost:7890");
       return {
         get: async (url) => {
-          assert.equal(url, "https://api.ip.sb/ip");
+          assert.equal(url, "https://api-ipv4.ip.sb/ip");
           started();
           return new Promise((_, reject) => {
             rejectRequest = reject;
@@ -333,4 +333,54 @@ test("Mihomo configuration binds each independent listener to the corresponding 
     assert.equal(listener.proxy, config.proxies[i].name);
     assert.equal(config.proxies[i].server, proxies[i].server);
   }
+});
+
+test("exit discovery prefers IPv4 and only falls back through the same node", async () => {
+  for (const first of ["192.0.2.20", "2001:db8::1", "failure"]) {
+    const calls = [];
+    const ip = await resolveExitIP({
+      proxyUrl: "http://localhost:7891",
+      createContext: ({ proxy }) => {
+        assert.equal(proxy.server, "http://localhost:7891");
+        return {
+          get: async (url) => {
+            calls.push(url);
+            if (first === "failure" && calls.length === 1)
+              throw new Error("network");
+            return {
+              ok: () => true,
+              text: async () => (calls.length === 1 ? first : "192.0.2.21"),
+              dispose: async () => {},
+            };
+          },
+          dispose: async () => {},
+        };
+      },
+    });
+    assert.equal(ip, first === "192.0.2.20" ? first : "192.0.2.21");
+    assert.deepEqual(
+      calls,
+      first === "192.0.2.20"
+        ? ["https://api-ipv4.ip.sb/ip"]
+        : ["https://api-ipv4.ip.sb/ip", "https://api.ip.sb/ip"],
+    );
+  }
+});
+
+test("IPv6-only discovery reports unsupported scoring instead of querying a different IP", async () => {
+  await assert.rejects(
+    resolveExitIP({
+      proxyUrl: "http://localhost:7891",
+      createContext: () => ({
+        get: async () => ({
+          ok: () => true,
+          text: async () => "2001:db8::1",
+          dispose: async () => {},
+        }),
+        dispose: async () => {},
+      }),
+    }),
+    /暂不支持 IPv6/,
+  );
+  await assert.rejects(queryIPPure({ target: "2001:db8::1" }), /暂不支持 IPv6/);
 });

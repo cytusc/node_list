@@ -124,13 +124,31 @@ export async function configureProxyBatch({
 
 export async function resolveExitIP(options) {
   return withHTTP(options, async (context, signal) => {
-    const response = await context.get("https://api.ip.sb/ip");
-    signal.throwIfAborted();
-    if (!response.ok())
-      throw new Error(`IP.SB 访问失败 (HTTP ${response.status()})`);
-    const ip = (await response.text()).trim();
-    if (!isIP(ip)) throw new Error("IP.SB 未返回有效的出口 IP");
-    return ip;
+    let failure;
+    // IPPure's risk endpoint accepts IPv4 only. Both probes must use the node.
+    for (const url of ["https://api-ipv4.ip.sb/ip", "https://api.ip.sb/ip"]) {
+      try {
+        const response = await context.get(url);
+        try {
+          signal.throwIfAborted();
+          if (!response.ok())
+            throw new Error(`IP.SB 访问失败 (HTTP ${response.status()})`);
+          const ip = (await response.text()).trim();
+          if (!isIP(ip)) throw new Error("IP.SB 未返回有效的出口 IP");
+          if (isIP(ip) !== 4)
+            throw new Error(
+              "IP.SB 未返回 IPv4 出口，IPPure 风险评分接口暂不支持 IPv6",
+            );
+          return ip;
+        } finally {
+          await response.dispose();
+        }
+      } catch (error) {
+        signal.throwIfAborted();
+        failure = error;
+      }
+    }
+    throw failure;
   });
 }
 
@@ -273,6 +291,8 @@ export async function queryIPPure(options) {
     asnCache = new Map(),
   } = options;
   if (!isIP(target || "")) throw new Error("IPPure 查询目标必须是出口 IP");
+  if (isIP(target) === 6)
+    throw new Error("节点仅获取到 IPv6 出口，IPPure 风险评分接口暂不支持 IPv6");
   return withHTTP(options, async (context, signal) => {
     const get = createSignedClient(context, { origin: apiOrigin, signal });
     // Keep requests in one signing session sequential: challenges can rotate its key.
