@@ -23,7 +23,10 @@ npm run dev
 QILAN_SESSION_HOST_FILE=/mnt/d/code/qilan/qilan-scraper/session.txt
 COMPOSE_FILE=compose.yaml:compose.subs-check.yaml:compose.qilan.yaml
 QILAN_REFRESH_INTERVAL_SECONDS=900
+QILAN_USER_AGENT=Mozilla/5.0
 ```
+
+采集请求会携带站点 Referer 和 User-Agent。遇到请求被拒绝时，可将 `QILAN_USER_AGENT` 设置为已登录浏览器的 User-Agent；会话文件仍只存 `session` 值，响应中的 `csrf_token` 不能替代登录会话。
 
 然后运行 `bash deploy/compose.sh up -d node-explorer`。`compose.qilan.yaml` 将宿主机文件只读挂载到容器的 `/run/secrets/qilan-session.txt`，并设置 `QILAN_SESSION_FILE` 指向此路径。宿主机文件必须已存在且容器用户可读；其他服务器请填写该服务器上的实际路径。已有 PostgreSQL、IPPure 等 Compose 文件继续保留在 `COMPOSE_FILE` 中。
 

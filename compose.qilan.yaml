@@ -4,6 +4,7 @@ services:
     environment:
       QILAN_SESSION_FILE: /run/secrets/qilan-session.txt
       QILAN_REFRESH_INTERVAL_SECONDS: ${QILAN_REFRESH_INTERVAL_SECONDS:-900}
+      QILAN_USER_AGENT: ${QILAN_USER_AGENT:-Mozilla/5.0}
     volumes:
       - type: bind
         source: ${QILAN_SESSION_HOST_FILE:?Set QILAN_SESSION_HOST_FILE in .env}

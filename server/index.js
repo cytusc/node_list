@@ -56,6 +56,7 @@ const app = createApp({
       ? {
           session: process.env.QILAN_SESSION,
           sessionFile: qilanSessionFile,
+          userAgent: process.env.QILAN_USER_AGENT || undefined,
           intervalMs: Number.isFinite(qilanRefreshSeconds)
             ? Math.max(60_000, qilanRefreshSeconds * 1000)
             : 15 * 60_000,

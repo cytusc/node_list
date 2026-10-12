@@ -76,6 +76,7 @@ function normalizeNode(node) {
 
 export async function fetchQilanSnapshot({
   session,
+  userAgent = "Mozilla/5.0",
   fetchImpl = fetch,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
@@ -91,6 +92,8 @@ export async function fetchQilanSnapshot({
     const response = await fetchImpl(url, {
       headers: {
         Accept: "application/json",
+        Referer: `${baseUrl}/`,
+        "User-Agent": userAgent,
         Cookie: `session=${session.trim()}`,
       },
       signal: AbortSignal.timeout(30_000),
@@ -143,6 +146,7 @@ export function startQilanSource({
   store,
   session,
   sessionFile,
+  userAgent,
   intervalMs = 15 * 60_000,
   fetchImpl,
   onError = (error) => console.error(`Qilan source refresh failed: ${error.message}`),
@@ -153,7 +157,11 @@ export function startQilanSource({
     if (closed || pending) return pending;
     pending = (async () => {
       const cookie = await loadQilanSession({ session, sessionFile });
-      const snapshot = await fetchQilanSnapshot({ session: cookie, fetchImpl });
+      const snapshot = await fetchQilanSnapshot({
+        session: cookie,
+        userAgent,
+        fetchImpl,
+      });
       await store.syncSnapshot(snapshot);
     })()
       .catch(onError)
