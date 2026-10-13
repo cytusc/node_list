@@ -176,14 +176,14 @@ export async function createPostgresStore(config) {
         )
       ).rows;
     },
-    async restoreNode(identity, retiredAt) {
+    async restoreNode(
+      identity,
+      retiredAt,
+      reason = "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed",
+    ) {
       const result = await pool.query(
         "DELETE FROM node_explorer_retired_nodes WHERE identity = $1 AND retired_at = $2 AND reason = $3",
-        [
-          identity,
-          retiredAt,
-          "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed",
-        ],
+        [identity, retiredAt, reason],
       );
       return result.rowCount;
     },

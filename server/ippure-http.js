@@ -154,8 +154,14 @@ export async function resolveExitIPInfo(options) {
   // A failed CONNECT/TLS session must not poison a fallback request. Each
   // attempt gets its own dispatcher while retaining the same node listener.
   // Retry the primary IPv4 providers once after exhausting the first pass.
-  const rounds = [services, services.slice(0, 3)];
-  for (const [round, endpoints] of rounds.entries()) {
+  const roundsList = [services, services.slice(0, 3)];
+  // Only unambiguous transport failures count towards the early abort;
+  // NETWORK_ERROR is a catch-all and HTTP/TLS/DNS errors can be endpoint
+  // specific while the tunnel itself is still alive.
+  const transportDead = ["TIMEOUT", "CONNECTION_RESET"];
+  let deadStreak = 0;
+  let earlyAbort = false;
+  rounds: for (const [round, endpoints] of roundsList.entries()) {
     for (const [url, provider, format] of endpoints) {
       const started = Date.now();
       let outcome;
@@ -193,14 +199,22 @@ export async function resolveExitIPInfo(options) {
         );
       } catch (error) {
         options.signal?.throwIfAborted();
+        const code = exitProbeCode(error);
         options.onProbeAttempt?.({
           provider,
           endpoint: url,
           round: round + 1,
           elapsedMs: Date.now() - started,
           outcome: "error",
-          code: exitProbeCode(error),
+          code,
         });
+        // A node that resets or times out on two different destinations is
+        // unreachable for every remaining one; stop spending their timeouts.
+        deadStreak = transportDead.includes(code) ? deadStreak + 1 : 0;
+        if (deadStreak >= 2) {
+          earlyAbort = true;
+          break rounds;
+        }
         continue;
       }
       options.onProbeAttempt?.({
@@ -212,9 +226,15 @@ export async function resolveExitIPInfo(options) {
       });
       if (outcome.addressFamily === 4) return outcome;
       ipv6 ??= outcome;
+      deadStreak = 0;
     }
   }
   if (ipv6) return ipv6;
+  if (earlyAbort) {
+    const failure = new Error("节点出口探测连续多次传输级失败，已提前中止");
+    failure.exitIPFailure = true;
+    throw failure;
+  }
   const failure = new Error(
     "出口 IP 探测失败：8 个查询入口均未取得有效 IP，已使用新连接重试",
   );

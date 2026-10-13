@@ -102,6 +102,9 @@ export function startIPPureCollector({
     const unavailable = new Set();
     const ipCache = new Map();
     const asnCache = new Map();
+    // Retiring a dead node requires proof the probe infrastructure itself
+    // works: any successful result in this run provides that control.
+    let healthyRun = false;
     const jobs = [];
     const aggregateResults = new Map(
       (aggregate?.nodes || []).map((node) => [
@@ -212,6 +215,7 @@ export function startIPPureCollector({
         identity: aggregateIdentity(node),
         snapshotId,
         index,
+        node,
         old,
         currentExitIP,
         backfill,
@@ -298,6 +302,7 @@ export function startIPPureCollector({
           async ({
             snapshotId,
             index,
+            node,
             old,
             currentExitIP,
             backfill,
@@ -417,6 +422,7 @@ export function startIPPureCollector({
                 });
               }
               Object.assign(result, await cached, { status: "success" });
+              healthyRun = true;
             } catch (error) {
               if (abort.signal.aborted) return;
               if (backfill) {
@@ -465,6 +471,21 @@ export function startIPPureCollector({
             if (abort.signal.aborted || (await store.get())?.id !== snapshot.id)
               return;
             await store.saveIPPure(snapshotId, index, result);
+            // Three fast retries plus a one-day-later recheck that still
+            // cannot yield any exit IP means the node is dead; retire it so
+            // it leaves both the display and the collection queue. A later
+            // patrol recheck restores revived nodes.
+            if (
+              result.status === "error" &&
+              result.failureStage === "exit-ip" &&
+              result.attempts >= 4 &&
+              healthyRun
+            ) {
+              await store.retireNodes?.(
+                [node],
+                `IPPure: exit-IP probe failed ${result.attempts} times`,
+              );
+            }
           },
         ),
       );

@@ -191,7 +191,13 @@ test("recovery requires two successful rounds two hours apart and persists acros
     now: f.options.now + 7200000,
   });
   assert.equal(result.restored, 1);
-  assert.deepEqual(f.restored, [[f.identity, f.retiredAt]]);
+  assert.deepEqual(f.restored, [
+    [
+      f.identity,
+      f.retiredAt,
+      "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed",
+    ],
+  ]);
   assert.equal(resumed[f.identity], undefined);
 });
 

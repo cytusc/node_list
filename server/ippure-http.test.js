@@ -514,3 +514,67 @@ test("all provider failures produce bounded credential-free diagnostics", async 
   assert.ok(attempts.every((attempt) => attempt.code === "NETWORK_ERROR"));
   assert.equal(JSON.stringify(attempts).includes("private"), false);
 });
+
+test("two consecutive transport-level failures stop spending the endpoint budget", async () => {
+  const attempts = [];
+  await assert.rejects(
+    resolveExitIPInfo({
+      proxyUrl: "http://localhost:7891",
+      createContext: () => ({
+        get: async (url) => {
+          attempts.push(url);
+          throw Object.assign(new Error("reset"), {
+            exitProbeCode: "CONNECTION_RESET",
+          });
+        },
+        dispose: async () => {},
+      }),
+    }),
+    /已提前中止/,
+  );
+  // Two dials instead of the full eight-endpoint budget plus retry round.
+  assert.equal(attempts.length, 2);
+});
+
+test("a transport-level failure does not abort while a later endpoint still answers", async () => {
+  const attempts = [];
+  const data = await resolveExitIPInfo({
+    proxyUrl: "http://localhost:7891",
+    createContext: () => ({
+      get: async (url) => {
+        attempts.push(url);
+        if (attempts.length === 1)
+          throw Object.assign(new Error("reset"), {
+            exitProbeCode: "CONNECTION_RESET",
+          });
+        return response("192.0.2.7");
+      },
+      dispose: async () => {},
+    }),
+  });
+  assert.equal(data.ip, "192.0.2.7");
+  assert.ok(attempts.length >= 2);
+});
+
+test("HTTP-level errors reset the transport streak because the tunnel is alive", async () => {
+  const attempts = [];
+  const data = await resolveExitIPInfo({
+    proxyUrl: "http://localhost:7891",
+    createContext: () => ({
+      get: async (url) => {
+        attempts.push(url);
+        if (url === "https://checkip.amazonaws.com/")
+          return response("192.0.2.8");
+        const error = new Error("blocked");
+        error.exitProbeCode = "HTTP_403";
+        throw error;
+      },
+      dispose: async () => {},
+    }),
+  });
+  assert.equal(data.ip, "192.0.2.8");
+  assert.deepEqual(attempts, [
+    "https://api-ipv4.ip.sb/ip",
+    "https://checkip.amazonaws.com/",
+  ]);
+});

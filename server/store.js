@@ -35,6 +35,11 @@ const fields = [
   "rawConfig",
 ];
 
+// Only retirements with this reason are restorable by the scheduled patrol
+// recheck; manual or other automated retirements stay until handled explicitly.
+const RETIRE_RESTORE_REASON =
+  "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed";
+
 export function createStore(databasePath = ":memory:") {
   if (databasePath !== ":memory:")
     mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -187,16 +192,12 @@ export function createStore(databasePath = ":memory:") {
         )
         .all();
     },
-    restoreNode(identity, retiredAt) {
+    restoreNode(identity, retiredAt, reason = RETIRE_RESTORE_REASON) {
       return db
         .prepare(
           "DELETE FROM retired_nodes WHERE identity = ? AND retired_at = ? AND reason = ?",
         )
-        .run(
-          identity,
-          retiredAt,
-          "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed",
-        ).changes;
+        .run(identity, retiredAt, reason).changes;
     },
     close() {
       db.close();
@@ -350,8 +351,8 @@ export function createSnapshotStore(adapter) {
       );
     },
     retiredNodes: () => adapter.retiredNodes(),
-    restoreNode: (identity, retiredAt) =>
-      adapter.restoreNode(identity, retiredAt),
+    restoreNode: (identity, retiredAt, reason) =>
+      adapter.restoreNode(identity, retiredAt, reason),
     reconcileSources: (linkedNodes, options) =>
       adapter.reconcile(linkedNodes, options),
     // Requests and the background collector share a single in-flight import.
