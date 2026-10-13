@@ -1,5 +1,5 @@
 const regions = new Intl.DisplayNames(["zh-CN"], { type: "region" });
-function countryName(code) {
+export function countryName(code) {
   if (!code || code === "unknown") return "未知地区";
   try {
     return regions.of(code.toUpperCase()) || code;
@@ -9,7 +9,7 @@ function countryName(code) {
 }
 const platform = (m) => m.platform || m.Platform || "";
 const mediaValue = (m) => m.tag || m.Tag || "";
-const sortKeys = [
+export const resultSortKeys = [
   "country",
   "name",
   "type",
@@ -52,7 +52,8 @@ export function parseResultsQuery(params) {
     if (params[key] !== undefined && typeof params[key] !== "string")
       throw new Error(key);
   }
-  if (params.sort && !sortKeys.includes(params.sort)) throw new Error("sort");
+  if (params.sort && !resultSortKeys.includes(params.sort))
+    throw new Error("sort");
   if (params.direction && !["asc", "desc"].includes(params.direction))
     throw new Error("direction");
   const minSpeed = Number(params.minSpeed || 0);
@@ -76,7 +77,7 @@ export function parseResultsQuery(params) {
   };
 }
 
-export function paginateResults(snapshot, query) {
+export function resultsMetadata(snapshot) {
   const nodes = snapshot.nodes;
   const counts = (key) => {
     const values = new Map();
@@ -125,17 +126,63 @@ export function paginateResults(snapshot, query) {
         ).length,
       })),
   };
+  const { nodes: _nodes, sourceWarning: _warning, ...metadata } = snapshot;
+  return { ...metadata, totalNodes: nodes.length, summary, facets };
+}
+
+export function resultSearchValues(n) {
+  return [
+    n.name,
+    n.baseName,
+    n.server,
+    n.sni,
+    n.country,
+    countryName(n.country),
+  ]
+    .filter((v) => v != null)
+    .map((v) => v.toLocaleLowerCase());
+}
+
+export function resultsSort(snapshot, query) {
+  return {
+    key:
+      query.sort === "speed" && !snapshot.speedTest
+        ? "name"
+        : query.sort || (snapshot.speedTest ? "speed" : "name"),
+    direction:
+      query.sort === "speed" && !snapshot.speedTest ? "asc" : query.direction,
+  };
+}
+
+export function resultSortValue(n, sort) {
+  if (sort === "name")
+    return (
+      (n.baseName || n.name || "")
+        .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, "")
+        .trim() || n.name
+    );
+  if (["country", "type", "speed"].includes(sort)) return n[sort];
+  if (n.ippure?.status !== "success") return undefined;
+  return {
+    asnOrganization: n.ippure.asnOrganization,
+    ipSource: n.ippure.source,
+    ipAttributes: n.ippure.attributes?.join(" · "),
+    ippure: n.ippure.score,
+    trafficRatio: n.ippure.humanPercent,
+  }[sort];
+}
+
+export function compareResultValues(left, right) {
+  return typeof left === "number" && typeof right === "number"
+    ? left - right
+    : String(left).localeCompare(String(right), "zh-CN", { numeric: true });
+}
+
+export function paginateResults(snapshot, query) {
+  const nodes = snapshot.nodes;
   const matches = nodes.filter(
     (n) =>
-      (!query.q ||
-        [
-          n.name,
-          n.baseName,
-          n.server,
-          n.sni,
-          n.country,
-          countryName(n.country),
-        ].some((v) => v?.toLocaleLowerCase().includes(query.q))) &&
+      (!query.q || resultSearchValues(n).some((v) => v.includes(query.q))) &&
       (!query.countries.length ||
         query.countries.includes(n.country || "unknown")) &&
       (!query.types.length || query.types.includes(n.type || "unknown")) &&
@@ -148,43 +195,14 @@ export function paginateResults(snapshot, query) {
           n.media?.some((m) => platform(m) === p && mediaValue(m)),
         )),
   );
-  const sort =
-    query.sort === "speed" && !snapshot.speedTest
-      ? "name"
-      : query.sort || (snapshot.speedTest ? "speed" : "name");
-  const direction =
-    query.sort === "speed" && !snapshot.speedTest
-      ? 1
-      : query.direction === "desc"
-        ? -1
-        : 1;
-  const value = (n) => {
-    if (sort === "name")
-      return (
-        (n.baseName || n.name).replace(/[\u{1F1E6}-\u{1F1FF}]/gu, "").trim() ||
-        n.name
-      );
-    if (["country", "type", "speed"].includes(sort)) return n[sort];
-    if (n.ippure?.status !== "success") return undefined;
-    return {
-      asnOrganization: n.ippure.asnOrganization,
-      ipSource: n.ippure.source,
-      ipAttributes: n.ippure.attributes?.join(" · "),
-      ippure: n.ippure.score,
-      trafficRatio: n.ippure.humanPercent,
-    }[sort];
-  };
+  const { key: sort, direction: order } = resultsSort(snapshot, query);
+  const direction = order === "desc" ? -1 : 1;
   matches.sort((a, b) => {
-    const left = value(a),
-      right = value(b);
+    const left = resultSortValue(a, sort),
+      right = resultSortValue(b, sort);
     if (left == null) return right == null ? 0 : 1;
     if (right == null) return -1;
-    return (
-      direction *
-      (typeof left === "number" && typeof right === "number"
-        ? left - right
-        : String(left).localeCompare(String(right), "zh-CN", { numeric: true }))
-    );
+    return direction * compareResultValues(left, right);
   });
   const page = Math.min(
     query.page,
@@ -192,12 +210,10 @@ export function paginateResults(snapshot, query) {
   );
   return {
     ...snapshot,
+    ...resultsMetadata(snapshot),
     nodes: matches.slice((page - 1) * query.limit, page * query.limit),
     total: matches.length,
-    totalNodes: nodes.length,
     page,
     limit: query.limit,
-    summary,
-    facets,
   };
 }

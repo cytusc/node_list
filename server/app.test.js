@@ -466,3 +466,51 @@ test("result pages filter and sort the complete aggregate before slicing, with g
     assert.equal((await f.get(`/api/results?${query}`)).status, 400, query);
   }
 });
+
+test(
+  "database pagination and history do not wait for background import or call full aggregation",
+  { timeout: 3000 },
+  async (t) => {
+    let release;
+    const importing = new Promise((resolve) => {
+      release = resolve;
+    });
+    t.after(() => release());
+    let syncCalls = 0;
+    const page = {
+      nodes: [{ name: "Page node" }],
+      page: 2,
+      limit: 1,
+      total: 3,
+    };
+    const store = {
+      sync: async () => {
+        syncCalls++;
+        await importing;
+      },
+      aggregate: async () => {
+        throw new Error("Full history must not be read");
+      },
+      aggregatePage: async (query) => {
+        assert.equal(query.page, 2);
+        assert.equal(query.limit, 1);
+        return page;
+      },
+      refreshAggregate: async () => {},
+      history: async () => ({ items: [], total: 0 }),
+      close: async () => {},
+    };
+    const f = await fixture(t, { store, importIntervalMs: 999999 });
+    try {
+      const response = await f.get(
+        "/api/results?view=aggregate&page=2&limit=1",
+      );
+      assert.equal(response.status, 200);
+      assert.deepEqual((await response.json()).nodes, page.nodes);
+      assert.equal((await f.get("/api/history")).status, 200);
+      assert.equal(syncCalls, 1);
+    } finally {
+      release();
+    }
+  },
+);

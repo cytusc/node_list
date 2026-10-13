@@ -36,7 +36,33 @@ export function createApp({
     path.join(subDir, "config", "cache", "config", "results.json");
   const store = configuredStore || createStore(databasePath);
   const sources = clashFile ? { clashFile, linksFile } : linksFile;
-  const sync = () => store.sync(snapshotPath, sources).catch(() => {});
+  let lastSourceError;
+  let backgroundSync;
+  const sync = () => {
+    if (!backgroundSync) {
+      backgroundSync = (async () => {
+        try {
+          await store.sync(snapshotPath, sources);
+          lastSourceError = undefined;
+        } catch (error) {
+          lastSourceError = error;
+        }
+        // IPPure and patrol changes in other processes invalidate the shared
+        // database projection. Heavy refresh work runs outside the HTTP thread.
+        await store.refreshAggregate?.();
+      })()
+        .catch((error) => {
+          console.error(
+            "Background result refresh failed; subsequent refreshes will retry.",
+            error.code || "REFRESH_FAILED",
+          );
+        })
+        .finally(() => {
+          backgroundSync = undefined;
+        });
+    }
+    return backgroundSync;
+  };
   const initialSync = sync();
   const timer = setInterval(sync, importIntervalMs);
   timer.unref();
@@ -67,7 +93,7 @@ export function createApp({
     ) {
       return res.status(400).json({ error: "历史分页参数无效。" });
     }
-    await sync();
+    if (!store.aggregatePage) await sync();
     try {
       res.json(await store.history(limit, offset));
     } catch {
@@ -101,18 +127,26 @@ export function createApp({
       return res.status(400).json({ error: "节点分页、筛选或排序参数无效。" });
     }
     try {
-      let sourceError;
-      try {
-        await store.sync(snapshotPath, sources);
-      } catch (error) {
-        sourceError = error;
+      const databasePage = aggregate && query && store.aggregatePage;
+      let sourceError = lastSourceError;
+      if (!databasePage) {
+        try {
+          await store.sync(snapshotPath, sources);
+          sourceError = undefined;
+        } catch (error) {
+          sourceError = error;
+        }
       }
-      const snapshot = aggregate
-        ? await store.aggregate()
-        : await store.get(id === undefined ? undefined : Number(id));
+      const snapshot = databasePage
+        ? await store.aggregatePage(query)
+        : aggregate
+          ? await store.aggregate()
+          : await store.get(id === undefined ? undefined : Number(id));
       if (snapshot)
         return res.json({
-          ...(query ? paginateResults(snapshot, query) : snapshot),
+          ...(query && !databasePage
+            ? paginateResults(snapshot, query)
+            : snapshot),
           ippureCollector: collector?.status() || { enabled: false },
         });
       if (id !== undefined)

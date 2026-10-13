@@ -19,7 +19,10 @@ test(
     });
     const schema = `node_explorer_test_${process.pid}_${Date.now()}`;
     await admin.query(`CREATE SCHEMA "${schema}"`);
+    let app, server;
     t.after(async () => {
+      if (server) await new Promise((resolve) => server.close(resolve));
+      await app?.locals.close();
       await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
       await admin.end();
     });
@@ -58,13 +61,9 @@ test(
     await reopened.saveIPPure(old.id, 0, ippure);
     assert.deepEqual((await reopened.get(old.id)).nodes[0].ippure, ippure);
     assert.equal(old.nodes[0].name, "Archived");
-    const app = createApp({ subDir: dir, resultsFile: file, store: reopened });
-    const server = app.listen(0, "127.0.0.1");
+    app = createApp({ subDir: dir, resultsFile: file, store: reopened });
+    server = app.listen(0, "127.0.0.1");
     await new Promise((resolve) => server.once("listening", resolve));
-    t.after(async () => {
-      await new Promise((resolve) => server.close(resolve));
-      await app.locals.close();
-    });
     const get = (url) =>
       fetch(`http://127.0.0.1:${server.address().port}${url}`);
     await writeFile(

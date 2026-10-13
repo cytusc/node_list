@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { EXIT_IP_VERSION, hasVerifiedExitIP } from "./exit-ip.js";
@@ -223,6 +223,30 @@ export function createSnapshotStore(adapter) {
   let pending;
   let sourceWarning = null;
   let sourcesBackfilled = false;
+  const knownIdentities = new WeakMap();
+  let lastImportSignature;
+  async function importSignature(file, sources) {
+    const files = [{ file }];
+    if (typeof sources === "string") files.push({ file: sources });
+    else if (sources) {
+      files.push({ file: sources.clashFile });
+      if (sources.linksFile)
+        files.push({ file: sources.linksFile, optional: true });
+    }
+    return JSON.stringify(
+      await Promise.all(
+        files.map(async ({ file, optional }) => {
+          try {
+            const info = await stat(file);
+            return [file, info.ino, info.size, info.mtimeMs, info.ctimeMs];
+          } catch (error) {
+            if (optional && error.code === "ENOENT") return [file, "missing"];
+            throw error;
+          }
+        }),
+      ),
+    );
+  }
   async function ingestRaw(raw, linksFile, updateSourceWarning = true) {
     try {
       if (
@@ -288,15 +312,34 @@ export function createSnapshotStore(adapter) {
   }
   async function ingest(file, linksFile) {
     try {
-      return await ingestRaw(JSON.parse(await readFile(file, "utf8")), linksFile);
+      const signature = await importSignature(file, linksFile);
+      if (signature === lastImportSignature) return;
+      await ingestRaw(JSON.parse(await readFile(file, "utf8")), linksFile);
+      lastImportSignature = signature;
     } catch (error) {
+      lastImportSignature = undefined;
       sourceWarning = error.code === "ENOENT" ? "NO_RESULTS" : "READ_FAILED";
       throw error;
     }
   }
-  async function hydrate(row, saved, retiredRows) {
+  async function hydrate(
+    row,
+    saved,
+    retiredRows,
+    identity = (node) => knownIdentities.get(node) ?? aggregateIdentity(node),
+  ) {
     if (!row) return null;
-    const snapshot = { ...JSON.parse(row.payload), id: row.id, sourceWarning };
+    const raw = row.snapshot
+      ? {
+          ...row.snapshot,
+          nodes: row.snapshot.nodes.map((node) => ({ ...node })),
+        }
+      : JSON.parse(row.payload);
+    const snapshot = { ...raw, id: row.id, sourceWarning };
+    if (row.nodeIdentities)
+      snapshot.nodes.forEach((node, index) =>
+        knownIdentities.set(node, row.nodeIdentities[index]),
+      );
     for (const item of saved ?? (await adapter.enrichments(row.id))) {
       if (snapshot.nodes[item.nodeIndex]) {
         snapshot.nodes[item.nodeIndex].ippure = JSON.parse(item.payload);
@@ -314,7 +357,7 @@ export function createSnapshotStore(adapter) {
     );
     let earliestRetirement = Infinity;
     for (const node of snapshot.nodes) {
-      const retiredAt = retirements.get(aggregateIdentity(node));
+      const retiredAt = retirements.get(identity(node));
       if (Number.isFinite(retiredAt))
         earliestRetirement = Math.min(earliestRetirement, retiredAt);
       if (
@@ -345,6 +388,15 @@ export function createSnapshotStore(adapter) {
     };
   }
   return {
+    ...(adapter.aggregatePage
+      ? {
+          async aggregatePage(query) {
+            const result = await adapter.aggregatePage(query);
+            return result && { ...result, sourceWarning };
+          },
+          refreshAggregate: () => adapter.refreshAggregate(),
+        }
+      : {}),
     async saveIPPure(id, index, result) {
       const row = await adapter.get(id);
       const node = row && JSON.parse(row.payload).nodes[index];
@@ -375,7 +427,19 @@ export function createSnapshotStore(adapter) {
     sync(file, linksFile) {
       if (!pending) {
         let current;
-        current = ingest(file, linksFile).finally(() => {
+        const importing = adapter.sync
+          ? adapter
+              .sync(file, linksFile)
+              .then(() => {
+                sourceWarning = null;
+              })
+              .catch((error) => {
+                sourceWarning =
+                  error.code === "ENOENT" ? "NO_RESULTS" : "READ_FAILED";
+                throw error;
+              })
+          : ingest(file, linksFile);
+        current = importing.finally(() => {
           if (pending === current) pending = undefined;
         });
         pending = current;
@@ -403,6 +467,21 @@ export function createSnapshotStore(adapter) {
       });
     },
     async aggregate({ includeRetired = false } = {}) {
+      if (adapter.aggregate) {
+        const result = await adapter.aggregate({ includeRetired });
+        return result && { ...result, sourceWarning };
+      }
+      // Scope memoization to a single aggregation: source configs can change
+      // between reads, while enrichment does not change connection identity.
+      const identities = new WeakMap();
+      const identity = (node) => {
+        if (!identities.has(node))
+          identities.set(
+            node,
+            knownIdentities.get(node) ?? aggregateIdentity(node),
+          );
+        return identities.get(node);
+      };
       const rows = await adapter.all();
       if (!rows.length) return null;
       const enrichments = new Map();
@@ -416,7 +495,12 @@ export function createSnapshotStore(adapter) {
       const batches = (
         await Promise.all(
           rows.map(async (row) => ({
-            ...(await hydrate(row, enrichments.get(row.id) || [], retiredRows)),
+            ...(await hydrate(
+              row,
+              enrichments.get(row.id) || [],
+              retiredRows,
+              identity,
+            )),
             importedAt: row.importedAt,
           })),
         )
@@ -433,7 +517,7 @@ export function createSnapshotStore(adapter) {
       for (const batch of batches) {
         for (const node of batch.nodes) {
           // Names, exit IPs and test results can change between checks.
-          const key = aggregateIdentity(node);
+          const key = identity(node);
           if (!includeRetired && retired.has(key)) continue;
           if (!nodes.has(key))
             nodes.set(key, {
@@ -452,7 +536,7 @@ export function createSnapshotStore(adapter) {
       for (const batch of batches)
         for (const node of batch.nodes) {
           if (!node.ippure || node.rawConfig || !node.rawLink) continue;
-          const key = aggregateIdentity(node),
+          const key = identity(node),
             previous = latestEnrichments.get(key);
           if (
             !previous ||
@@ -463,7 +547,7 @@ export function createSnapshotStore(adapter) {
         }
       for (const node of result) {
         if (node.rawConfig || !node.rawLink) continue;
-        const saved = latestEnrichments.get(aggregateIdentity(node));
+        const saved = latestEnrichments.get(identity(node));
         if (saved) node.ippure = saved;
       }
       return {
@@ -480,6 +564,7 @@ export function createSnapshotStore(adapter) {
       };
     },
     async ippureCandidates() {
+      if (adapter.ippureCandidates) return adapter.ippureCandidates();
       const rows = await adapter.all();
       const enrichments = new Map();
       for (const item of await adapter.enrichments()) {
@@ -498,7 +583,9 @@ export function createSnapshotStore(adapter) {
         );
         snapshot.nodes.forEach((node, index) => {
           if (
-            !retired.has(aggregateIdentity(node)) &&
+            !retired.has(
+              knownIdentities.get(node) ?? aggregateIdentity(node),
+            ) &&
             (node.ippure?.status !== "success" ||
               !hasVerifiedExitIP(node.ippure) ||
               !node.ippure.asnOrganization) &&
