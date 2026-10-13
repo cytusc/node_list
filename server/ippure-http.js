@@ -135,6 +135,13 @@ function exitProbeCode(error) {
   return "NETWORK_ERROR";
 }
 
+// Cloudflare echoes the viewer's exit country as a two-letter code. Used to
+// reconcile source-claimed regions (airport names frequently lie) with the
+// actual geolocation of the verified exit IP.
+function traceCountry(body) {
+  return body.match(/^loc=([A-Za-z]{2})\s*$/m)?.[1]?.toUpperCase() || undefined;
+}
+
 export async function resolveExitIPInfo(options) {
   options.signal?.throwIfAborted();
   if (!options.proxyUrl) throw new Error("IPPure 缺少隔离代理入口");
@@ -191,7 +198,32 @@ export async function resolveExitIPInfo(options) {
                 error.exitProbeCode = "INVALID_IP";
                 throw error;
               }
-              return { ip, provider, addressFamily: isIP(ip) };
+              const outcome = { ip, provider, addressFamily: isIP(ip) };
+              if (format === "trace") {
+                outcome.country = traceCountry(body);
+              } else if (outcome.addressFamily === 4) {
+                // One extra request over the already-open tunnel buys the
+                // exit country; a failure here never fails the probe itself.
+                // IPv6 outcomes skip it: IPPure rejects IPv6 anyway, and the
+                // lookup would be wasted whenever a later endpoint yields IPv4.
+                try {
+                  const trace = await context.get(
+                    "https://www.cloudflare.com/cdn-cgi/trace",
+                  );
+                  try {
+                    signal.throwIfAborted();
+                    if (trace.ok())
+                      outcome.country = traceCountry(
+                        (await trace.text()).trim(),
+                      );
+                  } finally {
+                    await trace.dispose();
+                  }
+                } catch {
+                  /* best effort */
+                }
+              }
+              return outcome;
             } finally {
               await response.dispose();
             }
@@ -248,6 +280,30 @@ export async function resolveExitIP(options) {
   if (data.addressFamily !== 4)
     throw new Error(`${data.provider} 返回 IPv6；IPPure 风险评分接口需要 IPv4`);
   return data.ip;
+}
+
+// Best-effort country lookup for nodes whose exit IP is already verified but
+// were probed before country collection existed. Rides one Cloudflare trace
+// request through the node's own transport.
+export async function resolveExitCountry(options) {
+  return withHTTP(
+    { ...options, timeout: options.timeoutMs ?? 8000 },
+    async (context, signal) => {
+      const response = await context.get(
+        "https://www.cloudflare.com/cdn-cgi/trace",
+      );
+      try {
+        signal.throwIfAborted();
+        if (!response.ok())
+          throw new Error(`出口国家查询 HTTP 错误 (${response.status()})`);
+        const country = traceCountry((await response.text()).trim());
+        if (!country) throw new Error("出口国家查询未返回有效地区码");
+        return country;
+      } finally {
+        await response.dispose();
+      }
+    },
+  );
 }
 
 export function createSignedClient(context, { origin, signal, wait = delay }) {
@@ -369,6 +425,12 @@ export function normalizeIPPure(target, basic, risk, bot) {
   const attributes = [types[basic.asn.type] || "机房IP"];
   if (basic.asn.type === "business" && statistics?.human > 50)
     attributes.push("商业用途");
+  // The basic endpoint follows IPInfo's shape and usually carries an ISO
+  // country code; treat it as optional so older deployments stay compatible.
+  const apiCountry =
+    typeof basic.country === "string" && /^[A-Za-z]{2}$/.test(basic.country)
+      ? basic.country.toUpperCase()
+      : undefined;
   return {
     ip: basic.ip,
     asn: `AS${basic.asn.number}`,
@@ -379,6 +441,7 @@ export function normalizeIPPure(target, basic, risk, bot) {
     botPercent: statistics ? Number(statistics.bot.toFixed(2)) : null,
     score,
     label: labels[boundaries.findIndex((end) => score <= end)],
+    ...(apiCountry ? { country: apiCountry } : {}),
   };
 }
 

@@ -10,6 +10,7 @@ import {
   createSignedClient,
   normalizeIPPure,
   queryIPPure,
+  resolveExitCountry,
   resolveExitIP,
   resolveExitIPInfo,
 } from "./ippure-http.js";
@@ -359,11 +360,14 @@ test("exit discovery prefers IPv4 and only falls back through the same node", as
       },
     });
     assert.equal(ip, first === "192.0.2.20" ? first : "192.0.2.21");
+    // Every success is followed by one same-tunnel trace request for the
+    // exit country; its body here carries no loc code, which is tolerated.
+    const trace = "https://www.cloudflare.com/cdn-cgi/trace";
     assert.deepEqual(
       calls,
       first === "192.0.2.20"
-        ? ["https://api-ipv4.ip.sb/ip"]
-        : ["https://api-ipv4.ip.sb/ip", "https://checkip.amazonaws.com/"],
+        ? ["https://api-ipv4.ip.sb/ip", trace]
+        : ["https://api-ipv4.ip.sb/ip", "https://checkip.amazonaws.com/", trace],
     );
   }
 });
@@ -414,7 +418,7 @@ test("Cloudflare trace is parsed without confusing metadata with an exit address
     createContext: () => ({
       get: async (url) => {
         if (!url.includes("cdn-cgi/trace")) throw new Error("unreachable");
-        return response("fl=123\nip=192.0.2.23\nwarp=on\n");
+        return response("fl=123\nip=192.0.2.23\nloc=SG\nwarp=on\n");
       },
       dispose: async () => {},
     }),
@@ -423,7 +427,60 @@ test("Cloudflare trace is parsed without confusing metadata with an exit address
     ip: "192.0.2.23",
     provider: "Cloudflare",
     addressFamily: 4,
+    country: "SG",
   });
+});
+
+test("a non-trace exit success rides the same tunnel once to learn the country", async () => {
+  const calls = [];
+  const data = await resolveExitIPInfo({
+    proxyUrl: "http://localhost:7891",
+    createContext: () => ({
+      get: async (url) => {
+        calls.push(url);
+        if (url.includes("cdn-cgi/trace"))
+          return response("fl=1\nip=192.0.2.99\nloc=JP\nts=1\n");
+        return response("192.0.2.42");
+      },
+      dispose: async () => {},
+    }),
+  });
+  assert.equal(data.ip, "192.0.2.42");
+  assert.equal(data.provider, "IP.SB");
+  assert.equal(data.country, "JP");
+  assert.deepEqual(calls, [
+    "https://api-ipv4.ip.sb/ip",
+    "https://www.cloudflare.com/cdn-cgi/trace",
+  ]);
+});
+
+test("a failed country follow-up never fails the exit probe", async () => {
+  const data = await resolveExitIPInfo({
+    proxyUrl: "http://localhost:7891",
+    createContext: () => ({
+      get: async (url) => {
+        if (url.includes("cdn-cgi/trace")) return response("blocked", 403);
+        return response("192.0.2.42");
+      },
+      dispose: async () => {},
+    }),
+  });
+  assert.deepEqual(data, {
+    ip: "192.0.2.42",
+    provider: "IP.SB",
+    addressFamily: 4,
+  });
+});
+
+test("resolveExitCountry returns the two-letter trace location", async () => {
+  const country = await resolveExitCountry({
+    proxyUrl: "http://localhost:7891",
+    createContext: () => ({
+      get: async () => response("fl=1\nip=192.0.2.99\nloc=de\n"),
+      dispose: async () => {},
+    }),
+  });
+  assert.equal(country, "DE");
 });
 
 test("an IP.SB timeout is followed by AWS on a fresh session through the same node", async () => {
@@ -439,13 +496,20 @@ test("an IP.SB timeout is followed by AWS on a fresh session through the same no
       contexts.push(record);
       return {
         get: async (url) => {
-          assert.equal(record.calls++, 0);
+          record.calls++;
           if (url.includes("ip.sb")) {
             const error = new Error("sensitive transport message");
             error.cause = { code: "UND_ERR_CONNECT_TIMEOUT" };
             throw error;
           }
+          // The country follow-up intentionally reuses the success tunnel.
+          assert.equal(
+            record.calls,
+            url.includes("cdn-cgi/trace") ? 2 : 1,
+          );
           assert.equal(contexts[0].disposed, true);
+          if (url.includes("cdn-cgi/trace"))
+            return response("fl=1\nip=192.0.2.42\nloc=SG\n");
           return response("192.0.2.42");
         },
         dispose: async () => {
@@ -456,6 +520,7 @@ test("an IP.SB timeout is followed by AWS on a fresh session through the same no
   });
   assert.equal(data.ip, "192.0.2.42");
   assert.equal(data.provider, "AWS CheckIP");
+  assert.equal(data.country, "SG");
   assert.equal(contexts.length, 2);
   assert.ok(contexts.every((context) => context.disposed));
   assert.equal(attempts[0].code, "TIMEOUT");
@@ -576,5 +641,30 @@ test("HTTP-level errors reset the transport streak because the tunnel is alive",
   assert.deepEqual(attempts, [
     "https://api-ipv4.ip.sb/ip",
     "https://checkip.amazonaws.com/",
+    "https://www.cloudflare.com/cdn-cgi/trace",
   ]);
+});
+
+test("normalizeIPPure carries the API country when present and omits it otherwise", () => {
+  const withCountry = normalizeIPPure(
+    "23.22.22.12",
+    { ...basic(), country: "sg" },
+    { risk_score: 9 },
+    { human: 77.78, bot: 22.22 },
+  );
+  assert.equal(withCountry.country, "SG");
+  const without = normalizeIPPure(
+    "23.22.22.12",
+    basic(),
+    { risk_score: 9 },
+    null,
+  );
+  assert.equal("country" in without, false);
+  const invalid = normalizeIPPure(
+    "23.22.22.12",
+    { ...basic(), country: "SGP" },
+    { risk_score: 9 },
+    null,
+  );
+  assert.equal("country" in invalid, false);
 });

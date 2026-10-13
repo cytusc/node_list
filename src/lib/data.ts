@@ -11,6 +11,7 @@ export type IPPureResult = {
   error?: string;
   ip?: string;
   exitIPSource?: string;
+  country?: string;
   addressFamily?: 4 | 6;
   failureStage?: string;
   asn?: string;

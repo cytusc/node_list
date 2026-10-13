@@ -418,6 +418,7 @@ test("IPPure rotates successful transports, rescues exhausted failures and saves
       status: "success",
       exitIPSource: "ip.sb",
       asnOrganization: "Existing",
+      country: "SG",
       score: 20,
     };
   }
@@ -640,6 +641,7 @@ test("IPPure refreshes legacy successes from archived batches absent in the late
     ip: "192.0.2.8",
     exitIPSource: "ip.sb",
     asnOrganization: "Donor",
+    country: "SG",
   });
 
   const calls = [];
@@ -1423,4 +1425,64 @@ test("exit-IP failures never retire when the whole run is unhealthy", async (t) 
   await collector.run();
   assert.deepEqual(retirements, []);
   assert.equal(nodes[0].ippure.attempts, 4);
+});
+
+test("success results verified before country collection gain it via one trace request", async (t) => {
+  const verified = {
+    name: "verified",
+    type: "vless",
+    server: "verified.example",
+    port: "443",
+    rawLink:
+      "vless://72345678-1234-1234-1234-123456789abc@verified.example:443",
+    ippure: {
+      status: "success",
+      ip: "192.0.2.10",
+      attempts: 1,
+      checkedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      queryMode: "specified-exit",
+      exitIPMode: "proxy-echo",
+      transportMode: "http",
+      signatureVersion: 2,
+      exitIPVersion: 3,
+      exitIPProbeVersion: 1,
+      asnOrganization: "Verified",
+    },
+  };
+  const nodes = [verified],
+    countryCalls = [],
+    probeCalls = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 1,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      aggregate: async () => ({ nodes }),
+      saveIPPure: async (id, index, result) => {
+        nodes[index].ippure = result;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => {
+      probeCalls.push(proxy.name);
+      return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
+    },
+    resolveCountry: async () => {
+      countryCalls.push("192.0.2.10");
+      return "DE";
+    },
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+  });
+  t.after(() => collector.close());
+  // The verified exit IP is reused without a fresh probe; only the trace
+  // country lookup runs, riding the node's own transport.
+  await collector.run();
+  assert.deepEqual(probeCalls, []);
+  assert.deepEqual(countryCalls, ["192.0.2.10"]);
+  assert.equal(nodes[0].ippure.country, "DE");
+  assert.equal(nodes[0].ippure.ip, "192.0.2.10");
+  // With the country stored the result is final and never scheduled again.
+  await collector.run();
+  assert.equal(countryCalls.length, 1);
 });

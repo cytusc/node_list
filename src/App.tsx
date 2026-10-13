@@ -1217,6 +1217,18 @@ export default function App() {
                 <div className="detail-region">
                   <Flag code={selected.country} />
                   {countryName(selected.country)}
+                  {selected.ippure?.country &&
+                    selected.country &&
+                    selected.ippure.country.toUpperCase() !==
+                      selected.country.toUpperCase() && (
+                      <Badge
+                        variant="outline"
+                        className="border-amber-500 text-amber-600"
+                      >
+                        实际出口{" "}
+                        {countryName(selected.ippure.country)}
+                      </Badge>
+                    )}
                 </div>
                 <SheetTitle className="break-all text-xl">
                   {plainName(selected)}
@@ -1309,6 +1321,12 @@ export default function App() {
                         [
                           "ASN 组织",
                           selected.ippure.asnOrganization || "待补采",
+                        ],
+                        [
+                          "出口国家",
+                          selected.ippure.country
+                            ? `${countryName(selected.ippure.country)}（${selected.ippure.country.toUpperCase()}）`
+                            : "待补采",
                         ],
                         [
                           "人机流量比",
