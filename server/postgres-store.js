@@ -110,6 +110,7 @@ export async function createPostgresStore(
           aggregatePage: (query) => queryResultsProjection(pool, query),
           aggregate: (options) => runMaintenance("aggregate", options),
           ippureCandidates: () => runMaintenance("candidates"),
+          getCollectionContext: () => runMaintenance("collect-context"),
           refreshAggregate,
         }
       : {}),
@@ -192,6 +193,13 @@ export async function createPostgresStore(
               [id],
             );
       return result.rows[0];
+    },
+    async latestSnapshotId() {
+      return (
+        await pool.query(
+          "SELECT id FROM node_explorer_snapshots ORDER BY id DESC LIMIT 1",
+        )
+      ).rows[0]?.id;
     },
     async all() {
       const result = await pool.query(
