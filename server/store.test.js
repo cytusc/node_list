@@ -134,3 +134,62 @@ test("restoration makes archived nodes visible and protects manual or newer reti
   assert.equal(await store.restoreNode(identity, manual.retiredAt), 0);
   assert.equal((await store.aggregate()).nodes.length, 0);
 });
+
+test("verified exit countries override source-claimed regions in every read path", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "exit-country-"));
+  const store = createStore();
+  t.after(async () => {
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const us = {
+    name: "US D+",
+    type: "vless",
+    server: "us-claim.example",
+    port: 443,
+  };
+  const noRegion = {
+    name: "mystery",
+    type: "vless",
+    server: "mystery.example",
+    port: 443,
+  };
+  const file = path.join(dir, "results.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      nodes: [
+        { ...summarizeProxy(us), country: "US", rawConfig: us },
+        { ...summarizeProxy(noRegion), rawConfig: noRegion },
+      ],
+    }),
+  );
+  await store.sync(file);
+  const snapshot = await store.get();
+  await store.saveIPPure(snapshot.id, 0, {
+    status: "success",
+    ip: "43.230.99.117",
+    country: "SG",
+    asnOrganization: "Viewqwest",
+  });
+  await store.saveIPPure(snapshot.id, 1, {
+    status: "success",
+    ip: "192.0.2.9",
+    country: "JP",
+    asnOrganization: "Verified",
+  });
+
+  for (const read of [
+    () => store.get(),
+    () => store.get(snapshot.id),
+    () => store.aggregate(),
+  ]) {
+    const nodes = (await read()).nodes;
+    // The airport claimed US but the exit lives in Singapore.
+    assert.equal(nodes[0].country, "SG");
+    assert.equal(nodes[0].claimedCountry, "US");
+    // Missing source regions are filled in by the verified exit.
+    assert.equal(nodes[1].country, "JP");
+    assert.equal(nodes[1].claimedCountry, undefined);
+  }
+});

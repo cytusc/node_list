@@ -1217,16 +1217,15 @@ export default function App() {
                 <div className="detail-region">
                   <Flag code={selected.country} />
                   {countryName(selected.country)}
-                  {selected.ippure?.country &&
+                  {selected.claimedCountry &&
                     selected.country &&
-                    selected.ippure.country.toUpperCase() !==
+                    selected.claimedCountry.toUpperCase() !==
                       selected.country.toUpperCase() && (
                       <Badge
                         variant="outline"
                         className="border-amber-500 text-amber-600"
                       >
-                        实际出口{" "}
-                        {countryName(selected.ippure.country)}
+                        来源标注 {countryName(selected.claimedCountry)}
                       </Badge>
                     )}
                 </div>

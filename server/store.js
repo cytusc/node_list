@@ -40,6 +40,20 @@ const fields = [
 const RETIRE_RESTORE_REASON =
   "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed";
 
+// Classify nodes by the verified exit IP's country: source-claimed regions
+// frequently lie. The original claim is kept alongside for the mismatch badge.
+export function applyExitCountry(node) {
+  const country = node.ippure?.country;
+  if (typeof country !== "string" || !/^[A-Za-z]{2}$/.test(country)) return;
+  const verified = country.toUpperCase();
+  if (node.country && node.country.toUpperCase() !== verified) {
+    node.claimedCountry = node.country;
+    node.country = verified;
+  } else if (!node.country) {
+    node.country = verified;
+  }
+}
+
 export function createStore(databasePath = ":memory:") {
   if (databasePath !== ":memory:")
     mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -284,8 +298,10 @@ export function createSnapshotStore(adapter) {
     if (!row) return null;
     const snapshot = { ...JSON.parse(row.payload), id: row.id, sourceWarning };
     for (const item of saved ?? (await adapter.enrichments(row.id))) {
-      if (snapshot.nodes[item.nodeIndex])
+      if (snapshot.nodes[item.nodeIndex]) {
         snapshot.nodes[item.nodeIndex].ippure = JSON.parse(item.payload);
+        applyExitCountry(snapshot.nodes[item.nodeIndex]);
+      }
     }
     // Before collection preserved original indexes, a filtered current batch
     // could attach later nodes' results to earlier rows. Retain the database

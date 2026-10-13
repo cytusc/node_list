@@ -41,6 +41,7 @@ export type NodeRecord = {
   network: string;
   speed: number;
   country?: string;
+  claimedCountry?: string;
   ip?: string;
   ipRisk?: string;
   subTag?: string;
