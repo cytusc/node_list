@@ -2,6 +2,7 @@ import { fetch as proxyFetch, ProxyAgent } from "undici";
 import { setTimeout as delay } from "node:timers/promises";
 import { configureProxyBatch } from "./ippure-http.js";
 import { aggregateIdentity } from "./node-sources.js";
+import { shareLinkProxy } from "./share-link.js";
 
 // A fresh dispatcher per attempt prevents a dead tunnel being reused on retry.
 export async function probeGitHub({ proxyUrl, timeoutMs, signal }) {
@@ -54,11 +55,34 @@ export async function patrolOnce({
       Number(a.ippure?.status === "success"),
   );
   const pending = [];
+  // Keep converted configurations separate: adding rawConfig to a share-only
+  // node would change its stored connection identity and break soft deletion.
+  const configs = new Map();
+  const configureTargets = (targets) =>
+    configure({
+      controller,
+      proxyUrl,
+      secret,
+      proxies: targets.map((node) => configs.get(node)),
+      signal,
+    });
+  const rejectedConfig = (error) =>
+    /代理配置失败 \(HTTP (400|422)\)/.test(error.message);
   for (let offset = 0; offset < nodes.length; offset += concurrency) {
     signal.throwIfAborted();
     const retired = await store.retiredNodeIdentities();
-    const batch = nodes.slice(offset, offset + concurrency).filter((node) => {
-      if (retired.has(aggregateIdentity(node)) || !node.rawConfig) {
+    let batch = nodes.slice(offset, offset + concurrency).filter((node) => {
+      if (retired.has(aggregateIdentity(node))) {
+        summary.skipped++;
+        return false;
+      }
+      try {
+        const config =
+          node.rawConfig ||
+          (node.rawLink && shareLinkProxy(node.rawLink, node.name));
+        if (!config) throw new Error("Missing connection configuration");
+        configs.set(node, config);
+      } catch {
         summary.skipped++;
         return false;
       }
@@ -69,16 +93,29 @@ export async function patrolOnce({
       reference = null;
     const targets = [...batch];
     if (reference && !targets.includes(reference)) targets.push(reference);
-    const proxies = targets.map((node) => node.rawConfig);
-    const urls = await configure({
-      controller,
-      proxyUrl,
-      secret,
-      proxies,
-      signal,
-    });
+    let urls;
+    try {
+      urls = await configureTargets(targets);
+    } catch (error) {
+      if (!rejectedConfig(error)) throw error;
+      // One unsupported configuration must not block the remaining nodes.
+      const valid = [];
+      for (const node of targets) {
+        try {
+          await configureTargets([node]);
+          valid.push(node);
+        } catch (failure) {
+          if (!rejectedConfig(failure)) throw failure;
+          if (batch.includes(node)) summary.skipped++;
+          if (reference === node) reference = null;
+        }
+      }
+      batch = batch.filter((node) => valid.includes(node));
+      if (!batch.length) continue;
+      urls = await configureTargets(valid);
+    }
     const check = (node) => {
-      const url = urls.get(node.rawConfig);
+      const url = urls.get(configs.get(node));
       if (!url) throw new Error("巡检缺少节点隔离代理入口");
       return probe({
         proxyUrl: url,
