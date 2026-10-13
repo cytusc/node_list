@@ -1218,3 +1218,85 @@ test("an unavailable echo service on retry does not erase a previously observed 
   assert.equal(saves[0][2].status, "unsupported");
   assert.equal(saves[0][2].attempts, 2);
 });
+
+test("repeated exit-IP failures escalate to daily backoff while exhausted legacy budgets still retry", async (t) => {
+  const stuck = {
+    name: "stuck",
+    type: "vless",
+    server: "stuck.example",
+    port: "443",
+    rawLink:
+      "vless://22345678-1234-1234-1234-123456789abc@stuck.example:443",
+    ippure: {
+      status: "error",
+      failureStage: "exit-ip",
+      attempts: 3,
+      checkedAt: new Date().toISOString(),
+      queryMode: "specified-exit",
+      exitIPMode: "proxy-echo",
+      transportMode: "http",
+      signatureVersion: 2,
+      exitIPVersion: 3,
+      exitIPProbeVersion: 1,
+    },
+  };
+  const fresh = {
+    name: "fresh",
+    type: "vless",
+    server: "fresh.example",
+    port: "443",
+    rawLink:
+      "vless://32345678-1234-1234-1234-123456789abc@fresh.example:443",
+  };
+  const donor = {
+    name: "donor",
+    rawConfig: { name: "donor" },
+    ippure: {
+      status: "success",
+      ip: "192.0.2.10",
+      exitIPMode: "proxy-echo",
+      exitIPVersion: 3,
+      exitIPSource: "AWS CheckIP",
+      asnOrganization: "Verified",
+    },
+  };
+  const nodes = [stuck, fresh, donor],
+    calls = [],
+    saves = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 1,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      aggregate: async () => ({ nodes }),
+      saveIPPure: async (id, index, result) => {
+        saves.push([id, index, result]);
+        nodes[index].ippure = result;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => {
+      calls.push(proxy.name);
+      return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
+    },
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+  });
+  t.after(() => collector.close());
+  // Three recent exit-IP failures mean the node waits a full day; the
+  // never-checked node is not starved behind it.
+  await collector.run();
+  assert.deepEqual(calls, ["fresh"]);
+  assert.equal(nodes[0].ippure.attempts, 3);
+  // Once the day has passed the same budget buys exactly one more probe.
+  stuck.ippure = {
+    ...stuck.ippure,
+    checkedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+  };
+  await collector.run();
+  assert.deepEqual(calls, ["fresh", "stuck"]);
+  assert.equal(saves.at(-1)[2].status, "success");
+  assert.equal(saves.at(-1)[2].attempts, 4);
+  await collector.run();
+  assert.equal(calls.length, 2);
+});

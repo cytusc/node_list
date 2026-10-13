@@ -162,33 +162,37 @@ export function startIPPureCollector({
         old?.status !== "error" ||
         !!old.ip ||
         old.exitIPProbeVersion === EXIT_IP_PROBE_VERSION;
-      const backfill =
-        old?.status === "success" && currentExitIP && !old.asnOrganization;
-      if (old?.status === "success" && currentExitIP && !backfill) continue;
-      // Old failures used the target as transport. Give the new query mode
-      // its own retry budget, including nodes that exhausted the old budget.
-      const attempts =
+      const currentRetry =
         currentExitMode &&
         old?.queryMode === "specified-exit" &&
         old?.transportMode === "http" &&
         currentSignature &&
         currentResolution &&
-        currentProbe
-          ? old.attempts || 0
-          : 0;
+        currentProbe;
+      const backfill =
+        old?.status === "success" && currentExitIP && !old.asnOrganization;
+      if (old?.status === "success" && currentExitIP && !backfill) continue;
+      // Old failures used the target as transport. Give the new query mode
+      // its own retry budget, including nodes that exhausted the old budget.
+      const attempts = currentRetry ? old.attempts || 0 : 0;
       const lastAttempt = backfill
         ? currentSignature
           ? old.organizationCheckedAt
           : undefined
-        : currentExitMode &&
-            old?.queryMode === "specified-exit" &&
-            old?.transportMode === "http" &&
-            currentSignature &&
-            currentResolution &&
-            currentProbe
+        : currentRetry
           ? old.checkedAt
           : undefined;
-      if (lastAttempt && Date.now() - Date.parse(lastAttempt) < 30 * 60 * 1000)
+      // Every exit-IP probe burns the full multi-provider timeout budget.
+      // Nodes that keep failing before any exit IP is observed escalate to a
+      // one-day backoff after three attempts, so a backlog of dead nodes
+      // cannot starve never-checked ones out of the limited probe windows.
+      const exitProbeFailures =
+        old?.status === "error" && !old.ip && old.failureStage === "exit-ip";
+      const backoff =
+        exitProbeFailures && attempts >= 3
+          ? 24 * 60 * 60 * 1000
+          : 30 * 60 * 1000;
+      if (lastAttempt && Date.now() - Date.parse(lastAttempt) < backoff)
         continue;
       // A rewritten subscription may belong to a different detection round.
       const ownProxy = matchProxy(node);
