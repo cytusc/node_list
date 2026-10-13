@@ -1,23 +1,83 @@
 import pg from "pg";
+import { Worker } from "node:worker_threads";
 import { reconcileSnapshot } from "./node-sources.js";
 import { createSnapshotStore } from "./store.js";
+import {
+  initializeResultsProjection,
+  queryResultsProjection,
+} from "./postgres-results.js";
 
-export async function createPostgresStore(config) {
-  const pool = new pg.Pool({
+export async function createPostgresStore(
+  config,
+  { maintenanceWorker = false } = {},
+) {
+  const poolConfig = {
     max: 3,
     connectionTimeoutMillis: 5000,
     idleTimeoutMillis: 30000,
     query_timeout: 10000,
     statement_timeout: 10000,
     ...config,
-  });
+  };
+  const pool = new pg.Pool(poolConfig);
+  let worker;
+  let workerSequence = 0;
+  const workerJobs = new Map();
+  const runMaintenance = (operation, args) => {
+    if (!worker) {
+      const current = new Worker(
+        new URL("./results-projection-worker.js", import.meta.url),
+        {
+          workerData: { config: poolConfig },
+        },
+      );
+      worker = current;
+      current.on("message", ({ id, result, error, code }) => {
+        const job = workerJobs.get(id);
+        if (!job) return;
+        workerJobs.delete(id);
+        if (error) job.reject(Object.assign(new Error(error), { code }));
+        else job.resolve(result);
+      });
+      const failed = () => {
+        if (worker !== current) return;
+        worker = undefined;
+        for (const job of workerJobs.values())
+          job.reject(new Error("Database maintenance worker exited."));
+        workerJobs.clear();
+      };
+      current.once("error", failed);
+      current.once("exit", failed);
+    }
+    return new Promise((resolve, reject) => {
+      const id = ++workerSequence;
+      workerJobs.set(id, { resolve, reject });
+      worker.postMessage({ id, operation, args });
+    });
+  };
+  let pendingRefresh;
+  const refreshAggregate = () => {
+    if (!pendingRefresh) {
+      pendingRefresh = (async () => {
+        const state = await pool.query(
+          "SELECT source_revision <> built_revision AS dirty FROM node_explorer_results_state",
+        );
+        if (!state.rows[0].dirty) return { updated: false };
+        return runMaintenance("refresh");
+      })().finally(() => {
+        pendingRefresh = undefined;
+      });
+    }
+    return pendingRefresh;
+  };
   pool.on("error", () =>
     console.error(
       "PostgreSQL connection lost; subsequent requests will retry.",
     ),
   );
   try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS node_explorer_snapshots (
+    if (!maintenanceWorker) {
+      await pool.query(`CREATE TABLE IF NOT EXISTS node_explorer_snapshots (
       id SERIAL PRIMARY KEY,
       fingerprint TEXT NOT NULL UNIQUE,
       checked_at TEXT,
@@ -35,11 +95,24 @@ export async function createPostgresStore(config) {
       retired_at TEXT NOT NULL,
       reason TEXT NOT NULL
     )`);
+      await initializeResultsProjection(pool);
+      await refreshAggregate();
+    }
   } catch (error) {
+    await worker?.terminate();
     await pool.end();
     throw error;
   }
   return createSnapshotStore({
+    ...(!maintenanceWorker
+      ? {
+          sync: (file, sources) => runMaintenance("sync", { file, sources }),
+          aggregatePage: (query) => queryResultsProjection(pool, query),
+          aggregate: (options) => runMaintenance("aggregate", options),
+          ippureCandidates: () => runMaintenance("candidates"),
+          refreshAggregate,
+        }
+      : {}),
     async insert({ fingerprint, snapshot, payload }) {
       await pool.query(
         `INSERT INTO node_explorer_snapshots
@@ -187,8 +260,15 @@ export async function createPostgresStore(config) {
       );
       return result.rowCount;
     },
-    close() {
-      return pool.end();
+    async close() {
+      try {
+        await pendingRefresh?.catch(() => {});
+        if (worker) await runMaintenance("close");
+      } finally {
+        await worker?.terminate();
+        worker = undefined;
+        await pool.end();
+      }
     },
   });
 }

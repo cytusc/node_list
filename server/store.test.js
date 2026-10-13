@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createStore } from "./store.js";
+import { createStore, createSnapshotStore } from "./store.js";
 import { summarizeProxy, aggregateIdentity } from "./node-sources.js";
 
 test("retired nodes stay hidden from current and aggregate views and IP checks", async (t) => {
@@ -192,4 +192,30 @@ test("verified exit countries override source-claimed regions in every read path
     assert.equal(nodes[1].country, "JP");
     assert.equal(nodes[1].claimedCountry, undefined);
   }
+});
+
+test("unchanged files skip repeated import work and failed imports retry after repair", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "import-signature-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "results.json");
+  let inserts = 0;
+  const store = createSnapshotStore({
+    insert: async () => {
+      inserts++;
+    },
+  });
+  await writeFile(file, JSON.stringify({ nodes: [{ name: "First" }] }));
+  await store.sync(file);
+  await store.sync(file);
+  assert.equal(inserts, 1);
+  await writeFile(file, JSON.stringify({ nodes: [{ name: "Other" }] }));
+  await store.sync(file);
+  assert.equal(inserts, 2);
+  await writeFile(file, "{broken");
+  await assert.rejects(store.sync(file));
+  await writeFile(file, JSON.stringify({ nodes: [{ name: "Other" }] }));
+  await store.sync(file);
+  assert.equal(inserts, 3);
+  await rm(file);
+  await assert.rejects(store.sync(file), { code: "ENOENT" });
 });

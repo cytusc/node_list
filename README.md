@@ -206,7 +206,9 @@ TEST_POSTGRES_URL=postgresql://user:password@localhost/test_db npm test
 
 shadcn/ui 组件源码位于 `src/components/ui`，来源于官方 `new-york-v4` registry，保留其 MIT 许可证。
 
-首页通过 `GET /api/results?view=aggregate&page=1&limit=50` 按页获取节点，翻页、更改每页数量、筛选和排序会重新请求接口。接口先对全部聚合节点筛选、排序，再返回当前页；`total` 为筛选后的数量，`totalNodes` 为聚合总数，`page`、`limit` 为实际页码及每页数量，`summary` 和 `facets` 为全量统计和筛选选项。页码从 1 开始，`limit` 范围为 1–200，超出最后一页会回到最后一页。
+首页通过 `GET /api/results?view=aggregate&page=1&limit=50` 按页获取节点，翻页、更改每页数量、筛选和排序会重新请求接口。PostgreSQL 模式直接查询持久化的 `node_explorer_current_nodes` 节点表，在 SQL 中执行筛选、排序、计数和 `LIMIT/OFFSET`，仅读取当前页的节点内容，不在请求中扫描历史快照或等待文件同步。`total` 为筛选后的数量，`totalNodes` 为聚合总数，`page`、`limit` 为实际页码及每页数量，`summary` 和 `facets` 为全量统计和筛选选项。页码从 1 开始，`limit` 范围为 1–200，超出最后一页会回到最后一页。SQLite 模式仍使用原有聚合及分页逻辑。
+
+PostgreSQL 启动时自动创建查询表、索引及变更触发器，首次构建从现有历史数据回填，不删除快照、完整源配置或 IPPure 记录。后台工作线程每 5 秒检查来源文件和数据库变更；文件未变化时跳过解析和导入，新批次、IPPure 更新、节点退役或恢复会触发查询表刷新，包括其他采集或巡检进程写入的数据。工作线程缓存已解析批次及连接身份，后续仅重读发生变更的批次，并仅写入变化的查询表记录；排序位置和全量统计随刷新一起原子提交。刷新期间继续提供上一份完整结果，数据库故障时保留上一份结果并重试，因此页面数据相对数据库有一个后台刷新周期及计算时间的延迟。中文自然排序和缺失值末尾排序在构建时生成排序序号，避免数据库排序规则改变分页结果。完整聚合及历史候选扫描也在工作线程中执行，避免后台采集阻塞 HTTP 线程。
 
 筛选参数包括 `q`（名称、服务器、SNI、国家及中文地区名）、`country`、`type`、`network`、`features`、`media`（多选值用逗号分隔）及 `minSpeed`（MB/s）；排序使用 `sort` 和 `direction=asc|desc`。返回的 `batchCount` 为聚合批次数，每个节点带有 `checkedAt`、`snapshotId` 及检测功能状态。不传分页参数的 `/api/results?view=aggregate` 保留原有完整结果格式。原有 `/api/results`（最新批次）、`/api/results?snapshot=<id>` 和 `/api/history` 接口仍可使用。
 
