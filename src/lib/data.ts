@@ -56,7 +56,20 @@ export type HistoryItem = {
   importedAt: string;
   nodeCount: number;
 };
+type FacetOption = { value: string; label: string; count: number };
 export type Snapshot = {
+  total: number;
+  totalNodes: number;
+  page: number;
+  limit: number;
+  summary: { countries: number; maxSpeed: number; median: number };
+  facets: {
+    country: FacetOption[];
+    type: FacetOption[];
+    network: FacetOption[];
+    features: FacetOption[];
+    media: FacetOption[];
+  };
   ippureCollector?: {
     enabled: boolean;
     running?: boolean;

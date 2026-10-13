@@ -206,7 +206,9 @@ TEST_POSTGRES_URL=postgresql://user:password@localhost/test_db npm test
 
 shadcn/ui 组件源码位于 `src/components/ui`，来源于官方 `new-york-v4` registry，保留其 MIT 许可证。
 
-`GET /api/results?view=aggregate` 返回聚合节点和 `batchCount`，每个节点带有 `checkedAt`、`snapshotId` 及检测功能状态。原有 `/api/results`（最新批次）、`/api/results?snapshot=<id>` 和 `/api/history` 接口仍可使用。
+首页通过 `GET /api/results?view=aggregate&page=1&limit=50` 按页获取节点，翻页、更改每页数量、筛选和排序会重新请求接口。接口先对全部聚合节点筛选、排序，再返回当前页；`total` 为筛选后的数量，`totalNodes` 为聚合总数，`page`、`limit` 为实际页码及每页数量，`summary` 和 `facets` 为全量统计和筛选选项。页码从 1 开始，`limit` 范围为 1–200，超出最后一页会回到最后一页。
+
+筛选参数包括 `q`（名称、服务器、SNI、国家及中文地区名）、`country`、`type`、`network`、`features`、`media`（多选值用逗号分隔）及 `minSpeed`（MB/s）；排序使用 `sort` 和 `direction=asc|desc`。返回的 `batchCount` 为聚合批次数，每个节点带有 `checkedAt`、`snapshotId` 及检测功能状态。不传分页参数的 `/api/results?view=aggregate` 保留原有完整结果格式。原有 `/api/results`（最新批次）、`/api/results?snapshot=<id>` 和 `/api/history` 接口仍可使用。
 
 ### IPPure 逐节点检测
 
