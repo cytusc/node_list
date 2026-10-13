@@ -32,12 +32,11 @@ import {
 import {
   flexRender,
   getCoreRowModel,
-  getPaginationRowModel,
-  getSortedRowModel,
   useReactTable,
   type ColumnDef,
   type SortingState,
   type VisibilityState,
+  type PaginationState,
 } from "@tanstack/react-table";
 import { toast, Toaster } from "sonner";
 import { copyText } from "@/lib/clipboard";
@@ -69,7 +68,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FilterMenu, type FilterOption } from "@/components/filter-menu";
+import { FilterMenu } from "@/components/filter-menu";
 import {
   countryName,
   detailLabels,
@@ -222,23 +221,6 @@ function Speed({ value, max }: { value: number; max: number }) {
     </div>
   );
 }
-function optionsFor(
-  nodes: NodeRecord[],
-  key: "country" | "type" | "network",
-): FilterOption[] {
-  const counts = new Map<string, number>();
-  nodes.forEach((n) => {
-    const value = n[key] || "unknown";
-    counts.set(value, (counts.get(value) || 0) + 1);
-  });
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([value, count]) => ({
-      value,
-      count,
-      label: key === "country" ? countryName(value) : value.toUpperCase(),
-    }));
-}
 async function copy(text: string, source: HTMLElement) {
   try {
     await copyText(text, source);
@@ -300,6 +282,47 @@ export default function App() {
   });
   const activeRequest = useRef<AbortController | null>(null);
   const nodes = snapshot?.nodes || emptyNodes;
+  const criteria = JSON.stringify({
+    query,
+    countries,
+    types,
+    networks,
+    features,
+    media,
+    minSpeed,
+    sorting,
+  });
+  const [pageState, setPageState] = useState({
+    pageIndex: 0,
+    pageSize: 50,
+    criteria,
+  });
+  const pagination: PaginationState = {
+    pageIndex: pageState.criteria === criteria ? pageState.pageIndex : 0,
+    pageSize: pageState.pageSize,
+  };
+  const { pageIndex, pageSize } = pagination;
+  const params = new URLSearchParams({
+    view: "aggregate",
+    page: String(pageIndex + 1),
+    limit: String(pageSize),
+  });
+  if (query.trim()) params.set("q", query.trim());
+  for (const [key, values] of [
+    ["country", countries],
+    ["type", types],
+    ["network", networks],
+    ["features", features],
+    ["media", media],
+  ] as const) {
+    if (values.length) params.set(key, values.join(","));
+  }
+  if (minSpeed) params.set("minSpeed", minSpeed);
+  if (sorting[0]) {
+    params.set("sort", sorting[0].id);
+    params.set("direction", sorting[0].desc ? "desc" : "asc");
+  }
+  const resultsUrl = `/api/results?${params}`;
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
     try {
@@ -309,140 +332,75 @@ export default function App() {
     }
   }, [dark]);
 
-  const load = useCallback(async (announce = false) => {
-    activeRequest.current?.abort();
-    const controller = new AbortController();
-    activeRequest.current = controller;
-    setLoading(true);
-    try {
-      const response = await fetch("/api/results?view=aggregate", {
-        signal: controller.signal,
-      });
-      const body = await response.json();
-      if (controller.signal.aborted) return;
-      if (!response.ok) {
-        setErrorCode(body.code || "");
-        throw new Error(body.error || "读取失败，请稍后重试");
-      }
-      if (!Array.isArray(body.nodes))
-        throw new Error("结果格式无效，请检查检测结果文件");
-      setSnapshot(body);
-      setSelected(null);
-      setError("");
-      setErrorCode("");
-      if (!body.speedTest) setSorting([{ id: "name", desc: false }]);
-      if (!body.mediaCheck) setMedia([]);
-      if (!body.speedTest) setMinSpeed("");
-      if (announce) toast.success("已刷新聚合检测结果");
-    } catch (e) {
-      if (!controller.signal.aborted)
-        setError(
-          e instanceof Error ? e.message : "无法连接本地服务，请稍后重试",
-        );
-    } finally {
-      if (!controller.signal.aborted) setLoading(false);
-    }
-    if (!controller.signal.aborted) {
+  const load = useCallback(
+    async (announce = false) => {
+      activeRequest.current?.abort();
+      const controller = new AbortController();
+      activeRequest.current = controller;
+      setLoading(true);
       try {
-        const r = await fetch("/api/downloads", { signal: controller.signal });
-        if (r.ok) setDownloads(await r.json());
-      } catch {
-        /* Result viewing remains available when downloads fail. */
+        const response = await fetch(resultsUrl, {
+          signal: controller.signal,
+        });
+        const body = await response.json();
+        if (controller.signal.aborted) return;
+        if (!response.ok) {
+          setErrorCode(body.code || "");
+          throw new Error(body.error || "读取失败，请稍后重试");
+        }
+        if (!Array.isArray(body.nodes))
+          throw new Error("结果格式无效，请检查检测结果文件");
+        setSnapshot(body);
+        setPageState({
+          pageIndex: body.page - 1,
+          pageSize: body.limit,
+          criteria,
+        });
+        setSelected(null);
+        setError("");
+        setErrorCode("");
+        if (!body.speedTest && sorting[0]?.id === "speed")
+          setSorting([{ id: "name", desc: false }]);
+        if (!body.mediaCheck) setMedia([]);
+        if (!body.speedTest) setMinSpeed("");
+        if (announce) toast.success("已刷新聚合检测结果");
+      } catch (e) {
+        if (!controller.signal.aborted)
+          setError(
+            e instanceof Error ? e.message : "无法连接本地服务，请稍后重试",
+          );
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
       }
-    }
+    },
+    [resultsUrl, criteria],
+  );
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch("/api/downloads", { signal: controller.signal })
+      .then(async (r) => {
+        if (r.ok) setDownloads(await r.json());
+      })
+      .catch(() => {});
+    return () => controller.abort();
   }, []);
   useEffect(() => {
     void load();
     return () => activeRequest.current?.abort();
   }, [load]);
 
-  const maxSpeed = useMemo(
-    () => nodes.reduce((m, n) => Math.max(m, n.speed || 0), 0),
-    [nodes],
-  );
-  const summary = useMemo(() => {
-    const speeds = nodes
-      .map((n) => n.speed)
-      .filter((s) => s > 0)
-      .sort((a, b) => a - b);
-    const middle = Math.floor(speeds.length / 2);
-    const median = speeds.length
-      ? speeds.length % 2
-        ? speeds[middle]
-        : (speeds[middle - 1] + speeds[middle]) / 2
-      : 0;
-    return {
-      countries: new Set(nodes.map((n) => n.country).filter(Boolean)).size,
-      median,
-    };
-  }, [nodes]);
-  const regionOptions = useMemo(() => optionsFor(nodes, "country"), [nodes]);
-  const typeOptions = useMemo(() => optionsFor(nodes, "type"), [nodes]);
-  const networkOptions = useMemo(() => optionsFor(nodes, "network"), [nodes]);
-  const featureOptions = useMemo(
-    () => [
-      { value: "tls", label: "TLS", count: nodes.filter((n) => n.tls).length },
-      {
-        value: "reality",
-        label: "Reality",
-        count: nodes.filter((n) => n.reality).length,
-      },
-      { value: "udp", label: "UDP", count: nodes.filter((n) => n.udp).length },
-    ],
-    [nodes],
-  );
-  const mediaOptions = useMemo(() => {
-    const keys = new Set(
-      nodes.flatMap((n) => (n.media || []).map(mediaPlatform)),
-    );
-    return [...keys].filter(Boolean).map((value) => ({
-      value,
-      label: platforms[value] || value,
-      count: nodes.filter((n) =>
-        n.media?.some((m) => mediaPlatform(m) === value && mediaValue(m)),
-      ).length,
-    }));
-  }, [nodes]);
-  const filtered = useMemo(
-    () =>
-      nodes.filter((n) => {
-        const q = query.trim().toLocaleLowerCase();
-        return (
-          (!q ||
-            [
-              n.name,
-              n.baseName,
-              n.server,
-              n.sni,
-              n.country,
-              countryName(n.country),
-            ].some((v) => v?.toLocaleLowerCase().includes(q))) &&
-          (!countries.length || countries.includes(n.country || "unknown")) &&
-          (!types.length || types.includes(n.type || "unknown")) &&
-          (!networks.length || networks.includes(n.network || "unknown")) &&
-          features.every((f) => !!n[f as "tls" | "udp" | "reality"]) &&
-          (!snapshot?.speedTest ||
-            !minSpeed ||
-            n.speed >= Number(minSpeed) * 1024) &&
-          (!snapshot?.mediaCheck ||
-            media.every((p) =>
-              n.media?.some((m) => mediaPlatform(m) === p && mediaValue(m)),
-            ))
-        );
-      }),
-    [
-      nodes,
-      query,
-      countries,
-      types,
-      networks,
-      features,
-      minSpeed,
-      media,
-      snapshot?.speedTest,
-      snapshot?.mediaCheck,
-    ],
-  );
+  const maxSpeed = snapshot?.summary.maxSpeed || 0;
+  const summary = snapshot?.summary || { countries: 0, median: 0 };
+  const totalNodes = snapshot?.totalNodes || 0;
+  const total = snapshot?.total || 0;
+  const regionOptions = snapshot?.facets.country || [];
+  const typeOptions = snapshot?.facets.type || [];
+  const networkOptions = snapshot?.facets.network || [];
+  const featureOptions = snapshot?.facets.features || [];
+  const mediaOptions = (snapshot?.facets.media || []).map((option) => ({
+    ...option,
+    label: platforms[option.value] || option.value,
+  }));
   const reset = () => {
     setQuery("");
     setCountries([]);
@@ -586,17 +544,25 @@ export default function App() {
     [maxSpeed, snapshot?.speedTest, snapshot?.mediaCheck],
   );
   const table = useReactTable({
-    data: filtered,
+    data: nodes,
     columns,
-    state: { sorting, columnVisibility: visibility },
+    state: { sorting, columnVisibility: visibility, pagination },
+    manualPagination: true,
+    manualSorting: true,
+    rowCount: total,
+    onPaginationChange: (updater) => {
+      const next =
+        typeof updater === "function" ? updater(pagination) : updater;
+      setPageState({
+        ...next,
+        pageIndex: next.pageSize !== pageSize ? 0 : next.pageIndex,
+        criteria,
+      });
+    },
     onSortingChange: setSorting,
     onColumnVisibilityChange: setVisibility,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    initialState: { pagination: { pageSize: 50 } },
   });
-  const { pageIndex, pageSize } = table.getState().pagination;
 
   async function downloadFile(item: Download) {
     setDownloading(true);
@@ -669,7 +635,7 @@ export default function App() {
               <h1>
                 节点浏览器
                 <span className="title-count">
-                  {snapshot ? nodes.length : "—"}
+                  {snapshot ? totalNodes : "—"}
                 </span>
               </h1>
               <p>找到适合你的连接。</p>
@@ -912,10 +878,10 @@ export default function App() {
           <div className="table-toolbar">
             <div className="result-count">
               <span className="result-dot" />
-              <strong>{filtered.length}</strong>
+              <strong>{total}</strong>
               <span>个节点</span>
               {activeCount > 0 && (
-                <span className="total-count">/ 共 {nodes.length} 个</span>
+                <span className="total-count">/ 共 {totalNodes} 个</span>
               )}
             </div>
             <div className="table-actions">
@@ -999,7 +965,7 @@ export default function App() {
             </div>
           </div>
 
-          {loading && !snapshot ? (
+          {loading ? (
             <div
               className="loading-skeleton"
               aria-label="正在加载节点"
@@ -1013,7 +979,7 @@ export default function App() {
                 </div>
               ))}
             </div>
-          ) : filtered.length ? (
+          ) : nodes.length ? (
             <>
               <div className="desktop-table">
                 <Table
@@ -1129,7 +1095,7 @@ export default function App() {
               <h2>
                 {error && !snapshot
                   ? "等待检测结果"
-                  : nodes.length
+                  : totalNodes
                     ? "没有匹配的节点"
                     : snapshot?.checkedAt
                       ? "暂无保留节点"
@@ -1138,7 +1104,7 @@ export default function App() {
               <p>
                 {error && !snapshot
                   ? "连接恢复后，点击刷新重新读取。"
-                  : nodes.length
+                  : totalNodes
                     ? "尝试减少筛选条件，或换一个关键词。"
                     : "请在 subs-check 完成检测后刷新此页面。"}
               </p>
@@ -1151,8 +1117,8 @@ export default function App() {
           )}
           <div className="pagination-bar">
             <span>
-              {filtered.length
-                ? `显示 ${pageIndex * pageSize + 1}–${Math.min((pageIndex + 1) * pageSize, filtered.length)}，共 ${filtered.length} 个`
+              {total
+                ? `显示 ${((snapshot?.page || 1) - 1) * pageSize + 1}–${Math.min((snapshot?.page || 1) * pageSize, total)}，共 ${total} 个`
                 : "显示 0 个节点"}
             </span>
             <div>
@@ -1178,7 +1144,7 @@ export default function App() {
                 variant="outline"
                 size="icon"
                 className="size-8"
-                disabled={!table.getCanPreviousPage()}
+                disabled={loading || !table.getCanPreviousPage()}
                 onClick={() => table.previousPage()}
                 aria-label="上一页"
               >
@@ -1188,7 +1154,7 @@ export default function App() {
                 variant="outline"
                 size="icon"
                 className="size-8"
-                disabled={!table.getCanNextPage()}
+                disabled={loading || !table.getCanNextPage()}
                 onClick={() => table.nextPage()}
                 aria-label="下一页"
               >
@@ -1217,6 +1183,17 @@ export default function App() {
                 <div className="detail-region">
                   <Flag code={selected.country} />
                   {countryName(selected.country)}
+                  {selected.claimedCountry &&
+                    selected.country &&
+                    selected.claimedCountry.toUpperCase() !==
+                      selected.country.toUpperCase() && (
+                      <Badge
+                        variant="outline"
+                        className="border-amber-500 text-amber-600"
+                      >
+                        来源标注 {countryName(selected.claimedCountry)}
+                      </Badge>
+                    )}
                 </div>
                 <SheetTitle className="break-all text-xl">
                   {plainName(selected)}
@@ -1309,6 +1286,12 @@ export default function App() {
                         [
                           "ASN 组织",
                           selected.ippure.asnOrganization || "待补采",
+                        ],
+                        [
+                          "出口国家",
+                          selected.ippure.country
+                            ? `${countryName(selected.ippure.country)}（${selected.ippure.country.toUpperCase()}）`
+                            : "待补采",
                         ],
                         [
                           "人机流量比",

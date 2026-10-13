@@ -1,4 +1,5 @@
 import express from "express";
+import { parseResultsQuery, paginateResults } from "./results-query.js";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { createStore } from "./store.js";
@@ -93,6 +94,12 @@ export function createApp({
     ) {
       return res.status(400).json({ error: "检测批次无效。" });
     }
+    let query;
+    try {
+      query = parseResultsQuery(req.query);
+    } catch {
+      return res.status(400).json({ error: "节点分页、筛选或排序参数无效。" });
+    }
     try {
       let sourceError;
       try {
@@ -105,7 +112,7 @@ export function createApp({
         : await store.get(id === undefined ? undefined : Number(id));
       if (snapshot)
         return res.json({
-          ...snapshot,
+          ...(query ? paginateResults(snapshot, query) : snapshot),
           ippureCollector: collector?.status() || { enabled: false },
         });
       if (id !== undefined)

@@ -1,9 +1,10 @@
+import { fulfillRoute } from "./results-fixture";
 import { test, expect } from "@playwright/test";
 test("shows stored IPPure fields in desktop details and mobile cards", async ({
   page,
 }) => {
-  await page.route("**/api/results?view=aggregate", (route) =>
-    route.fulfill({
+  await page.route("**/api/results?view=aggregate&**", (route) =>
+    fulfillRoute(route, {
       json: {
         speedTest: false,
         mediaCheck: false,
@@ -40,9 +41,11 @@ test("shows stored IPPure fields in desktop details and mobile cards", async ({
     }),
   );
   await page.route("**/api/history", (route) =>
-    route.fulfill({ json: { items: [], total: 0 } }),
+    fulfillRoute(route, { json: { items: [], total: 0 } }),
   );
-  await page.route("**/api/downloads", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/downloads", (route) =>
+    fulfillRoute(route, { json: [] }),
+  );
   await page.goto("/");
   await expect(page.locator(".node-row")).toContainText("32% 中性");
   for (const label of [
@@ -138,8 +141,8 @@ test("shows stored IPPure fields in desktop details and mobile cards", async ({
 test("retains an IPv6 exit and distinguishes unsupported scoring from a dead node", async ({
   page,
 }) => {
-  await page.route("**/api/results?view=aggregate", (route) =>
-    route.fulfill({
+  await page.route("**/api/results?view=aggregate&**", (route) =>
+    fulfillRoute(route, {
       json: {
         speedTest: false,
         mediaCheck: false,
@@ -168,7 +171,9 @@ test("retains an IPv6 exit and distinguishes unsupported scoring from a dead nod
       },
     }),
   );
-  await page.route("**/api/downloads", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/downloads", (route) =>
+    fulfillRoute(route, { json: [] }),
+  );
   await page.goto("/");
   const row = page.locator(".node-row");
   await expect(row.locator('[data-column="ippure"]')).toHaveText(

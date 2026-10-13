@@ -12,6 +12,7 @@ import { shareLinkProxy, SHARE_LINK_VERSION } from "./share-link.js";
 import {
   queryIPPure,
   resolveExitIPInfo,
+  resolveExitCountry,
   configureProxyBatch,
 } from "./ippure-http.js";
 export {
@@ -31,6 +32,7 @@ export function startIPPureCollector({
   configure = configureProxyBatch,
   query = queryIPPure,
   resolveIP = resolveExitIPInfo,
+  resolveCountry = resolveExitCountry,
   intervalMs = 30000,
 }) {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 10)
@@ -102,6 +104,9 @@ export function startIPPureCollector({
     const unavailable = new Set();
     const ipCache = new Map();
     const asnCache = new Map();
+    // Retiring a dead node requires proof the probe infrastructure itself
+    // works: any successful result in this run provides that control.
+    let healthyRun = false;
     const jobs = [];
     const aggregateResults = new Map(
       (aggregate?.nodes || []).map((node) => [
@@ -162,33 +167,48 @@ export function startIPPureCollector({
         old?.status !== "error" ||
         !!old.ip ||
         old.exitIPProbeVersion === EXIT_IP_PROBE_VERSION;
-      const backfill =
-        old?.status === "success" && currentExitIP && !old.asnOrganization;
-      if (old?.status === "success" && currentExitIP && !backfill) continue;
-      // Old failures used the target as transport. Give the new query mode
-      // its own retry budget, including nodes that exhausted the old budget.
-      const attempts =
+      const currentRetry =
         currentExitMode &&
         old?.queryMode === "specified-exit" &&
         old?.transportMode === "http" &&
         currentSignature &&
         currentResolution &&
-        currentProbe
-          ? old.attempts || 0
-          : 0;
+        currentProbe;
+      const backfill =
+        old?.status === "success" && currentExitIP && !old.asnOrganization;
+      // Success results verified before country collection existed re-enter
+      // the queue once to attach the exit country; the throttles below keep
+      // a persistently unresolvable node from looping at probe frequency.
+      const needsCountry =
+        old?.status === "success" && currentExitIP && !old.country;
+      if (
+        old?.status === "success" &&
+        currentExitIP &&
+        !backfill &&
+        !needsCountry
+      )
+        continue;
+      // Old failures used the target as transport. Give the new query mode
+      // its own retry budget, including nodes that exhausted the old budget.
+      const attempts = currentRetry ? old.attempts || 0 : 0;
       const lastAttempt = backfill
         ? currentSignature
           ? old.organizationCheckedAt
           : undefined
-        : currentExitMode &&
-            old?.queryMode === "specified-exit" &&
-            old?.transportMode === "http" &&
-            currentSignature &&
-            currentResolution &&
-            currentProbe
+        : currentRetry
           ? old.checkedAt
           : undefined;
-      if (lastAttempt && Date.now() - Date.parse(lastAttempt) < 30 * 60 * 1000)
+      // Every exit-IP probe burns the full multi-provider timeout budget.
+      // Nodes that keep failing before any exit IP is observed escalate to a
+      // one-day backoff after three attempts, so a backlog of dead nodes
+      // cannot starve never-checked ones out of the limited probe windows.
+      const exitProbeFailures =
+        old?.status === "error" && !old.ip && old.failureStage === "exit-ip";
+      const backoff =
+        exitProbeFailures && attempts >= 3
+          ? 24 * 60 * 60 * 1000
+          : 30 * 60 * 1000;
+      if (lastAttempt && Date.now() - Date.parse(lastAttempt) < backoff)
         continue;
       // A rewritten subscription may belong to a different detection round.
       const ownProxy = matchProxy(node);
@@ -208,6 +228,7 @@ export function startIPPureCollector({
         identity: aggregateIdentity(node),
         snapshotId,
         index,
+        node,
         old,
         currentExitIP,
         backfill,
@@ -294,6 +315,7 @@ export function startIPPureCollector({
           async ({
             snapshotId,
             index,
+            node,
             old,
             currentExitIP,
             backfill,
@@ -320,19 +342,38 @@ export function startIPPureCollector({
                 asnCache,
                 signal: abort.signal,
               };
-              const resolved =
+              const reuseExit =
                 currentExitIP &&
                 typeof old?.ip === "string" &&
-                isIP(old.ip) === 4
-                  ? { ip: old.ip, provider: old.exitIPSource }
-                  : await resolveIP({
-                      ...options,
-                      proxyUrl: urls.get(ownProxy),
-                      proxy: ownProxy,
-                      onProbeAttempt: (attempt) => {
-                        (result.exitIPAttempts ||= []).push(attempt);
-                      },
-                    });
+                isIP(old.ip) === 4;
+              const resolved = reuseExit
+                ? {
+                    ip: old.ip,
+                    provider: old.exitIPSource,
+                    country: old.country,
+                  }
+                : await resolveIP({
+                    ...options,
+                    proxyUrl: urls.get(ownProxy),
+                    proxy: ownProxy,
+                    onProbeAttempt: (attempt) => {
+                      (result.exitIPAttempts ||= []).push(attempt);
+                    },
+                  });
+              // Verified exits probed before country collection keep their IP
+              // without a location; one trace request over the node's own
+              // transport fills it in. Best effort: a dead node retries on
+              // the normal backoff schedule instead of blocking the queue.
+              if (reuseExit && !resolved.country) {
+                try {
+                  resolved.country = await resolveCountry({
+                    ...options,
+                    proxyUrl: urls.get(ownProxy),
+                  });
+                } catch {
+                  /* retried on the next scheduled pass */
+                }
+              }
               // Injected legacy resolvers return a string; production returns
               // the address and the service that actually observed it.
               const { ip: target, provider } =
@@ -343,6 +384,7 @@ export function startIPPureCollector({
                 throw new Error("IPPure 无法获取有效的节点出口 IP");
               result.ip = target;
               result.exitIPSource = provider;
+              if (resolved?.country) result.country = resolved.country;
               result.addressFamily = isIP(target);
               result.queryTarget = target;
               if (result.addressFamily === 6) {
@@ -413,6 +455,7 @@ export function startIPPureCollector({
                 });
               }
               Object.assign(result, await cached, { status: "success" });
+              healthyRun = true;
             } catch (error) {
               if (abort.signal.aborted) return;
               if (backfill) {
@@ -461,6 +504,21 @@ export function startIPPureCollector({
             if (abort.signal.aborted || (await store.get())?.id !== snapshot.id)
               return;
             await store.saveIPPure(snapshotId, index, result);
+            // Three fast retries plus a one-day-later recheck that still
+            // cannot yield any exit IP means the node is dead; retire it so
+            // it leaves both the display and the collection queue. A later
+            // patrol recheck restores revived nodes.
+            if (
+              result.status === "error" &&
+              result.failureStage === "exit-ip" &&
+              result.attempts >= 4 &&
+              healthyRun
+            ) {
+              await store.retireNodes?.(
+                [node],
+                `IPPure: exit-IP probe failed ${result.attempts} times`,
+              );
+            }
           },
         ),
       );

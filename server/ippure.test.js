@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { createStore } from "./store.js";
-import { summarizeProxy } from "./node-sources.js";
+import { aggregateIdentity, summarizeProxy } from "./node-sources.js";
 import { startIPPureCollector, queryIPPure } from "./ippure.js";
 
 test("legacy exit failures recover before pending links and persist provider diagnostics without rechecking verified exits", async (t) => {
@@ -418,6 +418,7 @@ test("IPPure rotates successful transports, rescues exhausted failures and saves
       status: "success",
       exitIPSource: "ip.sb",
       asnOrganization: "Existing",
+      country: "SG",
       score: 20,
     };
   }
@@ -640,6 +641,7 @@ test("IPPure refreshes legacy successes from archived batches absent in the late
     ip: "192.0.2.8",
     exitIPSource: "ip.sb",
     asnOrganization: "Donor",
+    country: "SG",
   });
 
   const calls = [];
@@ -1217,4 +1219,270 @@ test("an unavailable echo service on retry does not erase a previously observed 
   assert.equal(saves[0][2].ip, old.ip);
   assert.equal(saves[0][2].status, "unsupported");
   assert.equal(saves[0][2].attempts, 2);
+});
+
+test("repeated exit-IP failures escalate to daily backoff while exhausted legacy budgets still retry", async (t) => {
+  const stuck = {
+    name: "stuck",
+    type: "vless",
+    server: "stuck.example",
+    port: "443",
+    rawLink:
+      "vless://22345678-1234-1234-1234-123456789abc@stuck.example:443",
+    ippure: {
+      status: "error",
+      failureStage: "exit-ip",
+      attempts: 3,
+      checkedAt: new Date().toISOString(),
+      queryMode: "specified-exit",
+      exitIPMode: "proxy-echo",
+      transportMode: "http",
+      signatureVersion: 2,
+      exitIPVersion: 3,
+      exitIPProbeVersion: 1,
+    },
+  };
+  const fresh = {
+    name: "fresh",
+    type: "vless",
+    server: "fresh.example",
+    port: "443",
+    rawLink:
+      "vless://32345678-1234-1234-1234-123456789abc@fresh.example:443",
+  };
+  const donor = {
+    name: "donor",
+    rawConfig: { name: "donor" },
+    ippure: {
+      status: "success",
+      ip: "192.0.2.10",
+      exitIPMode: "proxy-echo",
+      exitIPVersion: 3,
+      exitIPSource: "AWS CheckIP",
+      asnOrganization: "Verified",
+    },
+  };
+  const nodes = [stuck, fresh, donor],
+    calls = [],
+    saves = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 1,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      aggregate: async () => ({ nodes }),
+      saveIPPure: async (id, index, result) => {
+        saves.push([id, index, result]);
+        nodes[index].ippure = result;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => {
+      calls.push(proxy.name);
+      return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
+    },
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+  });
+  t.after(() => collector.close());
+  // Three recent exit-IP failures mean the node waits a full day; the
+  // never-checked node is not starved behind it.
+  await collector.run();
+  assert.deepEqual(calls, ["fresh"]);
+  assert.equal(nodes[0].ippure.attempts, 3);
+  // Once the day has passed the same budget buys exactly one more probe.
+  stuck.ippure = {
+    ...stuck.ippure,
+    checkedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+  };
+  await collector.run();
+  assert.deepEqual(calls, ["fresh", "stuck"]);
+  assert.equal(saves.at(-1)[2].status, "success");
+  assert.equal(saves.at(-1)[2].attempts, 4);
+  await collector.run();
+  assert.equal(calls.length, 2);
+});
+
+test("fourth exit-IP failure retires the node when the run has a healthy control", async (t) => {
+  const stuck = {
+    name: "stuck",
+    type: "vless",
+    server: "stuck.example",
+    port: "443",
+    rawLink:
+      "vless://42345678-1234-1234-1234-123456789abc@stuck.example:443",
+    ippure: {
+      status: "error",
+      failureStage: "exit-ip",
+      attempts: 3,
+      checkedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      queryMode: "specified-exit",
+      exitIPMode: "proxy-echo",
+      transportMode: "http",
+      signatureVersion: 2,
+      exitIPVersion: 3,
+      exitIPProbeVersion: 1,
+    },
+  };
+  const fresh = {
+    name: "fresh",
+    type: "vless",
+    server: "fresh.example",
+    port: "443",
+    rawLink:
+      "vless://52345678-1234-1234-1234-123456789abc@fresh.example:443",
+  };
+  const nodes = [stuck, fresh],
+    calls = [],
+    retirements = [];
+  const retiredSet = new Set();
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 1,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      aggregate: async () => ({ nodes }),
+      saveIPPure: async (id, index, result) => {
+        nodes[index].ippure = result;
+      },
+      retiredNodeIdentities: async () => retiredSet,
+      retireNodes: async (items, reason) => {
+        for (const node of items) {
+          retirements.push([node.name, reason]);
+          retiredSet.add(aggregateIdentity(node));
+        }
+        return items.length;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => {
+      calls.push(proxy.name);
+      if (proxy.name === "stuck") throw new Error("connection reset");
+      return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
+    },
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+  });
+  t.after(() => collector.close());
+  // The never-checked node succeeds first and proves the transport healthy;
+  // the fourth exit-IP failure of the dead node then retires it.
+  await collector.run();
+  assert.deepEqual(calls, ["fresh", "stuck"]);
+  assert.deepEqual(retirements, [
+    ["stuck", "IPPure: exit-IP probe failed 4 times"],
+  ]);
+  // Retired identities leave the collection queue entirely.
+  await collector.run();
+  assert.deepEqual(calls, ["fresh", "stuck"]);
+});
+
+test("exit-IP failures never retire when the whole run is unhealthy", async (t) => {
+  const stuck = {
+    name: "stuck",
+    type: "vless",
+    server: "stuck.example",
+    port: "443",
+    rawLink:
+      "vless://62345678-1234-1234-1234-123456789abc@stuck.example:443",
+    ippure: {
+      status: "error",
+      failureStage: "exit-ip",
+      attempts: 3,
+      checkedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      queryMode: "specified-exit",
+      exitIPMode: "proxy-echo",
+      transportMode: "http",
+      signatureVersion: 2,
+      exitIPVersion: 3,
+      exitIPProbeVersion: 1,
+    },
+  };
+  const nodes = [stuck],
+    retirements = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 1,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      aggregate: async () => ({ nodes }),
+      saveIPPure: async (id, index, result) => {
+        nodes[index].ippure = result;
+      },
+      retireNodes: async (items, reason) => {
+        retirements.push([items[0].name, reason]);
+        return items.length;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async () => {
+      throw new Error("connection reset");
+    },
+  });
+  t.after(() => collector.close());
+  // Without a successful control in the run the failure may be an outage;
+  // retirement is deferred to a future healthy run.
+  await collector.run();
+  assert.deepEqual(retirements, []);
+  assert.equal(nodes[0].ippure.attempts, 4);
+});
+
+test("success results verified before country collection gain it via one trace request", async (t) => {
+  const verified = {
+    name: "verified",
+    type: "vless",
+    server: "verified.example",
+    port: "443",
+    rawLink:
+      "vless://72345678-1234-1234-1234-123456789abc@verified.example:443",
+    ippure: {
+      status: "success",
+      ip: "192.0.2.10",
+      attempts: 1,
+      checkedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      queryMode: "specified-exit",
+      exitIPMode: "proxy-echo",
+      transportMode: "http",
+      signatureVersion: 2,
+      exitIPVersion: 3,
+      exitIPProbeVersion: 1,
+      asnOrganization: "Verified",
+    },
+  };
+  const nodes = [verified],
+    countryCalls = [],
+    probeCalls = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 1,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      aggregate: async () => ({ nodes }),
+      saveIPPure: async (id, index, result) => {
+        nodes[index].ippure = result;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => {
+      probeCalls.push(proxy.name);
+      return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
+    },
+    resolveCountry: async () => {
+      countryCalls.push("192.0.2.10");
+      return "DE";
+    },
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+  });
+  t.after(() => collector.close());
+  // The verified exit IP is reused without a fresh probe; only the trace
+  // country lookup runs, riding the node's own transport.
+  await collector.run();
+  assert.deepEqual(probeCalls, []);
+  assert.deepEqual(countryCalls, ["192.0.2.10"]);
+  assert.equal(nodes[0].ippure.country, "DE");
+  assert.equal(nodes[0].ippure.ip, "192.0.2.10");
+  // With the country stored the result is final and never scheduled again.
+  await collector.run();
+  assert.equal(countryCalls.length, 1);
 });

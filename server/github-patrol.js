@@ -175,8 +175,10 @@ export async function recoverRetiredNodes({
 }) {
   const reason =
     "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed";
+  // IPPure retirements go through the same revival cycle: a node that passes
+  // the GitHub probe twice has its transport back and deserves a recheck.
   const retired = (await store.retiredNodes()).filter(
-    (row) => row.reason === reason,
+    (row) => row.reason === reason || row.reason.startsWith("IPPure:"),
   );
   const identities = new Set(retired.map((row) => row.identity));
   for (const identity of Object.keys(state))
@@ -241,7 +243,11 @@ export async function recoverRetiredNodes({
     };
     summary.checked++;
     if (successes >= 2) {
-      summary.restored += await store.restoreNode(row.identity, row.retiredAt);
+      summary.restored += await store.restoreNode(
+        row.identity,
+        row.retiredAt,
+        row.reason,
+      );
       delete state[row.identity];
     }
     await onProgress({ ...summary });

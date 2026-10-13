@@ -1,3 +1,4 @@
+import { fulfillRoute } from "./results-fixture";
 import { test, expect } from "@playwright/test";
 
 const snapshot = {
@@ -25,12 +26,14 @@ test("loads real local results with no browser errors", async ({
 }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  const response = await request.get("/api/results?view=aggregate");
+  const response = await request.get(
+    "/api/results?view=aggregate&page=1&limit=50",
+  );
   test.skip(!response.ok(), "Local subs-check installation is not available");
   const data = await response.json();
   await page.goto("/");
   await expect(page.locator(".title-count")).toHaveText(
-    String(data.nodes.length),
+    String(data.totalNodes),
   );
   await expect(page.locator(".node-row")).toHaveCount(
     Math.min(50, data.nodes.length),
@@ -50,14 +53,14 @@ test("loads real local results with no browser errors", async ({
 
 test.describe("interactions and data states", () => {
   test.beforeEach(async ({ page }) => {
-    await page.route("**/api/results?view=aggregate", (route) =>
-      route.fulfill({ json: snapshot }),
+    await page.route("**/api/results?view=aggregate&**", (route) =>
+      fulfillRoute(route, { json: snapshot }),
     );
     await page.route("**/api/history", (route) =>
-      route.fulfill({ json: { items: [], total: 0 } }),
+      fulfillRoute(route, { json: { items: [], total: 0 } }),
     );
     await page.route("**/api/downloads", (route) =>
-      route.fulfill({
+      fulfillRoute(route, {
         json: [
           {
             id: "clash",
@@ -75,8 +78,8 @@ test.describe("interactions and data states", () => {
   test("shows aggregated nodes and refreshes without a batch selector", async ({
     page,
   }) => {
-    await page.route("**/api/results?view=aggregate", (route) =>
-      route.fulfill({
+    await page.route("**/api/results?view=aggregate&**", (route) =>
+      fulfillRoute(route, {
         json: {
           ...snapshot,
           batchCount: 2,
@@ -113,7 +116,16 @@ test.describe("interactions and data states", () => {
     page,
   }) => {
     await expect(page.locator(".node-row").first()).toContainText("Node 63");
+    const nextPage = page.waitForRequest((r) => {
+      const url = new URL(r.url());
+      return (
+        url.pathname === "/api/results" &&
+        url.searchParams.get("page") === "2" &&
+        url.searchParams.get("limit") === "50"
+      );
+    });
     await page.getByRole("button", { name: "下一页", exact: true }).click();
+    await nextPage;
     await expect(page.locator(".node-row")).toHaveCount(13);
     await page
       .getByRole("textbox", { name: "搜索节点", exact: true })
@@ -134,6 +146,17 @@ test.describe("interactions and data states", () => {
       .click();
     await page.getByLabel("排序方式").selectOption("speed-asc");
     await expect(page.locator(".node-row").first()).toContainText("Node 1");
+    const resized = page.waitForRequest((r) => {
+      const url = new URL(r.url());
+      return (
+        url.pathname === "/api/results" &&
+        url.searchParams.get("limit") === "20" &&
+        url.searchParams.get("page") === "1"
+      );
+    });
+    await page.getByLabel("每页节点数").selectOption("20");
+    await resized;
+    await expect(page.locator(".node-row")).toHaveCount(20);
   });
 
   test("combines filters and opens accessible details", async ({ page }) => {
@@ -241,7 +264,10 @@ test.describe("interactions and data states", () => {
     await page.keyboard.press("Escape");
     await expect(page.locator('th[data-column="ipSource"]')).toHaveCount(0);
     await page.route("**/api/download/clash", (route) =>
-      route.fulfill({ contentType: "application/yaml", body: "proxies: []\n" }),
+      fulfillRoute(route, {
+        contentType: "application/yaml",
+        body: "proxies: []\n",
+      }),
     );
     await page.getByRole("button", { name: "下载订阅", exact: true }).click();
     await expect(
@@ -253,8 +279,8 @@ test.describe("interactions and data states", () => {
   });
 
   test("retains previous results after refresh fails", async ({ page }) => {
-    await page.route("**/api/results?view=aggregate", (route) =>
-      route.fulfill({
+    await page.route("**/api/results?view=aggregate&**", (route) =>
+      fulfillRoute(route, {
         status: 503,
         json: { error: "读取失败", code: "READ_FAILED" },
       }),
@@ -267,8 +293,10 @@ test.describe("interactions and data states", () => {
   });
 
   test("handles zero nodes and disabled speed tests", async ({ page }) => {
-    await page.route("**/api/results?view=aggregate", (route) =>
-      route.fulfill({ json: { ...snapshot, speedTest: false, nodes: [] } }),
+    await page.route("**/api/results?view=aggregate&**", (route) =>
+      fulfillRoute(route, {
+        json: { ...snapshot, speedTest: false, nodes: [] },
+      }),
     );
     await page.getByRole("button", { name: "刷新结果" }).click();
     await expect(
@@ -282,8 +310,8 @@ test.describe("interactions and data states", () => {
     await expect(
       page.getByRole("button", { name: "服务解锁筛选" }),
     ).toHaveCount(0);
-    await page.route("**/api/results?view=aggregate", (route) =>
-      route.fulfill({
+    await page.route("**/api/results?view=aggregate&**", (route) =>
+      fulfillRoute(route, {
         json: {
           ...snapshot,
           mediaCheck: true,

@@ -11,6 +11,7 @@ export type IPPureResult = {
   error?: string;
   ip?: string;
   exitIPSource?: string;
+  country?: string;
   addressFamily?: 4 | 6;
   failureStage?: string;
   asn?: string;
@@ -40,6 +41,7 @@ export type NodeRecord = {
   network: string;
   speed: number;
   country?: string;
+  claimedCountry?: string;
   ip?: string;
   ipRisk?: string;
   subTag?: string;
@@ -54,7 +56,20 @@ export type HistoryItem = {
   importedAt: string;
   nodeCount: number;
 };
+type FacetOption = { value: string; label: string; count: number };
 export type Snapshot = {
+  total: number;
+  totalNodes: number;
+  page: number;
+  limit: number;
+  summary: { countries: number; maxSpeed: number; median: number };
+  facets: {
+    country: FacetOption[];
+    type: FacetOption[];
+    network: FacetOption[];
+    features: FacetOption[];
+    media: FacetOption[];
+  };
   ippureCollector?: {
     enabled: boolean;
     running?: boolean;

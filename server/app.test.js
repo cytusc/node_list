@@ -392,3 +392,77 @@ test("empty aggregated results distinguish no history from empty saved batches",
   assert.equal(result.batchCount, 1);
   assert.equal(result.speedTest, true);
 });
+
+test("result pages filter and sort the complete aggregate before slicing, with global statistics", async (t) => {
+  const f = await fixture(t);
+  await writeFile(
+    f.resultsFile,
+    JSON.stringify({
+      speedTest: true,
+      mediaCheck: true,
+      nodes: Array.from({ length: 123 }, (_, i) => ({
+        name: `Node ${i + 1}`,
+        server: `node-${i + 1}.example.org`,
+        port: "443",
+        type: i % 2 ? "vless" : "http",
+        country: i % 2 ? "JP" : "US",
+        network: "tcp",
+        tls: true,
+        udp: i % 2 === 1,
+        speed: (i + 1) * 1024,
+        media: [{ platform: "openai", tag: i % 2 ? "US" : "" }],
+        ippure: i === 0 ? undefined : { status: "success", score: i },
+      })),
+    }),
+  );
+  const get = async (query) =>
+    (await f.get(`/api/results?view=aggregate&${query}`)).json();
+  const first = await get("page=1&limit=50&sort=speed&direction=desc");
+  assert.equal(first.nodes.length, 50);
+  assert.equal(first.nodes[0].name, "Node 123");
+  assert.equal(first.total, 123);
+  assert.equal(first.totalNodes, 123);
+  assert.equal(first.summary.maxSpeed, 123 * 1024);
+  assert.equal(first.summary.median, 62 * 1024);
+  assert.deepEqual(
+    first.facets.country.map((v) => v.count),
+    [62, 61],
+  );
+  const second = await get("page=2&limit=50&sort=speed&direction=desc");
+  assert.equal(second.nodes.length, 50);
+  assert.equal(second.nodes[0].name, "Node 73");
+  assert.equal(second.page, 2);
+  assert.deepEqual(second.summary, first.summary);
+  const last = await get("page=3&limit=50&sort=speed&direction=desc");
+  assert.equal(last.nodes.length, 23);
+  assert.equal(last.nodes.at(-1).name, "Node 1");
+  const filtered = await get(
+    "page=1&limit=20&type=vless&country=JP&features=tls,udp&media=openai&minSpeed=60&sort=speed&direction=asc",
+  );
+  assert.equal(filtered.total, 32);
+  assert.equal(filtered.nodes.length, 20);
+  assert.equal(filtered.nodes[0].name, "Node 60");
+  assert.equal(filtered.totalNodes, 123);
+  assert.deepEqual(filtered.facets, first.facets);
+  const search = await get("page=2&limit=50&q=node-5.example.org");
+  assert.equal(search.page, 1);
+  assert.equal(search.total, 1);
+  assert.equal(search.nodes[0].name, "Node 5");
+  const none = await get("page=2&limit=50&q=missing-node");
+  assert.equal(none.page, 1);
+  assert.equal(none.total, 0);
+  assert.deepEqual(none.nodes, []);
+  for (const query of [
+    "page=0",
+    "page=1.5",
+    "limit=201",
+    "limit=-1",
+    "page=1&sort=invalid",
+    "page=1&direction=invalid",
+    "page=1&minSpeed=-1",
+    "page=1&features=invalid",
+    "page=1&q=a&q=b",
+  ]) {
+    assert.equal((await f.get(`/api/results?${query}`)).status, 400, query);
+  }
+});
