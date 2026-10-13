@@ -157,3 +157,94 @@ export async function patrolOnce({
   await onProgress({ ...summary });
   return summary;
 }
+
+// State is persisted in the existing patrol status file, without a schema change.
+export async function recoverRetiredNodes({
+  store,
+  controller,
+  proxyUrl,
+  secret,
+  signal,
+  state = {},
+  now = Date.now(),
+  intervalMs = 7200000,
+  timeoutMs = 12000,
+  configure = configureProxyBatch,
+  probe = probeGitHub,
+  onProgress = async () => {},
+}) {
+  const reason =
+    "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed";
+  const retired = (await store.retiredNodes()).filter(
+    (row) => row.reason === reason,
+  );
+  const identities = new Set(retired.map((row) => row.identity));
+  for (const identity of Object.keys(state))
+    if (!identities.has(identity)) delete state[identity];
+  const due = retired.filter((row) => {
+    const previous = state[row.identity];
+    const last =
+      previous?.retiredAt === row.retiredAt
+        ? Date.parse(previous.checkedAt)
+        : Date.parse(row.retiredAt);
+    return now - last >= intervalMs;
+  });
+  const summary = { checked: 0, restored: 0, skipped: 0 };
+  if (!due.length) return summary;
+  const nodes = new Map(
+    ((await store.aggregate({ includeRetired: true }))?.nodes || []).map(
+      (node) => [aggregateIdentity(node), node],
+    ),
+  );
+  for (const row of due) {
+    signal.throwIfAborted();
+    const node = nodes.get(row.identity);
+    let config;
+    try {
+      config =
+        node?.rawConfig ||
+        (node?.rawLink && shareLinkProxy(node.rawLink, node.name));
+    } catch {
+      /* Unsupported archived link. */
+    }
+    if (!config) {
+      summary.skipped++;
+      continue;
+    }
+    let urls;
+    try {
+      urls = await configure({
+        controller,
+        proxyUrl,
+        secret,
+        proxies: [config],
+        signal,
+      });
+    } catch (error) {
+      if (!/代理配置失败 \(HTTP (400|422)\)/.test(error.message)) throw error;
+      summary.skipped++;
+      continue;
+    }
+    const url = urls.get(config);
+    if (!url) throw new Error("复检缺少节点隔离代理入口");
+    const success = await probe({ proxyUrl: url, timeoutMs, signal });
+    const previous = state[row.identity];
+    const successes = success
+      ? (previous?.retiredAt === row.retiredAt ? previous.successes || 0 : 0) +
+        1
+      : 0;
+    state[row.identity] = {
+      retiredAt: row.retiredAt,
+      checkedAt: new Date(now).toISOString(),
+      successes,
+      success,
+    };
+    summary.checked++;
+    if (successes >= 2) {
+      summary.restored += await store.restoreNode(row.identity, row.retiredAt);
+      delete state[row.identity];
+    }
+    await onProgress({ ...summary });
+  }
+  return summary;
+}

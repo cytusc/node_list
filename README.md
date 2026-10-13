@@ -38,13 +38,15 @@ QILAN_USER_AGENT=Mozilla/5.0
 
 历史清理通过 `server/reconcile-sources.js` 显式执行，默认仅打印预演计数。先备份数据库并停止页面服务（避免采集器在节点重新排序时写入旧位置），用同一数据库环境运行 `node server/reconcile-sources.js --clash /data/sub/output/all.yaml --links /data/sub/output/base64.txt --prune`；可重复添加 `--clash` 提供历史源文件，或用 `--archive 发布时刻=文件.yaml` 提供有发布时间的历史版本以消除配置歧义。核对计数后加 `--apply`，只删除既没有可匹配链接也没有完整源配置的节点，保留批次 ID 和剩余节点的 IP 检测数据。维护脚本需要已有数据库配置：PostgreSQL 使用 `PGHOST` 等变量，SQLite 使用 `DATABASE_PATH`。
 
-人工确认失效的连接可通过 `store.retireNodes(nodes, reason)` 软删除。软删除记录以连接配置摘要为键，隐藏节点的首页/聚合结果并跳过出口 IP 补采；历史批次仍可查阅。恢复时由维护人员删除对应的 retired identity 记录。生产使用 PostgreSQL 的 `node_explorer_retired_nodes` 表，SQLite 使用 `retired_nodes` 表。
+人工确认失效的连接可通过 `store.retireNodes(nodes, reason)` 软删除。软删除记录以连接配置摘要为键，隐藏节点的首页/聚合结果并跳过出口 IP 补采；历史批次仍可查阅。人工退役节点恢复时由维护人员删除对应的 retired identity 记录；定时 GitHub 巡检退役的连接支持下述自动复检恢复。生产使用 PostgreSQL 的 `node_explorer_retired_nodes` 表，SQLite 使用 `retired_nodes` 表。
 
 ### 定时 GitHub 巡检
 
-在服务器 `.env` 的 `COMPOSE_FILE` 追加 `:compose.patrol.yaml`；使用 PostgreSQL 时还需追加 `:compose.patrol.pgsql.yaml`（并保留已有的 `compose.pgsql.yaml`）。运行 `bash deploy/compose.sh up -d github-patrol github-patrol-proxy` 启动独立巡检容器和专用 Mihomo，无需暴露额外主机端口。巡检读取与页面相同的数据库，扫描首页聚合列表中的连接；历史配置保留，已经退役的节点不再巡检。不要扩容该巡检服务或将其控制器指向 IPPure 使用的 Mihomo。
+在服务器 `.env` 的 `COMPOSE_FILE` 追加 `:compose.patrol.yaml`；使用 PostgreSQL 时还需追加 `:compose.patrol.pgsql.yaml`（并保留已有的 `compose.pgsql.yaml`）。运行 `bash deploy/compose.sh up -d github-patrol github-patrol-proxy` 启动独立巡检容器和专用 Mihomo，无需暴露额外主机端口。巡检读取与页面相同的数据库，扫描首页聚合列表中的连接；历史配置保留，已经退役的节点由后续复检流程处理。不要扩容该巡检服务或将其控制器指向 IPPure 使用的 Mihomo。
 
 启动后立即扫描；每轮结束后默认等待 30 分钟，再扫描更新后的节点列表。`GITHUB_PATROL_INTERVAL_SECONDS=1800`、`GITHUB_PATROL_CONCURRENCY=2`、`GITHUB_PATROL_TIMEOUT_SECONDS=12`、`GITHUB_PATROL_RETRY_SECONDS=10` 可在 `.env` 中调整。巡检优先使用完整配置 `rawConfig`，只有 `rawLink` 的节点（包括 Qilan 节点）在本地转换为 Mihomo 配置后参与检测；转换不会改变节点身份。无法转换或被 Mihomo 明确拒绝的配置单独跳过，不影响其他节点。两个节点并发，每次通过各自隔离代理访问 `https://github.com/`，HTTP 200 算成功；失败时等待 10 秒，用新代理连接再次确认。两次失败且服务器直连 GitHub、正常节点的代理对照均成功，才调用软删除。对照失败、没有正常代理、缺少可用连接配置或代理控制器异常时，不对未确认的节点做删除。所有请求结束后才重载代理配置，巡检不占用 IPPure 代理实例。
+
+巡检每轮结束后还会复检自动退役的连接：距退役或上次复检至少 2 小时才再次检查，连续两轮经该连接访问 GitHub 返回 HTTP 200 后解除退役标记，恢复首页展示和 IPPure 补采；失败清零连续成功次数。只恢复原因为定时 GitHub 巡检的记录，人工禁用记录保持禁用。复检时间、结果和成功次数保存在现有状态文件中，容器重启后继续使用；复检复用专用巡检代理，在正常巡检完成后执行。
 
 巡检摘要保存到共享历史卷的 `github-patrol-status.json`，包含心跳时间、当前进度、完成时间、下次运行时间和成功/退役/暂缓/跳过计数；不包含完整连接配置。使用 `bash deploy/compose.sh logs --tail 20 github-patrol` 查看每轮汇总；容器健康检查读取心跳，巡检过程中每 30 秒更新。容器重启会立即重新巡检，已软删除的记录仍保留在数据库。控制器尚未启动或数据库暂时不可用时，本轮中止并在 60 秒后重试。
 
