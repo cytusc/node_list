@@ -425,3 +425,92 @@ test("Cloudflare trace is parsed without confusing metadata with an exit address
     addressFamily: 4,
   });
 });
+
+test("an IP.SB timeout is followed by AWS on a fresh session through the same node", async () => {
+  const contexts = [],
+    attempts = [];
+  const data = await resolveExitIPInfo({
+    proxyUrl: "http://localhost:7891",
+    onProbeAttempt: (attempt) => attempts.push(attempt),
+    createContext: ({ proxy, timeout }) => {
+      assert.equal(proxy.server, "http://localhost:7891");
+      assert.equal(timeout, 8000);
+      const record = { calls: 0, disposed: false };
+      contexts.push(record);
+      return {
+        get: async (url) => {
+          assert.equal(record.calls++, 0);
+          if (url.includes("ip.sb")) {
+            const error = new Error("sensitive transport message");
+            error.cause = { code: "UND_ERR_CONNECT_TIMEOUT" };
+            throw error;
+          }
+          assert.equal(contexts[0].disposed, true);
+          return response("192.0.2.42");
+        },
+        dispose: async () => {
+          record.disposed = true;
+        },
+      };
+    },
+  });
+  assert.equal(data.ip, "192.0.2.42");
+  assert.equal(data.provider, "AWS CheckIP");
+  assert.equal(contexts.length, 2);
+  assert.ok(contexts.every((context) => context.disposed));
+  assert.equal(attempts[0].code, "TIMEOUT");
+  assert.equal(attempts[1].outcome, "ipv4");
+  assert.equal(JSON.stringify(attempts).includes("sensitive"), false);
+});
+
+test("exhausted providers are retried once with fresh connections and recover a transient failure", async () => {
+  const attempts = [],
+    contexts = [];
+  const result = await resolveExitIPInfo({
+    proxyUrl: "http://localhost:7891",
+    onProbeAttempt: (attempt) => attempts.push(attempt),
+    createContext: () => {
+      const attempt = contexts.length;
+      contexts.push(attempt);
+      return {
+        get: async (url) => {
+          if (attempt === 9) {
+            assert.equal(url, "https://checkip.amazonaws.com/");
+            return response("192.0.2.43");
+          }
+          return response("temporarily unavailable", 503);
+        },
+        dispose: async () => {},
+      };
+    },
+  });
+  assert.equal(result.ip, "192.0.2.43");
+  assert.equal(contexts.length, 10);
+  assert.equal(attempts.at(-1).round, 2);
+  assert.equal(attempts[0].code, "HTTP_503");
+});
+
+test("all provider failures produce bounded credential-free diagnostics", async () => {
+  const attempts = [];
+  await assert.rejects(
+    resolveExitIPInfo({
+      proxyUrl: "http://user:private@localhost:7891",
+      onProbeAttempt: (attempt) => attempts.push(attempt),
+      createContext: () => ({
+        get: async () => {
+          throw new Error("connection failed for user:private");
+        },
+        dispose: async () => {},
+      }),
+    }),
+    (error) => {
+      assert.equal(error.exitIPFailure, true);
+      assert.match(error.message, /8 个查询入口/);
+      assert.equal(error.message.includes("private"), false);
+      return true;
+    },
+  );
+  assert.equal(attempts.length, 11);
+  assert.ok(attempts.every((attempt) => attempt.code === "NETWORK_ERROR"));
+  assert.equal(JSON.stringify(attempts).includes("private"), false);
+});

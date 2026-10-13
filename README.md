@@ -44,7 +44,7 @@ QILAN_USER_AGENT=Mozilla/5.0
 
 在服务器 `.env` 的 `COMPOSE_FILE` 追加 `:compose.patrol.yaml`；使用 PostgreSQL 时还需追加 `:compose.patrol.pgsql.yaml`（并保留已有的 `compose.pgsql.yaml`）。运行 `bash deploy/compose.sh up -d github-patrol github-patrol-proxy` 启动独立巡检容器和专用 Mihomo，无需暴露额外主机端口。巡检读取与页面相同的数据库，扫描首页聚合列表中的连接；历史配置保留，已经退役的节点不再巡检。不要扩容该巡检服务或将其控制器指向 IPPure 使用的 Mihomo。
 
-启动后立即扫描；每轮结束后默认等待 30 分钟，再扫描更新后的节点列表。`GITHUB_PATROL_INTERVAL_SECONDS=1800`、`GITHUB_PATROL_CONCURRENCY=2`、`GITHUB_PATROL_TIMEOUT_SECONDS=12`、`GITHUB_PATROL_RETRY_SECONDS=10` 可在 `.env` 中调整。两个节点并发，每次通过各自隔离代理访问 `https://github.com/`，HTTP 200 算成功；失败时等待 10 秒，用新代理连接再次确认。两次失败且服务器直连 GitHub、正常节点的代理对照均成功，才调用软删除。对照失败、没有正常代理、缺少完整配置或代理控制器异常时，不对未确认的节点做删除。所有请求结束后才重载代理配置，巡检不占用 IPPure 代理实例。
+启动后立即扫描；每轮结束后默认等待 30 分钟，再扫描更新后的节点列表。`GITHUB_PATROL_INTERVAL_SECONDS=1800`、`GITHUB_PATROL_CONCURRENCY=2`、`GITHUB_PATROL_TIMEOUT_SECONDS=12`、`GITHUB_PATROL_RETRY_SECONDS=10` 可在 `.env` 中调整。巡检优先使用完整配置 `rawConfig`，只有 `rawLink` 的节点（包括 Qilan 节点）在本地转换为 Mihomo 配置后参与检测；转换不会改变节点身份。无法转换或被 Mihomo 明确拒绝的配置单独跳过，不影响其他节点。两个节点并发，每次通过各自隔离代理访问 `https://github.com/`，HTTP 200 算成功；失败时等待 10 秒，用新代理连接再次确认。两次失败且服务器直连 GitHub、正常节点的代理对照均成功，才调用软删除。对照失败、没有正常代理、缺少可用连接配置或代理控制器异常时，不对未确认的节点做删除。所有请求结束后才重载代理配置，巡检不占用 IPPure 代理实例。
 
 巡检摘要保存到共享历史卷的 `github-patrol-status.json`，包含心跳时间、当前进度、完成时间、下次运行时间和成功/退役/暂缓/跳过计数；不包含完整连接配置。使用 `bash deploy/compose.sh logs --tail 20 github-patrol` 查看每轮汇总；容器健康检查读取心跳，巡检过程中每 30 秒更新。容器重启会立即重新巡检，已软删除的记录仍保留在数据库。控制器尚未启动或数据库暂时不可用时，本轮中止并在 60 秒后重试。
 
@@ -216,7 +216,7 @@ COMPOSE_FILE=compose.yaml:compose.subs-check.yaml:compose.ippure.yaml
 
 使用包含本次改动的页面镜像，然后运行 `deploy/compose.sh up -d`。额外的 Mihomo 容器只用于 IPPure，控制端口和代理端口不映射到宿主机。采集直接发送 HTTP 请求，不启动 Chromium，页面镜像不再安装浏览器。不要将检测器连接到其他应用正在使用的 Mihomo，因为采集器会替换其完整配置。
 
-采集器每 30 秒检查当前批次，优先使用已归档的完整代理配置，否则匹配 `output/all.yaml`。通过待检测节点优先访问 IPv4 专用入口 `https://api-ipv4.ip.sb/ip` 确认真实 IPv4 出口，失败后依次尝试 AWS CheckIP、ipify、ifconfig.me、icanhazip 和 IP.SB 的通用入口；节点实测中这些服务的可达性不同，AWS CheckIP 能返回此前 IP.SB 失败节点的 IPv4。ipify 官方 API 文档见 https://www.ipify.org/ ，AWS CheckIP 入口为 https://checkip.amazonaws.com/ 。所有请求均使用同一节点专属代理；只接受 IPv4 作为风险接口查询目标，绝不使用服务器地址替代或直连回退。随后轮换已成功查询的节点作为传输代理，按出口 IP 调用 `/api/info/ip-basic/<IP>`、`/api/info/ip-risk/<IP>`，再按 ASN 调用 `/api/info/asn/botclass/<ASN数字>`。客户端通过单连接代理会话处理 `x-k`、`x-t` 动态签名，挑战响应与签名重试复用同一条连接；旧签名方式下已耗尽重试次数的失败记录会获得新一轮重试机会。校验返回 IP、数据完整性和百分比；HTTP 200 的 `ok:false` 仍视为失败。429 和服务端错误最多退避重试 2 次，每次等待不超过 5 秒。
+采集器每 30 秒检查当前批次，优先使用已归档的完整代理配置，否则匹配 `output/all.yaml`。通过待检测节点优先访问 IPv4 专用入口 `https://api-ipv4.ip.sb/ip` 确认真实 IPv4 出口，失败后依次尝试 AWS CheckIP、ipify、ifconfig.me、icanhazip 和 IP.SB 的通用入口；节点实测中这些服务的可达性不同，AWS CheckIP 能返回此前 IP.SB 失败节点的 IPv4。ipify 官方 API 文档见 https://www.ipify.org/ ，AWS CheckIP 入口为 https://checkip.amazonaws.com/ 。每个出口查询入口使用独立连接，单次超时 8 秒；第一轮全部失败后，再用新连接重试 IP.SB IPv4、AWS 和 ipify，共最多 11 次尝试。记录每次查询入口、耗时和错误类型；旧版未取得地址的失败记录优先重新检测。所有请求均使用同一节点专属代理；只接受 IPv4 作为风险接口查询目标，绝不使用服务器地址替代或直连回退。随后轮换已成功查询的节点作为传输代理，按出口 IP 调用 `/api/info/ip-basic/<IP>`、`/api/info/ip-risk/<IP>`，再按 ASN 调用 `/api/info/asn/botclass/<ASN数字>`。客户端通过单连接代理会话处理 `x-k`、`x-t` 动态签名，挑战响应与签名重试复用同一条连接；旧签名方式下已耗尽重试次数的失败记录会获得新一轮重试机会。校验返回 IP、数据完整性和百分比；HTTP 200 的 `ok:false` 仍视为失败。429 和服务端错误最多退避重试 2 次，每次等待不超过 5 秒。
 
 默认每批并发 3 个节点，`.env` 中的 `IPPURE_CONCURRENCY` 可设为 1～10；小内存服务器建议保持 3。每批为目标节点和最多 3 个可用查询代理创建独立 Mihomo mixed listeners，各入口固定绑定节点，整批任务结束后才重载配置，避免并发出口串用。`IPPURE_PROXY_URL` 的原端口保留为拒绝入口，从下一端口开始分配隔离入口，须额外预留最多“并发数 + 3”个连续内部端口；Docker 不发布这些端口。每轮采集按出口 IP 合并重复查询、按 ASN 合并人机流量比请求，失败缓存会删除；新一轮重新建缓存，避免沿用旧数据。API 地址默认为 `https://api.123169.xyz`，可用 `IPPURE_API_ORIGIN` 覆盖。
 
@@ -226,6 +226,6 @@ COMPOSE_FILE=compose.yaml:compose.subs-check.yaml:compose.ippure.yaml
 
 旧采集器在退役后写入、且位于被过滤记录之后的结果可能存在下标错位。新版读取时把这部分旧结果视为待重新核验，按原始完整配置重新探测；数据库中的原始批次和旧检测记录保留，新结果核验后覆盖对应检测字段。
 
-结果独立关联原批次和节点，保存到 SQLite/PostgreSQL；不会改变原始快照的去重指纹。列表可按系数排序，电脑列表以独立列展示 ASN 组织、IP 来源、IP 属性、系数等级及人机流量比，各列可单独显示、隐藏和排序；手机卡片按字段展示，系数和人机比例配有绿红渐变条，节点详情展示全部指标和检测时间。刷新页面可读取采集进度。已有成功结果缺少 ASN 组织时自动补采当前批次，补采失败保留原指标，间隔 30 分钟最多重试 3 次；完整成功结果不重复请求；失败间隔 30 分钟重试，最多 3 次，重启不会重置次数；切换到 HTTP 接口采集后，旧方式失败的节点获得独立的 3 次重试机会。已获取的出口 IP 会随失败结果保存，重试时可以复用。新检测批次重新采集，聚合列表显示节点最新批次的 IPPure 结果。历史批次有完整代理配置的失败、待检测及信息不完整记录也会补采，优先处理聚合列表正在展示的记录，并复用历史已成功节点作为查询代理；旧版 IPv6 失败记录重新探测 IPv4 并获得新一轮重试机会。仅能获取 IPv6 的节点显示风险评分接口暂不支持 IPv6，出口连接失败与接口查询失败分别记录。已被覆盖的完整代理配置不会从历史展示字段重建。订阅尚未生成或无法匹配的节点等待后续检查。
+结果独立关联原批次和节点，保存到 SQLite/PostgreSQL；不会改变原始快照的去重指纹。列表可按系数排序，电脑列表以独立列展示 ASN 组织、IP 来源、IP 属性、系数等级及人机流量比，各列可单独显示、隐藏和排序；手机卡片按字段展示，系数和人机比例配有绿红渐变条，节点详情展示全部指标和检测时间。刷新页面可读取采集进度。已有成功结果缺少 ASN 组织时自动补采当前批次，补采失败保留原指标，间隔 30 分钟最多重试 3 次；完整成功结果不重复请求；失败间隔 30 分钟持续重试，重启保留累计次数；切换检测方式后，旧方式失败的节点获得新一轮重试机会。已获取的出口 IP 会随失败结果保存，重试时可以复用。新检测批次重新采集，聚合列表显示节点最新批次的 IPPure 结果。历史批次有完整代理配置的失败、待检测及信息不完整记录也会补采，优先处理聚合列表正在展示的记录，并复用历史已成功节点作为查询代理；旧版 IPv6 失败记录重新探测 IPv4 并获得新一轮重试机会。仅能获取 IPv6 的节点显示风险评分接口暂不支持 IPv6，出口连接失败与接口查询失败分别记录。已被覆盖的完整代理配置不会从历史展示字段重建。订阅尚未生成或无法匹配的节点等待后续检查。
 
 非容器运行时设置 `IPPURE_CONTROLLER`、`IPPURE_PROXY_URL`；控制器配置了密钥时同时设置 `IPPURE_CONTROLLER_SECRET`。仅设置其中一个地址不会启动采集。多个页面实例不要共用一个检测代理，以免切换节点相互干扰。IPPure 接口签名变化、限流或节点故障均可能导致检测失败，页面会保留失败状态。

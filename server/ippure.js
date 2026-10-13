@@ -3,7 +3,11 @@ import path from "node:path";
 import { isIP } from "node:net";
 import { parse } from "yaml";
 import { aggregateIdentity } from "./node-sources.js";
-import { EXIT_IP_VERSION, hasVerifiedExitIP } from "./exit-ip.js";
+import {
+  EXIT_IP_VERSION,
+  EXIT_IP_PROBE_VERSION,
+  hasVerifiedExitIP,
+} from "./exit-ip.js";
 import { shareLinkProxy, SHARE_LINK_VERSION } from "./share-link.js";
 import {
   queryIPPure,
@@ -127,8 +131,13 @@ export function startIPPureCollector({
       const outdatedLink =
         saved?.failureStage === "share-link" &&
         saved.shareLinkVersion !== SHARE_LINK_VERSION;
+      const outdatedProbe =
+        saved?.status === "error" &&
+        !saved.ip &&
+        saved.failureStage !== "share-link" &&
+        saved.exitIPProbeVersion !== EXIT_IP_PROBE_VERSION;
       entry.priority =
-        (outdatedLink ? 4 : !saved ? 2 : 0) +
+        (outdatedLink || outdatedProbe ? 4 : !saved ? 2 : 0) +
         Number(visible.has(`${snapshotId}:${entry.identity}`));
     }
     // New source batches must not restart probes at the same first few nodes.
@@ -149,6 +158,10 @@ export function startIPPureCollector({
       const currentExitMode = old?.exitIPMode === "proxy-echo";
       const currentSignature = old?.signatureVersion === 2;
       const currentResolution = old?.exitIPVersion === EXIT_IP_VERSION;
+      const currentProbe =
+        old?.status !== "error" ||
+        !!old.ip ||
+        old.exitIPProbeVersion === EXIT_IP_PROBE_VERSION;
       const backfill =
         old?.status === "success" && currentExitIP && !old.asnOrganization;
       if (old?.status === "success" && currentExitIP && !backfill) continue;
@@ -159,7 +172,8 @@ export function startIPPureCollector({
         old?.queryMode === "specified-exit" &&
         old?.transportMode === "http" &&
         currentSignature &&
-        currentResolution
+        currentResolution &&
+        currentProbe
           ? old.attempts || 0
           : 0;
       const lastAttempt = backfill
@@ -170,7 +184,8 @@ export function startIPPureCollector({
             old?.queryMode === "specified-exit" &&
             old?.transportMode === "http" &&
             currentSignature &&
-            currentResolution
+            currentResolution &&
+            currentProbe
           ? old.checkedAt
           : undefined;
       if (lastAttempt && Date.now() - Date.parse(lastAttempt) < 30 * 60 * 1000)
@@ -293,6 +308,7 @@ export function startIPPureCollector({
               transportMode: "http",
               signatureVersion: 2,
               exitIPVersion: EXIT_IP_VERSION,
+              exitIPProbeVersion: EXIT_IP_PROBE_VERSION,
             };
             let failureStage = "exit-ip";
             try {
@@ -313,6 +329,9 @@ export function startIPPureCollector({
                       ...options,
                       proxyUrl: urls.get(ownProxy),
                       proxy: ownProxy,
+                      onProbeAttempt: (attempt) => {
+                        (result.exitIPAttempts ||= []).push(attempt);
+                      },
                     });
               // Injected legacy resolvers return a string; production returns
               // the address and the service that actually observed it.
@@ -430,11 +449,13 @@ export function startIPPureCollector({
                 result.status = "error";
                 result.failureStage = failureStage;
                 // Never persist proxy credentials or controller response bodies.
-                result.error = /IPPure|IP\.SB|代理配置/.test(error.message)
-                  ? error.message.slice(0, 160)
-                  : failureStage === "exit-ip"
-                    ? "节点 IPv4 出口探测失败，请检查节点连接后重试"
-                    : "IPPure 查询代理连接失败，请稍后重试";
+                result.error =
+                  error.exitIPFailure ||
+                  /IPPure|IP\.SB|代理配置/.test(error.message)
+                    ? error.message.slice(0, 160)
+                    : failureStage === "exit-ip"
+                      ? "节点 IPv4 出口探测失败，请检查节点连接后重试"
+                      : "IPPure 查询代理连接失败，请稍后重试";
               }
             }
             if (abort.signal.aborted || (await store.get())?.id !== snapshot.id)

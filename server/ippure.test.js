@@ -8,6 +8,83 @@ import { createStore } from "./store.js";
 import { summarizeProxy } from "./node-sources.js";
 import { startIPPureCollector, queryIPPure } from "./ippure.js";
 
+test("legacy exit failures recover before pending links and persist provider diagnostics without rechecking verified exits", async (t) => {
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const old = {
+    name: "recover",
+    type: "vless",
+    server: "recover.example",
+    port: "443",
+    rawLink: `vless://${id}@recover.example:443`,
+    snapshotId: 1,
+    ippure: {
+      status: "error",
+      failureStage: "exit-ip",
+      attempts: 3,
+      checkedAt: new Date().toISOString(),
+      queryMode: "specified-exit",
+      exitIPMode: "proxy-echo",
+      transportMode: "http",
+      signatureVersion: 2,
+      exitIPVersion: 3,
+    },
+  };
+  const fresh = {
+    ...old,
+    name: "fresh",
+    server: "fresh.example",
+    rawLink: `vless://${id}@fresh.example:443`,
+    ippure: undefined,
+  };
+  const donor = {
+    name: "donor",
+    rawConfig: { name: "donor" },
+    snapshotId: 1,
+    ippure: {
+      status: "success",
+      ip: "192.0.2.10",
+      exitIPMode: "proxy-echo",
+      exitIPVersion: 3,
+      exitIPSource: "AWS CheckIP",
+      asnOrganization: "Verified",
+    },
+  };
+  const nodes = [fresh, old, donor],
+    calls = [],
+    saves = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 1,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      aggregate: async () => ({ nodes }),
+      saveIPPure: async (id, index, result) => {
+        saves.push(result);
+        nodes[index].ippure = result;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy, onProbeAttempt }) => {
+      calls.push(proxy.name);
+      onProbeAttempt({ provider: "IP.SB", outcome: "error", code: "TIMEOUT" });
+      onProbeAttempt({ provider: "AWS CheckIP", outcome: "ipv4" });
+      return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
+    },
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.deepEqual(calls, ["recover", "fresh"]);
+  assert.equal(saves[0].status, "success");
+  assert.equal(saves[0].attempts, 1);
+  assert.equal(saves[0].exitIPProbeVersion, 1);
+  assert.equal(saves[0].exitIPSource, "AWS CheckIP");
+  assert.equal(saves[0].exitIPAttempts[0].code, "TIMEOUT");
+  await collector.run();
+  assert.equal(calls.length, 2);
+});
+
 test("Qilan share links enter historical collection without all.yaml and reuse results after refresh", async (t) => {
   const store = createStore();
   const id = "12345678-1234-1234-1234-123456789abc";

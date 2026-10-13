@@ -45,6 +45,7 @@ async function withHTTP(
     proxyUrl,
     signal = new AbortController().signal,
     createContext = createHTTPContext,
+    timeout = 15000,
   },
   callback,
 ) {
@@ -52,7 +53,7 @@ async function withHTTP(
   if (!proxyUrl) throw new Error("IPPure 缺少隔离代理入口");
   const context = await createContext({
     proxy: { server: proxyUrl },
-    timeout: 15000,
+    timeout,
     extraHTTPHeaders: {
       Referer: "https://ippure.com/",
       Origin: "https://ippure.com",
@@ -122,56 +123,103 @@ export async function configureProxyBatch({
   return urls;
 }
 
+function exitProbeCode(error) {
+  if (error.exitProbeCode) return error.exitProbeCode;
+  const code = error.cause?.code || error.code;
+  if (error.name === "TimeoutError" || /TIMEOUT/.test(code || ""))
+    return "TIMEOUT";
+  if (code === "ECONNRESET") return "CONNECTION_RESET";
+  if (["ENOTFOUND", "EAI_AGAIN"].includes(code)) return "DNS_ERROR";
+  if (/CERT|TLS|SSL/.test(code || "")) return "TLS_ERROR";
+  // Transport messages can include proxy credentials. Persist categories only.
+  return "NETWORK_ERROR";
+}
+
 export async function resolveExitIPInfo(options) {
-  return withHTTP(options, async (context, signal) => {
-    let failure;
-    let ipv6;
-    // IPPure's risk endpoint accepts IPv4 only. Every public IP echo request
-    // stays on the node; independent providers cover destination filtering.
-    for (const [url, provider, format] of [
-      ["https://api-ipv4.ip.sb/ip", "IP.SB"],
-      ["https://checkip.amazonaws.com/", "AWS CheckIP"],
-      ["https://api.ipify.org", "ipify"],
-      ["https://ifconfig.me/ip", "ifconfig.me"],
-      ["https://ipv4.icanhazip.com/", "icanhazip"],
-      ["https://www.cloudflare.com/cdn-cgi/trace", "Cloudflare", "trace"],
-      ["https://api.ip.sb/ip", "IP.SB"],
-      ["https://icanhazip.com/", "icanhazip"],
-    ]) {
+  options.signal?.throwIfAborted();
+  if (!options.proxyUrl) throw new Error("IPPure 缺少隔离代理入口");
+  let ipv6;
+  // IPPure's risk endpoint accepts IPv4 only. Every public IP echo request
+  // stays on the node; independent providers cover destination filtering.
+  const services = [
+    ["https://api-ipv4.ip.sb/ip", "IP.SB"],
+    ["https://checkip.amazonaws.com/", "AWS CheckIP"],
+    ["https://api.ipify.org", "ipify"],
+    ["https://ifconfig.me/ip", "ifconfig.me"],
+    ["https://ipv4.icanhazip.com/", "icanhazip"],
+    ["https://www.cloudflare.com/cdn-cgi/trace", "Cloudflare", "trace"],
+    ["https://api.ip.sb/ip", "IP.SB"],
+    ["https://icanhazip.com/", "icanhazip"],
+  ];
+  // A failed CONNECT/TLS session must not poison a fallback request. Each
+  // attempt gets its own dispatcher while retaining the same node listener.
+  // Retry the primary IPv4 providers once after exhausting the first pass.
+  const rounds = [services, services.slice(0, 3)];
+  for (const [round, endpoints] of rounds.entries()) {
+    for (const [url, provider, format] of endpoints) {
+      const started = Date.now();
+      let outcome;
       try {
-        const response = await context.get(url);
-        try {
-          signal.throwIfAborted();
-          if (!response.ok())
-            throw new Error(`${provider} 访问失败 (HTTP ${response.status()})`);
-          const body = (await response.text()).trim();
-          const ip =
-            format === "trace"
-              ? body
-                  .split(/\r?\n/)
-                  .find((line) => line.startsWith("ip="))
-                  ?.slice(3)
-                  .trim()
-              : body;
-          if (!isIP(ip || ""))
-            throw new Error(`${provider} 未返回有效的出口 IP`);
-          const data = { ip, provider, addressFamily: isIP(ip) };
-          if (data.addressFamily === 6) {
-            ipv6 ??= data;
-            continue;
-          }
-          return data;
-        } finally {
-          await response.dispose();
-        }
+        outcome = await withHTTP(
+          { ...options, timeout: options.timeoutMs ?? 8000 },
+          async (context, signal) => {
+            const response = await context.get(url);
+            try {
+              signal.throwIfAborted();
+              if (!response.ok()) {
+                const error = new Error("出口查询 HTTP 错误");
+                error.exitProbeCode = `HTTP_${response.status()}`;
+                throw error;
+              }
+              const body = (await response.text()).trim();
+              const ip =
+                format === "trace"
+                  ? body
+                      .split(/\r?\n/)
+                      .find((line) => line.startsWith("ip="))
+                      ?.slice(3)
+                      .trim()
+                  : body;
+              if (!isIP(ip || "")) {
+                const error = new Error("出口查询未返回有效 IP");
+                error.exitProbeCode = "INVALID_IP";
+                throw error;
+              }
+              return { ip, provider, addressFamily: isIP(ip) };
+            } finally {
+              await response.dispose();
+            }
+          },
+        );
       } catch (error) {
-        signal.throwIfAborted();
-        failure = error;
+        options.signal?.throwIfAborted();
+        options.onProbeAttempt?.({
+          provider,
+          endpoint: url,
+          round: round + 1,
+          elapsedMs: Date.now() - started,
+          outcome: "error",
+          code: exitProbeCode(error),
+        });
+        continue;
       }
+      options.onProbeAttempt?.({
+        provider,
+        endpoint: url,
+        round: round + 1,
+        elapsedMs: Date.now() - started,
+        outcome: outcome.addressFamily === 4 ? "ipv4" : "ipv6",
+      });
+      if (outcome.addressFamily === 4) return outcome;
+      ipv6 ??= outcome;
     }
-    if (ipv6) return ipv6;
-    throw failure || new Error("节点出口 IP 探测失败");
-  });
+  }
+  if (ipv6) return ipv6;
+  const failure = new Error(
+    "出口 IP 探测失败：8 个查询入口均未取得有效 IP，已使用新连接重试",
+  );
+  failure.exitIPFailure = true;
+  throw failure;
 }
 
 // Preserve the IPv4-only public helper used by maintenance scripts.
