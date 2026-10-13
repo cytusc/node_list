@@ -187,6 +187,17 @@ export function createStore(databasePath = ":memory:") {
         )
         .all();
     },
+    restoreNode(identity, retiredAt) {
+      return db
+        .prepare(
+          "DELETE FROM retired_nodes WHERE identity = ? AND retired_at = ? AND reason = ?",
+        )
+        .run(
+          identity,
+          retiredAt,
+          "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed",
+        ).changes;
+    },
     close() {
       db.close();
     },
@@ -338,6 +349,9 @@ export function createSnapshotStore(adapter) {
         (await adapter.retiredNodes()).map((item) => item.identity),
       );
     },
+    retiredNodes: () => adapter.retiredNodes(),
+    restoreNode: (identity, retiredAt) =>
+      adapter.restoreNode(identity, retiredAt),
     reconcileSources: (linkedNodes, options) =>
       adapter.reconcile(linkedNodes, options),
     // Requests and the background collector share a single in-flight import.
@@ -371,7 +385,7 @@ export function createSnapshotStore(adapter) {
         preserveIndexes: true,
       });
     },
-    async aggregate() {
+    async aggregate({ includeRetired = false } = {}) {
       const rows = await adapter.all();
       if (!rows.length) return null;
       const enrichments = new Map();
@@ -403,7 +417,7 @@ export function createSnapshotStore(adapter) {
         for (const node of batch.nodes) {
           // Names, exit IPs and test results can change between checks.
           const key = aggregateIdentity(node);
-          if (retired.has(key)) continue;
+          if (!includeRetired && retired.has(key)) continue;
           if (!nodes.has(key))
             nodes.set(key, {
               ...node,

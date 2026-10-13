@@ -3,7 +3,7 @@ import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { createStore } from "./store.js";
 import { createPostgresStore } from "./postgres-store.js";
-import { patrolOnce } from "./github-patrol.js";
+import { patrolOnce, recoverRetiredNodes } from "./github-patrol.js";
 
 const statusFile =
   process.env.GITHUB_PATROL_STATUS_FILE ||
@@ -65,6 +65,13 @@ function persist() {
     });
   return writing;
 }
+// Resume consecutive recovery successes across container restarts.
+try {
+  const previous = JSON.parse(await readFile(statusFile, "utf8"));
+  status.recoveryState = previous.recoveryState || {};
+} catch {
+  status.recoveryState = {};
+}
 await persist();
 const heartbeat = setInterval(
   () =>
@@ -99,11 +106,25 @@ try {
           await persist();
         },
       });
+      status.lastRecovery = await recoverRetiredNodes({
+        store,
+        controller,
+        proxyUrl,
+        secret: process.env.GITHUB_PATROL_CONTROLLER_SECRET,
+        timeoutMs,
+        signal: abort.signal,
+        state: status.recoveryState,
+        onProgress: async (progress) => {
+          status.recoveryProgress = progress;
+          await persist();
+        },
+      });
       status.completedAt = new Date().toISOString();
       console.log(
         JSON.stringify({
           event: "github-patrol-complete",
           ...status.lastResult,
+          recovery: status.lastRecovery,
         }),
       );
     } catch {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { patrolOnce } from "./github-patrol.js";
+import { patrolOnce, recoverRetiredNodes } from "./github-patrol.js";
 import { aggregateIdentity } from "./node-sources.js";
 
 const id = "12345678-1234-1234-1234-123456789abc";
@@ -133,4 +133,125 @@ test("controller outages abort the patrol without retiring nodes", async () => {
   });
   await assert.rejects(patrolOnce(f.options), /HTTP 503/);
   assert.deepEqual(f.retired, []);
+});
+
+function recoveryFixture() {
+  const item = node("recoverable");
+  const identity = aggregateIdentity(item);
+  const retiredAt = "2026-10-12T00:00:00.000Z";
+  const automatic = {
+    identity,
+    retiredAt,
+    reason:
+      "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed",
+  };
+  const manual = { identity: "manual", retiredAt, reason: "Manually disabled" };
+  const state = {};
+  const restored = [];
+  const f = fixture([]);
+  const options = {
+    ...f.options,
+    state,
+    now: Date.parse(retiredAt) + 7200000,
+    probe: async () => true,
+    store: {
+      retiredNodes: async () => [automatic, manual],
+      aggregate: async (options) => {
+        assert.equal(options.includeRetired, true);
+        return { nodes: [item] };
+      },
+      restoreNode: async (...args) => {
+        restored.push(args);
+        return 1;
+      },
+    },
+  };
+  return { options, state, restored, identity, retiredAt };
+}
+
+test("recovery requires two successful rounds two hours apart and persists across restarts", async () => {
+  const f = recoveryFixture();
+  assert.equal(
+    (await recoverRetiredNodes({ ...f.options, now: f.options.now - 1 }))
+      .checked,
+    0,
+  );
+  assert.equal((await recoverRetiredNodes(f.options)).restored, 0);
+  assert.equal(f.state[f.identity].successes, 1);
+  assert.equal(
+    (await recoverRetiredNodes({ ...f.options, now: f.options.now + 7199999 }))
+      .checked,
+    0,
+  );
+  // A new process receives the state loaded from the status JSON file.
+  const resumed = JSON.parse(JSON.stringify(f.state));
+  const result = await recoverRetiredNodes({
+    ...f.options,
+    state: resumed,
+    now: f.options.now + 7200000,
+  });
+  assert.equal(result.restored, 1);
+  assert.deepEqual(f.restored, [[f.identity, f.retiredAt]]);
+  assert.equal(resumed[f.identity], undefined);
+});
+
+test("failed recovery resets consecutive successes and a new retirement starts over", async () => {
+  const f = recoveryFixture();
+  await recoverRetiredNodes(f.options);
+  await recoverRetiredNodes({
+    ...f.options,
+    now: f.options.now + 7200000,
+    probe: async () => false,
+  });
+  assert.equal(f.state[f.identity].successes, 0);
+  await recoverRetiredNodes({ ...f.options, now: f.options.now + 14400000 });
+  assert.equal(f.state[f.identity].successes, 1);
+  f.state[f.identity].retiredAt = "2026-10-11T00:00:00.000Z";
+  f.state[f.identity].successes = 10;
+  await recoverRetiredNodes({ ...f.options, now: f.options.now + 21600000 });
+  assert.equal(f.state[f.identity].successes, 1);
+  assert.deepEqual(f.restored, []);
+});
+
+test("controller failures preserve recovery state and never restore a node", async () => {
+  const f = recoveryFixture();
+  await recoverRetiredNodes(f.options);
+  const saved = JSON.stringify(f.state);
+  await assert.rejects(
+    recoverRetiredNodes({
+      ...f.options,
+      now: f.options.now + 7200000,
+      configure: async () => {
+        throw new Error("代理配置失败 (HTTP 503)");
+      },
+    }),
+    /HTTP 503/,
+  );
+  assert.equal(JSON.stringify(f.state), saved);
+  assert.deepEqual(f.restored, []);
+});
+
+test("manual retirements are never loaded or probed for automatic recovery", async () => {
+  const f = recoveryFixture();
+  const result = await recoverRetiredNodes({
+    ...f.options,
+    store: {
+      ...f.options.store,
+      retiredNodes: async () => [
+        {
+          identity: f.identity,
+          retiredAt: f.retiredAt,
+          reason: "Manually disabled",
+        },
+      ],
+      aggregate: async () => {
+        throw new Error("Manual nodes must not be loaded");
+      },
+    },
+    probe: async () => {
+      throw new Error("Manual nodes must not be probed");
+    },
+  });
+  assert.equal(result.checked, 0);
+  assert.deepEqual(f.restored, []);
 });

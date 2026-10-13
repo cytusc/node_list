@@ -176,6 +176,17 @@ export async function createPostgresStore(config) {
         )
       ).rows;
     },
+    async restoreNode(identity, retiredAt) {
+      const result = await pool.query(
+        "DELETE FROM node_explorer_retired_nodes WHERE identity = $1 AND retired_at = $2 AND reason = $3",
+        [
+          identity,
+          retiredAt,
+          "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed",
+        ],
+      );
+      return result.rowCount;
+    },
     close() {
       return pool.end();
     },
