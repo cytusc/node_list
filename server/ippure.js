@@ -228,20 +228,25 @@ export function startIPPureCollector({
       // A rewritten subscription may belong to a different detection round.
       const ownProxy = matchProxy(node);
       if (!ownProxy) {
-        if (node.rawLink)
-          await store.saveIPPure(
-            snapshotId,
-            index,
-            {
-              status: "unsupported",
-              checkedAt: new Date().toISOString(),
-              attempts: 0,
-              failureStage: "share-link",
-              shareLinkVersion: SHARE_LINK_VERSION,
-              error: "节点分享链接格式或连接参数不受当前检测服务支持",
-            },
-            identity,
-          );
+        // Persist why the node cannot be probed; otherwise sources that stop
+        // exposing share links leave their nodes as 待检测 forever. The
+        // share-link stage + current version keeps marked instances from
+        // re-entering every round.
+        await store.saveIPPure(
+          snapshotId,
+          index,
+          {
+            status: "unsupported",
+            checkedAt: new Date().toISOString(),
+            attempts: 0,
+            failureStage: "share-link",
+            shareLinkVersion: SHARE_LINK_VERSION,
+            error: node.rawLink
+              ? "节点分享链接格式或连接参数不受当前检测服务支持"
+              : "节点缺少可用的连接配置（分享链接为空），无法构造检测通道",
+          },
+          identity,
+        );
         continue;
       }
       jobs.push({

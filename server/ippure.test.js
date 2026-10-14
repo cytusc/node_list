@@ -179,6 +179,60 @@ test("Qilan share links enter historical collection without all.yaml and reuse r
   assert.equal(probes, 1);
 });
 
+test("nodes with an empty rawLink are marked unsupported instead of silently skipped", async (t) => {
+  const store = createStore();
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ippure-empty-link-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(path.join(dir, "output"));
+  await writeFile(
+    path.join(dir, "output", "all.yaml"),
+    JSON.stringify({ proxies: [] }),
+  );
+  await store.syncSnapshot({
+    checkedAt: "2026-10-14T00:00:00Z",
+    nodes: [
+      {
+        name: "LT 03 [Qilan]",
+        subTag: "Qilan",
+        type: "ss",
+        server: "195.238.126.20",
+        port: "9068",
+        rawLink: "",
+      },
+    ],
+  });
+  const archived = await store.get();
+  let probes = 0;
+  const collector = startIPPureCollector({
+    store,
+    subDir: dir,
+    intervalMs: 999999,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p, i) => [p, `http://127.0.0.1:${7900 + i}`])),
+    resolveIP: async () => {
+      probes++;
+      return { ip: "192.0.2.1", provider: "AWS CheckIP" };
+    },
+    query: async () => {
+      probes++;
+      return { ip: "192.0.2.1", asnOrganization: "Never" };
+    },
+  });
+  t.after(async () => {
+    await collector.close();
+    await store.close();
+  });
+  await collector.run();
+  assert.equal(probes, 0);
+  const saved = (await store.get(archived.id)).nodes[0].ippure;
+  assert.equal(saved.status, "unsupported");
+  assert.equal(saved.failureStage, "share-link");
+  assert.match(saved.error, /分享链接为空/);
+  // A marked instance must not re-enter the queue on the next round.
+  await collector.run();
+  assert.equal(probes, 0);
+});
+
 test("one rejected Qilan configuration is isolated while other nodes are probed", async (t) => {
   const store = createStore();
   const id = "12345678-1234-1234-1234-123456789abc";
@@ -332,7 +386,8 @@ test("IPPure saves per-node results, retries failures without rechecking success
   assert.equal(first.nodes[0].ippure.score, 32);
   assert.equal(first.nodes[1].ippure.status, "error");
   assert.equal(JSON.stringify(first).includes("private"), false);
-  assert.equal(first.nodes[2].ippure, undefined);
+  assert.equal(first.nodes[2].ippure.status, "unsupported");
+  assert.equal(first.nodes[2].ippure.failureStage, "share-link");
   await collector.run();
   assert.equal(calls.length, 2);
   await store.saveIPPure(first.id, 1, {
