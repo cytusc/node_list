@@ -10,7 +10,6 @@ import {
   CircleAlert,
   Clock3,
   Copy,
-  Download as DownloadIcon,
   ExternalLink,
   Globe2,
   Info,
@@ -22,7 +21,6 @@ import {
   Radio,
   RefreshCw,
   Search,
-  Server,
   ShieldCheck,
   SlidersHorizontal,
   Sun,
@@ -62,7 +60,6 @@ import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -78,7 +75,6 @@ import {
   platforms,
   speedParts,
   timeLabel,
-  type Download,
   type NodeRecord,
   type IPPureResult,
   type Snapshot,
@@ -263,8 +259,6 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [errorCode, setErrorCode] = useState("");
-  const [downloads, setDownloads] = useState<Download[]>([]);
-  const [downloading, setDownloading] = useState(false);
   const [query, setQuery] = useState("");
   const [countries, setCountries] = useState<string[]>([]);
   const [types, setTypes] = useState<string[]>([]);
@@ -382,15 +376,6 @@ export default function App() {
     },
     [resultsUrl, criteria],
   );
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/downloads", { signal: controller.signal })
-      .then(async (r) => {
-        if (r.ok) setDownloads(await r.json());
-      })
-      .catch(() => {});
-    return () => controller.abort();
-  }, []);
   useEffect(() => {
     void load();
     return () => activeRequest.current?.abort();
@@ -574,33 +559,6 @@ export default function App() {
     getCoreRowModel: getCoreRowModel(),
   });
 
-  async function downloadFile(item: Download) {
-    setDownloading(true);
-    try {
-      const res = await fetch(`/api/download/${item.id}`);
-      if (!res.ok) {
-        const body = await res.json();
-        throw new Error(body.error || "下载失败");
-      }
-      const url = URL.createObjectURL(await res.blob());
-      const a = document.createElement("a");
-      a.href = url;
-      a.download =
-        item.id === "clash"
-          ? "all.yaml"
-          : item.id === "mihomo"
-            ? "mihomo.yaml"
-            : "base64.txt";
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      toast.success(`${item.label}已下载`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "下载失败，请检查本地服务");
-    } finally {
-      setDownloading(false);
-    }
-  }
-
   return (
     <div className="app-shell">
       <header className="site-header">
@@ -694,14 +652,6 @@ export default function App() {
           </div>
         </section>
 
-        <div className="mb-4 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-          <span>
-            已聚合 {snapshot?.batchCount ?? 0}{" "}
-            轮检测，同一节点保留最近一次结果。
-          </span>
-          <span>历史节点不代表当前仍可用，检测时间可在详情中查看。</span>
-          <span>订阅下载仍使用最新生成的文件。</span>
-        </div>
         {snapshot?.sourceWarning && !error && (
           <div role="status" className="error-banner">
             <CircleAlert className="size-5 shrink-0" />
@@ -943,47 +893,6 @@ export default function App() {
                 />
                 <span>刷新</span>
               </Button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button size="sm" disabled={downloading}>
-                    <DownloadIcon className="size-3.5" />
-                    <span>{downloading ? "下载中" : "下载订阅"}</span>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-72">
-                  <DropdownMenuLabel>下载完整订阅</DropdownMenuLabel>
-                  <p className="px-2 pb-2 text-xs leading-relaxed text-muted-foreground">
-                    包含文件中的全部节点，不受当前筛选影响。
-                  </p>
-                  <DropdownMenuSeparator />
-                  {downloads.length ? (
-                    downloads.map((d) => (
-                      <DropdownMenuItem
-                        key={d.id}
-                        disabled={!d.available}
-                        onClick={() => void downloadFile(d)}
-                      >
-                        <DownloadIcon className="size-4" />
-                        <div>
-                          <div>
-                            {d.label}
-                            {!d.available && " · 尚未生成"}
-                          </div>
-                          {d.updatedAt && (
-                            <small className="text-muted-foreground">
-                              文件更新于 {timeLabel(d.updatedAt)}
-                            </small>
-                          )}
-                        </div>
-                      </DropdownMenuItem>
-                    ))
-                  ) : (
-                    <DropdownMenuItem disabled>
-                      订阅文件信息暂不可用
-                    </DropdownMenuItem>
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
             </div>
           </div>
 
@@ -1185,12 +1094,6 @@ export default function App() {
             </div>
           </div>
         </section>
-        <footer className="page-footer">
-          <span>
-            <Server className="size-3.5" />由 subs-check 提供检测结果
-          </span>
-          <span>速度为所选批次检测值，实际表现可能变化。</span>
-        </footer>
       </main>
       <Sheet
         open={!!selected}
@@ -1387,20 +1290,6 @@ export default function App() {
                 ) : (
                   <p className="detail-note">未启用服务解锁检测。</p>
                 )}
-              </div>
-              <div className="detail-footer">
-                <Button
-                  className="w-full"
-                  onClick={(event) =>
-                    void copy(
-                      `${selected.server}:${selected.port}`,
-                      event.currentTarget,
-                    )
-                  }
-                >
-                  <Copy className="size-4" />
-                  复制服务器地址
-                </Button>
               </div>
             </>
           )}

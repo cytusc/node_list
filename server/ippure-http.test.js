@@ -511,7 +511,7 @@ test("an IP.SB timeout falls through to AWS on a fresh session through the same 
     onProbeAttempt: (attempt) => attempts.push(attempt),
     createContext: ({ proxy, timeout }) => {
       assert.equal(proxy.server, "http://localhost:7891");
-      assert.equal(timeout, 8000);
+      assert.equal(timeout, 5000);
       const record = { calls: [], disposed: false };
       contexts.push(record);
       return {

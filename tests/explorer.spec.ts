@@ -98,10 +98,14 @@ test.describe("interactions and data states", () => {
     await page.getByRole("button", { name: "刷新结果" }).click();
     await expect(page.locator(".title-count")).toHaveText("2");
     await expect(page.getByLabel("检测批次")).toHaveCount(0);
-    await expect(page.getByText(/已聚合 2 轮检测/)).toBeVisible();
+    await expect(page.getByText(/已聚合 2 轮检测/)).toHaveCount(0);
+    await expect(page.getByText("订阅下载仍使用最新生成的文件。")).toHaveCount(
+      0,
+    );
     await expect(
-      page.getByText("订阅下载仍使用最新生成的文件。"),
-    ).toBeVisible();
+      page.getByText("历史节点不代表当前仍可用，检测时间可在详情中查看。"),
+    ).toHaveCount(0);
+    await expect(page.locator(".page-footer")).toHaveCount(0);
     await page
       .getByRole("textbox", { name: "搜索节点", exact: true })
       .fill("Archived node");
@@ -175,7 +179,7 @@ test.describe("interactions and data states", () => {
   });
 
   for (const mode of ["modern", "missing", "denied", "failed"] as const) {
-    test(`copies detail fields and server addresses (${mode})`, async ({
+    test(`copies safe detail fields without exposing server address copy (${mode})`, async ({
       page,
     }) => {
       await page.addInitScript((mode) => {
@@ -238,9 +242,9 @@ test.describe("interactions and data states", () => {
       await dialog
         .getByRole("button", { name: "复制完整名称", exact: true })
         .click();
-      await dialog
-        .getByRole("button", { name: "复制服务器地址", exact: true })
-        .click();
+      await expect(
+        dialog.getByRole("button", { name: "复制服务器地址", exact: true }),
+      ).toHaveCount(0);
       await expect
         .poll(() =>
           page.evaluate(
@@ -249,12 +253,12 @@ test.describe("interactions and data states", () => {
                 .clipboardWrites,
           ),
         )
-        .toEqual(["tcp", "Node 63", "node-63.example.org:443"]);
+        .toEqual(["tcp", "Node 63"]);
       await expect(dialog.locator("textarea")).toHaveCount(0);
     });
   }
 
-  test("shows column preferences and downloads the complete subscription", async ({
+  test("shows column preferences and hides subscription downloads", async ({
     page,
   }) => {
     await page.getByRole("button", { name: "显示列" }).click();
@@ -263,19 +267,9 @@ test.describe("interactions and data states", () => {
       .click();
     await page.keyboard.press("Escape");
     await expect(page.locator('th[data-column="ipSource"]')).toHaveCount(0);
-    await page.route("**/api/download/clash", (route) =>
-      fulfillRoute(route, {
-        contentType: "application/yaml",
-        body: "proxies: []\n",
-      }),
-    );
-    await page.getByRole("button", { name: "下载订阅", exact: true }).click();
     await expect(
-      page.getByText("包含文件中的全部节点，不受当前筛选影响。"),
-    ).toBeVisible();
-    const pending = page.waitForEvent("download");
-    await page.getByRole("menuitem", { name: /Clash 节点/ }).click();
-    expect((await pending).suggestedFilename()).toBe("all.yaml");
+      page.getByRole("button", { name: "下载订阅", exact: true }),
+    ).toHaveCount(0);
   });
 
   test("retains previous results after refresh fails", async ({ page }) => {

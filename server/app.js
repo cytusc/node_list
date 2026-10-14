@@ -1,20 +1,19 @@
 import express from "express";
 import { parseResultsQuery, paginateResults } from "./results-query.js";
-import { stat } from "node:fs/promises";
 import path from "node:path";
 import { createStore } from "./store.js";
 import { startIPPureCollector } from "./ippure.js";
 import { startQilanSource } from "./qilan-source.js";
 
-export const downloads = {
-  clash: { file: "all.yaml", label: "Clash 节点", type: "application/yaml" },
-  mihomo: {
-    file: "mihomo.yaml",
-    label: "Mihomo 配置",
-    type: "application/yaml",
-  },
-  base64: { file: "base64.txt", label: "Base64 订阅", type: "text/plain" },
-};
+function publicSnapshot(snapshot) {
+  if (!snapshot) return snapshot;
+  return {
+    ...snapshot,
+    nodes: snapshot.nodes.map(
+      ({ rawLink: _rawLink, rawConfig: _rawConfig, ...node }) => node,
+    ),
+  };
+}
 
 export function createApp({
   subDir,
@@ -144,9 +143,11 @@ export function createApp({
           : await store.get(id === undefined ? undefined : Number(id));
       if (snapshot)
         return res.json({
-          ...(query && !databasePage
-            ? paginateResults(snapshot, query)
-            : snapshot),
+          ...publicSnapshot(
+            query && !databasePage
+              ? paginateResults(snapshot, query)
+              : snapshot,
+          ),
           ippureCollector: collector?.status() || { enabled: false },
         });
       if (id !== undefined)
@@ -166,39 +167,12 @@ export function createApp({
       });
     }
   });
-  app.get("/api/downloads", async (_req, res) => {
-    res.set("Cache-Control", "no-store");
-    res.json(
-      await Promise.all(
-        Object.entries(downloads).map(async ([id, item]) => {
-          try {
-            const info = await stat(path.join(subDir, "output", item.file));
-            return {
-              id,
-              label: item.label,
-              available: info.isFile(),
-              updatedAt: info.mtime.toISOString(),
-            };
-          } catch {
-            return { id, label: item.label, available: false };
-          }
-        }),
-      ),
-    );
-  });
-  app.get("/api/download/:format", async (req, res) => {
-    const item = Object.hasOwn(downloads, req.params.format)
-      ? downloads[req.params.format]
-      : null;
-    if (!item) return res.status(404).json({ error: "不支持的订阅格式。" });
-    res.set("Cache-Control", "no-store");
-    res.download(path.join(subDir, "output", item.file), item.file, (error) => {
-      if (error && !res.headersSent)
-        res.status(404).json({
-          error: "该订阅文件尚未生成，请等待 subs-check 完成检测与转换。",
-        });
-    });
-  });
+  app.use("/api/downloads", (_req, res) =>
+    res.status(404).json({ error: "订阅下载暂不可用。" }),
+  );
+  app.use("/api/download", (_req, res) =>
+    res.status(404).json({ error: "订阅下载暂不可用。" }),
+  );
   app.use("/api", (_req, res) =>
     res.status(404).json({ error: "接口不存在。" }),
   );
