@@ -110,6 +110,47 @@ export async function initializeResultsProjection(pool) {
   }
 }
 
+// Panel membership churn is not a retirement signal: patrol only retires whole
+// sources (GitHub unreachable), so a node that simply left its panel would sit
+// in the results view as 待检测 forever — the probe queue can never catch up
+// because every new batch refills the live queue ahead of departed identities.
+// Hide identities absent from every snapshot for longer than their source
+// cadence tolerates; a returning node reappears on its next import.
+// Thresholds: Qilan imports every 15 min (3 missed rounds), subs-check every
+// ~2 h (2 missed rounds).
+const DEPARTED_QILAN_MS = 45 * 60 * 1000;
+const DEPARTED_SUBS_MS = 4 * 60 * 60 * 1000;
+
+export function filterDepartedNodes(nodes, snapshots) {
+  if (!snapshots.length) return nodes;
+  const lastSeen = new Map();
+  const source = new Map();
+  let referenceAt = -Infinity;
+  for (const row of snapshots) {
+    const at = Date.parse(row.importedAt);
+    if (!Number.isFinite(at)) continue;
+    referenceAt = Math.max(referenceAt, at);
+    const kind = row.snapshot?.nodes?.[0]?.subTag === "Qilan" ? "qilan" : "subs";
+    for (const identity of row.nodeIdentities) {
+      const previous = lastSeen.get(identity);
+      if (previous === undefined || at > previous) {
+        lastSeen.set(identity, at);
+        source.set(identity, kind);
+      }
+    }
+  }
+  if (referenceAt === -Infinity) return nodes;
+  return nodes.filter((node) => {
+    const seen = lastSeen.get(aggregateIdentity(node));
+    if (seen === undefined) return true;
+    const limit =
+      source.get(aggregateIdentity(node)) === "qilan"
+        ? DEPARTED_QILAN_MS
+        : DEPARTED_SUBS_MS;
+    return referenceAt - seen <= limit;
+  });
+}
+
 function projectionRows(snapshot) {
   const rows = snapshot.nodes.map((node, position) => ({
     position,
@@ -241,8 +282,17 @@ export async function refreshResultsProjection(pool, cache = {}) {
       retiredNodes: async () => retired,
     });
     const snapshot = await store.aggregate();
-    const nodes = snapshot ? projectionRows(snapshot) : [];
-    const metadata = snapshot ? resultsMetadata(snapshot) : null;
+    // Departure filtering feeds both the rows and the facets so filter counts
+    // always match the visible list.
+    const visibleNodes = snapshot
+      ? filterDepartedNodes(snapshot.nodes, allRows.values())
+      : [];
+    const nodes = snapshot
+      ? projectionRows({ ...snapshot, nodes: visibleNodes })
+      : [];
+    const metadata = snapshot
+      ? resultsMetadata({ ...snapshot, nodes: visibleNodes })
+      : null;
     const projection = new Map(
       nodes.map((row) => [row.position, JSON.stringify(row)]),
     );

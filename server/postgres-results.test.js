@@ -4,6 +4,7 @@ import pg from "pg";
 import { createPostgresStore } from "./postgres-store.js";
 import { aggregateIdentity } from "./node-sources.js";
 import {
+  filterDepartedNodes,
   pruneOldSnapshots,
   refreshResultsProjection,
 } from "./postgres-results.js";
@@ -435,3 +436,51 @@ test(
     );
   },
 );
+
+test("departed panel members leave the results view while live and returning nodes stay", () => {
+  const base = Date.parse("2026-10-14T22:00:00.000Z");
+  const ago = (minutes) => new Date(base - minutes * 60000).toISOString();
+  const make = (name) => ({
+    name,
+    type: "vless",
+    server: `${name}.example`,
+    port: 443,
+    rawConfig: {
+      name,
+      type: "vless",
+      server: `${name}.example`,
+      port: 443,
+      uuid: "u",
+    },
+  });
+  const goneLong = make("gone-long");
+  const returning = make("returning");
+  const live = make("live");
+  const subsStale = make("subs-stale");
+  const subsGone = make("subs-gone");
+  const neverSeen = make("never-seen");
+  const row = (id, minutes, kind, nodes) => ({
+    id,
+    importedAt: ago(minutes),
+    snapshot: {
+      nodes: [{ subTag: kind === "qilan" ? "Qilan" : undefined }, ...nodes],
+    },
+    nodeIdentities: nodes.map(aggregateIdentity),
+  });
+  const snapshots = [
+    row(1, 180, "qilan", [goneLong, returning]),
+    row(2, 300, "subs", [subsGone]),
+    row(3, 40, "subs", [subsStale]),
+    row(4, 20, "qilan", [returning, live]),
+  ];
+  const nodes = [goneLong, subsGone, subsStale, returning, live, neverSeen];
+  const kept = filterDepartedNodes(nodes, snapshots)
+    .map((node) => node.name)
+    .sort();
+  // Qilan absent for 3 h (> 45 min) and subs absent for 5 h (> 4 h) drop;
+  // a subs node missing one round stays; the reference time is the newest
+  // import, not the wall clock, so backfilled snapshots behave identically.
+  assert.deepEqual(kept, ["live", "never-seen", "returning", "subs-stale"]);
+  // Empty snapshot history keeps every row.
+  assert.deepEqual(filterDepartedNodes(nodes, []), nodes);
+});
