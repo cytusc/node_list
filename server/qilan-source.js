@@ -124,6 +124,14 @@ export async function fetchQilanSnapshot({
     await sleep(300);
   }
   if (!nodes.size) throw new Error("Qilan returned no usable nodes");
+  // A stale session silently degrades the API: nodes still come back but the
+  // link field is stripped from every one of them. Archiving that payload
+  // would flood snapshots with unprobeable nodes, so treat it as an auth
+  // failure and keep the previous snapshot instead.
+  if (![...nodes.values()].some(({ node }) => node.rawLink))
+    throw new Error(
+      "Qilan session rejected: nodes returned without share links (stale session?)",
+    );
   return {
     checkedAt: newestCheck
       ? new Date(newestCheck).toISOString()

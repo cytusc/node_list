@@ -50,6 +50,21 @@ test("Qilan rejects a failed later page without publishing a partial snapshot", 
   assert.equal(requests, 2);
 });
 
+test("Qilan rejects a degraded session that strips every share link", async () => {
+  let requests = 0;
+  await assert.rejects(fetchQilanSnapshot({
+    session: "stale-cookie", sleep: async () => {},
+    fetchImpl: async () => {
+      requests++;
+      return { ok: true, status: 200, json: async () => ({
+        total: 50,
+        data: Array.from({ length: 50 }, (_, i) => ({ ...item(i + 1), link: "" })),
+      }) };
+    },
+  }), /stale session/);
+  assert.equal(requests, 1); // no retry loop against a degraded session
+});
+
 test("Qilan deduplicates connections across pages and keeps the newest check", async () => {
   const older = item(1);
   const newer = {
