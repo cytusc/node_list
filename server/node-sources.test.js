@@ -40,7 +40,12 @@ for (const backend of ["sqlite", "postgres"]) {
     { skip: backend === "postgres" && !process.env.TEST_POSTGRES_URL },
     async (t) => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "node-source-test-"));
-      t.after(() => rm(dir, { recursive: true, force: true }));
+      // Close before removing: hooks run in registration order and an open
+      // SQLite directory cannot be deleted on Windows (EBUSY).
+      t.after(async () => {
+        await store.close();
+        await rm(dir, { recursive: true, force: true });
+      });
       const file = path.join(dir, "results.json");
       const clashFile = path.join(dir, "all.yaml");
       const linksFile = path.join(dir, "base64.txt");
@@ -65,7 +70,6 @@ for (const backend of ["sqlite", "postgres"]) {
           ? createStore(path.join(dir, "history.sqlite"))
           : createPostgresStore(config);
       let store = await open();
-      t.after(() => store.close());
       const write = (checkedAt, nodes) =>
         writeFile(file, JSON.stringify({ checkedAt, speedTest: true, nodes }));
       const unknown = { ...node, name: "Lost", server: "lost.example" };

@@ -445,8 +445,11 @@ test("IPPure saves per-node results, retries failures without rechecking success
       JSON.stringify({ ...snapshot, checkedAt: "2026-10-11T01:00:00Z" }),
     );
     await store.sync(file);
+    // The fresh batch itself carries no result — enabling is per row — but the
+    // connection did not change, so the aggregate keeps its latest exit data
+    // instead of falling back to 待检测 until the next probe.
     assert.equal((await store.get()).nodes[0].ippure, undefined);
-    assert.equal((await store.aggregate()).nodes[0].ippure, undefined);
+    assert.equal((await store.aggregate()).nodes[0].ippure.score, 32);
     assert.equal((await store.get(first.id)).nodes[0].ippure.score, 32);
     assert.equal((await store.history(10, 0)).total, 2);
   } finally {

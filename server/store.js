@@ -560,7 +560,12 @@ export function createSnapshotStore(adapter) {
       const latestEnrichments = new Map();
       for (const batch of batches)
         for (const node of batch.nodes) {
-          if (!node.ippure || node.rawConfig || !node.rawLink) continue;
+          // Detected nodes whose credentials identify them by their own
+          // configuration (subs-check batches) never had this carry-over, so
+          // every new batch demoted them to 待检测 even though nothing about
+          // the connection changed. Enrichment follows the identity for every
+          // source; a changed configuration yields a new identity anyway.
+          if (!node.ippure) continue;
           const key = identity(node),
             previous = latestEnrichments.get(key);
           if (
@@ -571,7 +576,6 @@ export function createSnapshotStore(adapter) {
             latestEnrichments.set(key, node.ippure);
         }
       for (const node of result) {
-        if (node.rawConfig || !node.rawLink) continue;
         const saved = latestEnrichments.get(identity(node));
         if (saved) node.ippure = saved;
       }

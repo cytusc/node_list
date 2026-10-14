@@ -8,7 +8,12 @@ import { summarizeProxy, aggregateIdentity } from "./node-sources.js";
 
 test("retired nodes stay hidden from current and aggregate views and IP checks", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "retired-nodes-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  // Removal must follow the store close: hooks run in registration order, and
+  // deleting a still-open SQLite directory fails on Windows with EBUSY.
+  t.after(async () => {
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
   const proxy = {
     name: "unreachable",
     type: "http",
@@ -17,7 +22,6 @@ test("retired nodes stay hidden from current and aggregate views and IP checks",
   };
   const file = path.join(dir, "results.json");
   const store = createStore(path.join(dir, "store.sqlite"));
-  t.after(() => store.close());
   await writeFile(
     file,
     JSON.stringify({ nodes: [{ ...summarizeProxy(proxy), rawConfig: proxy }] }),
@@ -266,4 +270,50 @@ test("unchanged files skip repeated import work and failed imports retry after r
   assert.equal(inserts, 3);
   await rm(file);
   await assert.rejects(store.sync(file), { code: "ENOENT" });
+});
+
+test("a configuration node keeps its last probe result when a later batch archives it again", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "config-enrichment-"));
+  // Close before removing: hooks run in registration order and an open SQLite
+  // directory cannot be deleted on Windows (EBUSY).
+  t.after(async () => {
+    await store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const proxy = {
+    name: "stable",
+    type: "http",
+    server: "stable.example",
+    port: 443,
+  };
+  const file = path.join(dir, "results.json");
+  const store = createStore(path.join(dir, "store.sqlite"));
+  const write = (extra) =>
+    writeFile(
+      file,
+      JSON.stringify({
+        checkedAt: "2026-10-14T00:00:00Z",
+        nodes: [{ ...summarizeProxy(proxy), rawConfig: proxy, ...extra }],
+      }),
+    );
+  await write({});
+  await store.sync(file);
+  const first = await store.get();
+  await store.saveIPPure(first.id, 0, {
+    status: "success",
+    ip: "192.0.2.31",
+    exitIPVersion: 3,
+    checkedAt: "2026-10-14T00:10:00Z",
+  });
+  assert.equal((await store.get()).nodes[0].ippure.ip, "192.0.2.31");
+  // A new detection batch archives the same connection again. Nothing about
+  // the connection changed, so the previous exit result must stay visible
+  // instead of demoting the node to 待检测 for the next two hours.
+  await write({ speed: 2048 });
+  await store.sync(file);
+  assert.equal((await store.history(10, 0)).total, 2);
+  const aggregate = await store.aggregate();
+  assert.equal(aggregate.nodes.length, 1);
+  assert.equal(aggregate.nodes[0].speed, 2048);
+  assert.equal(aggregate.nodes[0].ippure.ip, "192.0.2.31");
 });

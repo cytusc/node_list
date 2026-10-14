@@ -209,3 +209,87 @@ test("Qilan non-session failures do not push a Feishu alert", async () => {
     await store.close();
   }
 });
+
+test("a throttled short member list is retried and then rejected instead of published", async () => {
+  const requests = [];
+  await assert.rejects(fetchQilanSnapshot({
+    session: "test-cookie",
+    sleep: async () => {},
+    fetchImpl: async (url) => {
+      requests.push(Number(url.searchParams.get("page")));
+      // Upstream throttles: a 900-member panel answers with 50 rows a page and
+      // still reports the real total.
+      return { ok: true, status: 200, json: async () => ({
+        total: 900,
+        data: Array.from({ length: 50 }, (_, i) => item(i + 1)),
+      }) };
+    },
+  }), /incomplete node page set/);
+  // Same page retried twice more before the round is abandoned; nothing beyond
+  // page 1 is requested because a truncated round must never be archived.
+  assert.deepEqual(requests, [1, 1, 1]);
+});
+
+test("a genuine last short page is not retried", async () => {
+  const requests = [];
+  const snapshot = await fetchQilanSnapshot({
+    session: "test-cookie",
+    sleep: async () => {},
+    fetchImpl: async (url) => {
+      requests.push(Number(url.searchParams.get("page")));
+      return { ok: true, status: 200, json: async () => ({
+        total: 150,
+        data: Array.from({ length: 150 }, (_, i) => item(i + 1)),
+      }) };
+    },
+  });
+  assert.deepEqual(requests, [1]);
+  assert.equal(snapshot.nodes.length, 150);
+});
+
+test("a collapsed member round is discarded and alerted once", async () => {
+  const messages = [];
+  const store = createStore();
+  let throttled = false;
+  const source = startQilanSource({
+    store,
+    session: "test-cookie",
+    intervalMs: 60_000,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        total: throttled ? 50 : 200,
+        data: Array.from(
+          { length: throttled ? 50 : 200 },
+          (_, i) => item(i + 1),
+        ),
+      }),
+    }),
+    notify: async (message) => {
+      messages.push(message);
+      return true;
+    },
+  });
+  try {
+    await source.refresh();
+    assert.equal((await store.aggregate()).nodes.length, 200);
+    assert.equal(messages.length, 0);
+    throttled = true;
+    await source.refresh();
+    // The degraded round never reaches the store; the panel stays whole.
+    assert.equal((await store.history(10, 0)).total, 1);
+    assert.equal((await store.aggregate()).nodes.length, 200);
+    assert.equal(messages.length, 1);
+    assert.match(messages[0], /成员数骤降/);
+    await source.refresh(); // still throttled: edge-triggered, one alert
+    assert.equal(messages.length, 1);
+    throttled = false;
+    await source.refresh();
+    assert.equal(messages.length, 2);
+    assert.match(messages[1], /抓取已恢复正常/);
+  } finally {
+    await source.close();
+    await store.close();
+  }
+});
