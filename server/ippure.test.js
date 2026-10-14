@@ -1420,6 +1420,7 @@ test("fourth exit-IP failure retires the node when the run has a healthy control
       return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
     },
     query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+    githubProbe: async () => false,
   });
   t.after(() => collector.close());
   // The never-checked node succeeds first and proves the transport healthy;
@@ -1432,6 +1433,77 @@ test("fourth exit-IP failure retires the node when the run has a healthy control
   // Retired identities leave the collection queue entirely.
   await collector.run();
   assert.deepEqual(calls, ["fresh", "stuck"]);
+});
+
+test("a fourth exit-IP failure keeps a GitHub-reachable node in the fleet", async (t) => {
+  const stuck = {
+    name: "stuck",
+    type: "vless",
+    server: "stuck.example",
+    port: "443",
+    rawLink:
+      "vless://42345678-1234-1234-1234-123456789abc@stuck.example:443",
+    ippure: {
+      status: "error",
+      failureStage: "exit-ip",
+      attempts: 3,
+      checkedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      queryMode: "specified-exit",
+      exitIPMode: "proxy-echo",
+      transportMode: "http",
+      signatureVersion: 2,
+      exitIPVersion: 3,
+      exitIPProbeVersion: 1,
+    },
+  };
+  const fresh = {
+    name: "fresh",
+    type: "vless",
+    server: "fresh.example",
+    port: "443",
+    rawLink:
+      "vless://52345678-1234-1234-1234-123456789abc@fresh.example:443",
+  };
+  const nodes = [stuck, fresh],
+    retirements = [],
+    probes = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 1,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      aggregate: async () => ({ nodes }),
+      saveIPPure: async (id, index, result) => {
+        nodes[index].ippure = result;
+      },
+      retiredNodeIdentities: async () => new Set(),
+      retireNodes: async (items, reason) => {
+        retirements.push([items[0].name, reason]);
+        return items.length;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, `http://localhost:7891/${p.name}`])),
+    resolveIP: async ({ proxy }) => {
+      if (proxy.name === "stuck") throw new Error("connection reset");
+      return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
+    },
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+    // Echo endpoints are blocked, but the node's own tunnel reaches GitHub.
+    githubProbe: async ({ proxyUrl }) => {
+      probes.push(proxyUrl);
+      return true;
+    },
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.deepEqual(retirements, []);
+  assert.equal(nodes[0].ippure.githubReachable, true);
+  assert.equal(nodes[0].ippure.attempts, 4);
+  assert.equal(nodes[0].ippure.failureStage, "exit-ip");
+  // The corroboration probe dials the stuck node's own isolated listener.
+  assert.equal(probes.length, 1);
+  assert.ok(probes[0].includes("stuck"));
 });
 
 test("exit-IP failures never retire when the whole run is unhealthy", async (t) => {

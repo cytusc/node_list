@@ -142,134 +142,162 @@ function traceCountry(body) {
   return body.match(/^loc=([A-Za-z]{2})\s*$/m)?.[1]?.toUpperCase() || undefined;
 }
 
+// Racing four independent echo services halves the worst-case probe budget:
+// one timeout window covers a whole batch instead of eight sequential dials.
+// Each attempt keeps its own dispatcher, so a failed CONNECT/TLS session
+// never poisons its batch neighbours.
+const EXIT_PROBE_BATCH = 4;
+
+const EXIT_PROBE_SERVICES = [
+  ["https://api-ipv4.ip.sb/ip", "IP.SB"],
+  ["https://checkip.amazonaws.com/", "AWS CheckIP"],
+  ["https://api.ipify.org", "ipify"],
+  ["https://ifconfig.me/ip", "ifconfig.me"],
+  ["https://ipv4.icanhazip.com/", "icanhazip"],
+  ["https://www.cloudflare.com/cdn-cgi/trace", "Cloudflare", "trace"],
+  ["https://api.ip.sb/ip", "IP.SB"],
+  ["https://icanhazip.com/", "icanhazip"],
+];
+
 export async function resolveExitIPInfo(options) {
   options.signal?.throwIfAborted();
   if (!options.proxyUrl) throw new Error("IPPure 缺少隔离代理入口");
-  let ipv6;
-  // IPPure's risk endpoint accepts IPv4 only. Every public IP echo request
-  // stays on the node; independent providers cover destination filtering.
+  // A remembered endpoint for this node goes first: echo reachability is a
+  // property of the exit, so the previous winner usually wins again.
+  const preferred = new Set(options.preferredEndpoints || []);
   const services = [
-    ["https://api-ipv4.ip.sb/ip", "IP.SB"],
-    ["https://checkip.amazonaws.com/", "AWS CheckIP"],
-    ["https://api.ipify.org", "ipify"],
-    ["https://ifconfig.me/ip", "ifconfig.me"],
-    ["https://ipv4.icanhazip.com/", "icanhazip"],
-    ["https://www.cloudflare.com/cdn-cgi/trace", "Cloudflare", "trace"],
-    ["https://api.ip.sb/ip", "IP.SB"],
-    ["https://icanhazip.com/", "icanhazip"],
+    ...EXIT_PROBE_SERVICES.filter(([url]) => preferred.has(url)),
+    ...EXIT_PROBE_SERVICES.filter(([url]) => !preferred.has(url)),
   ];
-  // A failed CONNECT/TLS session must not poison a fallback request. Each
-  // attempt gets its own dispatcher while retaining the same node listener.
-  // Retry the primary IPv4 providers once after exhausting the first pass.
-  const roundsList = [services, services.slice(0, 3)];
+  let ipv6;
+  let failures = 0;
+  let deadStreak = 0;
   // Only unambiguous transport failures count towards the early abort;
   // NETWORK_ERROR is a catch-all and HTTP/TLS/DNS errors can be endpoint
   // specific while the tunnel itself is still alive.
   const transportDead = ["TIMEOUT", "CONNECTION_RESET"];
-  let deadStreak = 0;
-  let earlyAbort = false;
-  rounds: for (const [round, endpoints] of roundsList.entries()) {
-    for (const [url, provider, format] of endpoints) {
-      const started = Date.now();
-      let outcome;
-      try {
-        outcome = await withHTTP(
-          { ...options, timeout: options.timeoutMs ?? 8000 },
-          async (context, signal) => {
-            const response = await context.get(url);
-            try {
-              signal.throwIfAborted();
-              if (!response.ok()) {
-                const error = new Error("出口查询 HTTP 错误");
-                error.exitProbeCode = `HTTP_${response.status()}`;
-                throw error;
-              }
-              const body = (await response.text()).trim();
-              const ip =
-                format === "trace"
-                  ? body
-                      .split(/\r?\n/)
-                      .find((line) => line.startsWith("ip="))
-                      ?.slice(3)
-                      .trim()
-                  : body;
-              if (!isIP(ip || "")) {
-                const error = new Error("出口查询未返回有效 IP");
-                error.exitProbeCode = "INVALID_IP";
-                throw error;
-              }
-              const outcome = { ip, provider, addressFamily: isIP(ip) };
-              if (format === "trace") {
-                outcome.country = traceCountry(body);
-              } else if (outcome.addressFamily === 4) {
-                // One extra request over the already-open tunnel buys the
-                // exit country; a failure here never fails the probe itself.
-                // IPv6 outcomes skip it: IPPure rejects IPv6 anyway, and the
-                // lookup would be wasted whenever a later endpoint yields IPv4.
-                try {
-                  const trace = await context.get(
-                    "https://www.cloudflare.com/cdn-cgi/trace",
-                  );
-                  try {
-                    signal.throwIfAborted();
-                    if (trace.ok())
-                      outcome.country = traceCountry(
-                        (await trace.text()).trim(),
-                      );
-                  } finally {
-                    await trace.dispose();
-                  }
-                } catch {
-                  /* best effort */
-                }
-              }
-              return outcome;
-            } finally {
-              await response.dispose();
+  const probeOne = async ([url, provider, format]) => {
+    const started = Date.now();
+    try {
+      const outcome = await withHTTP(
+        { ...options, timeout: options.timeoutMs ?? 8000 },
+        async (context, signal) => {
+          const response = await context.get(url);
+          try {
+            signal.throwIfAborted();
+            if (!response.ok()) {
+              const error = new Error("出口查询 HTTP 错误");
+              error.exitProbeCode = `HTTP_${response.status()}`;
+              throw error;
             }
-          },
-        );
-      } catch (error) {
-        options.signal?.throwIfAborted();
+            const body = (await response.text()).trim();
+            const ip =
+              format === "trace"
+                ? body
+                    .split(/\r?\n/)
+                    .find((line) => line.startsWith("ip="))
+                    ?.slice(3)
+                    .trim()
+                : body;
+            if (!isIP(ip || "")) {
+              const error = new Error("出口查询未返回有效 IP");
+              error.exitProbeCode = "INVALID_IP";
+              throw error;
+            }
+            const outcome = {
+              ip,
+              provider,
+              addressFamily: isIP(ip),
+              endpoint: url,
+            };
+            if (format === "trace") {
+              outcome.country = traceCountry(body);
+            } else if (outcome.addressFamily === 4) {
+              // One extra request over the already-open tunnel buys the
+              // exit country; a failure here never fails the probe itself.
+              // IPv6 outcomes skip it: IPPure rejects IPv6 anyway, and the
+              // lookup would be wasted whenever a later endpoint yields IPv4.
+              try {
+                const trace = await context.get(
+                  "https://www.cloudflare.com/cdn-cgi/trace",
+                );
+                try {
+                  signal.throwIfAborted();
+                  if (trace.ok())
+                    outcome.country = traceCountry(
+                      (await trace.text()).trim(),
+                    );
+                } finally {
+                  await trace.dispose();
+                }
+              } catch {
+                /* best effort */
+              }
+            }
+            return outcome;
+          } finally {
+            await response.dispose();
+          }
+        },
+      );
+      return { url, provider, started, outcome };
+    } catch (error) {
+      return { url, provider, started, error };
+    }
+  };
+  for (let offset = 0; offset < services.length; offset += EXIT_PROBE_BATCH) {
+    if (offset) options.signal?.throwIfAborted();
+    const batch = services
+      .slice(offset, offset + EXIT_PROBE_BATCH)
+      .map((service) => probeOne(service));
+    // Report in endpoint order so diagnostics stay deterministic even
+    // though the dials race.
+    const attempts = await Promise.all(batch);
+    options.signal?.throwIfAborted();
+    let ipv4Outcome;
+    let transportFailures = 0;
+    let endpointSpecific = false;
+    for (const { url, provider, started, outcome, error } of attempts) {
+      if (error) {
         const code = exitProbeCode(error);
         options.onProbeAttempt?.({
           provider,
           endpoint: url,
-          round: round + 1,
+          round: 1,
           elapsedMs: Date.now() - started,
           outcome: "error",
           code,
         });
-        // A node that resets or times out on two different destinations is
-        // unreachable for every remaining one; stop spending their timeouts.
-        deadStreak = transportDead.includes(code) ? deadStreak + 1 : 0;
-        if (deadStreak >= 2) {
-          earlyAbort = true;
-          break rounds;
-        }
+        if (transportDead.includes(code)) transportFailures++;
+        else endpointSpecific = true;
         continue;
       }
       options.onProbeAttempt?.({
         provider,
         endpoint: url,
-        round: round + 1,
+        round: 1,
         elapsedMs: Date.now() - started,
         outcome: outcome.addressFamily === 4 ? "ipv4" : "ipv6",
       });
-      if (outcome.addressFamily === 4) return outcome;
-      ipv6 ??= outcome;
-      deadStreak = 0;
+      if (outcome.addressFamily === 4) ipv4Outcome ??= outcome;
+      else ipv6 ??= outcome;
     }
+    if (ipv4Outcome) return ipv4Outcome;
+    failures += attempts.filter((attempt) => attempt.error).length;
+    // Endpoint-specific failures prove the tunnel answers per destination;
+    // only uniform transport-level failure across a batch marks it dead.
+    deadStreak = endpointSpecific
+      ? 0
+      : deadStreak + transportFailures;
+    if (deadStreak >= 2) break;
   }
   if (ipv6) return ipv6;
-  if (earlyAbort) {
-    const failure = new Error("节点出口探测连续多次传输级失败，已提前中止");
-    failure.exitIPFailure = true;
-    throw failure;
-  }
-  const failure = new Error(
-    "出口 IP 探测失败：8 个查询入口均未取得有效 IP，已使用新连接重试",
-  );
+  const failure =
+    deadStreak >= 2
+      ? new Error("节点出口探测连续多次传输级失败，已提前中止")
+      : new Error(
+          `出口 IP 探测失败：${failures} 个查询入口均未取得有效 IP`,
+        );
   failure.exitIPFailure = true;
   throw failure;
 }

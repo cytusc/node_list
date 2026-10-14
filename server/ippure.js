@@ -15,6 +15,7 @@ import {
   resolveExitCountry,
   configureProxyBatch,
 } from "./ippure-http.js";
+import { probeGitHub } from "./github-patrol.js";
 export {
   queryIPPure,
   resolveExitIP,
@@ -33,6 +34,7 @@ export function startIPPureCollector({
   query = queryIPPure,
   resolveIP = resolveExitIPInfo,
   resolveCountry = resolveExitCountry,
+  githubProbe = probeGitHub,
   intervalMs = 30000,
 }) {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 10)
@@ -116,6 +118,9 @@ export function startIPPureCollector({
     const unavailable = new Set();
     const ipCache = new Map();
     const asnCache = new Map();
+    // Echo reachability is a per-exit property; remembering the winning
+    // endpoint spares known-good nodes the full batch sweep on later passes.
+    const preferredEndpoints = new Map();
     // Retiring a dead node requires proof the probe infrastructure itself
     // works: any successful result in this run provides that control.
     let healthyRun = false;
@@ -391,6 +396,7 @@ export function startIPPureCollector({
                 ...options,
                 proxyUrl: urls.get(ownProxy),
                 proxy: ownProxy,
+                preferredEndpoints: preferredEndpoints.get(identity) || [],
                 onProbeAttempt: (attempt) => {
                   (result.exitIPAttempts ||= []).push(attempt);
                 },
@@ -419,6 +425,8 @@ export function startIPPureCollector({
             throw new Error("IPPure 无法获取有效的节点出口 IP");
           result.ip = target;
           result.exitIPSource = provider;
+          if (resolved?.endpoint)
+            preferredEndpoints.set(identity, resolved.endpoint);
           if (resolved?.country) result.country = resolved.country;
           result.addressFamily = isIP(target);
           result.queryTarget = target;
@@ -549,10 +557,34 @@ export function startIPPureCollector({
           result.attempts >= 4 &&
           healthyRun
         ) {
-          await store.retireNodes?.(
-            [node],
-            `IPPure: exit-IP probe failed ${result.attempts} times`,
-          );
+          // Echo endpoints can be blocked by the node's own egress while the
+          // transport is fine. Corroborate through the node's own tunnel with
+          // a GitHub probe before retiring, otherwise reachable nodes get
+          // deleted and later revived in a churn loop by the patrol.
+          let transportAlive = false;
+          try {
+            transportAlive = await githubProbe({
+              proxyUrl: urls.get(ownProxy),
+              timeoutMs: 12000,
+              signal: abort.signal,
+            });
+          } catch (error) {
+            if (abort.signal.aborted) return;
+          }
+          if (transportAlive) {
+            if (await snapshotChanged()) return;
+            await store.saveIPPure(
+              snapshotId,
+              index,
+              { ...result, githubReachable: true },
+              identity,
+            );
+          } else {
+            await store.retireNodes?.(
+              [node],
+              `IPPure: exit-IP probe failed ${result.attempts} times`,
+            );
+          }
         }
       };
       // Sliding window: keep `concurrency` jobs in flight, starting the next

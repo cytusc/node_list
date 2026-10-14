@@ -115,7 +115,11 @@ function IPPureMetric({
           : result?.status === "error"
             ? result.ip
               ? "风险查询失败"
-              : "出口探测失败"
+              : result.githubReachable
+                ? "节点可达，探测受限"
+                : result.failureStage === "ippure-query"
+                  ? "风险查询失败"
+                  : "出口探测失败"
             : "待检测"}
       </span>
     );

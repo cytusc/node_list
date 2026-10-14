@@ -14,6 +14,7 @@ export type IPPureResult = {
   country?: string;
   addressFamily?: 4 | 6;
   failureStage?: string;
+  githubReachable?: boolean;
   asn?: string;
   asnOrganization?: string;
   humanPercent?: number | null;
