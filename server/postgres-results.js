@@ -122,11 +122,15 @@ const DEPARTED_QILAN_MS = 45 * 60 * 1000;
 const DEPARTED_SUBS_MS = 4 * 60 * 60 * 1000;
 
 export function filterDepartedNodes(nodes, snapshots) {
-  if (!snapshots.length) return nodes;
+  // Callers pass Map iterators (allRows.values()); materialize once so the
+  // emptiness check and the single pass below cannot silently no-op on an
+  // iterator without .length.
+  const rows = [...snapshots];
+  if (!rows.length) return nodes;
   const lastSeen = new Map();
   const source = new Map();
   let referenceAt = -Infinity;
-  for (const row of snapshots) {
+  for (const row of rows) {
     const at = Date.parse(row.importedAt);
     if (!Number.isFinite(at)) continue;
     referenceAt = Math.max(referenceAt, at);

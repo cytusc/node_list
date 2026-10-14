@@ -483,4 +483,11 @@ test("departed panel members leave the results view while live and returning nod
   assert.deepEqual(kept, ["live", "never-seen", "returning", "subs-stale"]);
   // Empty snapshot history keeps every row.
   assert.deepEqual(filterDepartedNodes(nodes, []), nodes);
+  // Regression: callers pass Map iterators, which have no .length — an
+  // iterator-based emptiness check would silently skip all filtering.
+  const iteratorKept = filterDepartedNodes(nodes, new Map(snapshots.map((row) => [row.id, row])).values())
+    .map((node) => node.name)
+    .sort();
+  assert.deepEqual(iteratorKept, ["live", "never-seen", "returning", "subs-stale"]);
+  assert.deepEqual(filterDepartedNodes(nodes, new Map().values()), nodes);
 });
