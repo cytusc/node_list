@@ -1,5 +1,62 @@
 import { fulfillRoute } from "./results-fixture";
 import { test, expect } from "@playwright/test";
+test("filters IP source and attributes and clears selections", async ({
+  page,
+}) => {
+  const nodes = [
+    { name: "Residential", source: "原生IP", attributes: ["住宅IP", "IPv4"] },
+    { name: "Datacenter", source: "广播IP", attributes: ["机房IP", "IPv4"] },
+    { name: "Broadcast residential", source: "广播IP", attributes: ["住宅IP"] },
+  ].map(({ name, source, attributes }, index) => ({
+    name,
+    type: "http",
+    server: `node-${index}.example`,
+    port: "443",
+    network: "tcp",
+    tls: true,
+    udp: false,
+    speed: 0,
+    ippure: {
+      status: "success",
+      source,
+      attributes,
+      attempts: 1,
+      checkedAt: "2026-10-14T00:00:00Z",
+    },
+  }));
+  await page.route("**/api/results?view=aggregate&**", (route) =>
+    fulfillRoute(route, {
+      json: { speedTest: false, mediaCheck: false, nodes },
+    }),
+  );
+  await page.route("**/api/downloads", (route) =>
+    fulfillRoute(route, { json: [] }),
+  );
+  await page.goto("/");
+  await expect(page.locator(".node-row")).toHaveCount(3);
+  await expect(page.getByRole("button", { name: "连接特性筛选" })).toHaveCount(
+    0,
+  );
+  await page.getByRole("button", { name: "IP 来源筛选", exact: true }).click();
+  await page.getByRole("option", { name: "广播IP" }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".node-row")).toHaveCount(2);
+  await page.getByRole("button", { name: "IP 属性筛选", exact: true }).click();
+  await page.getByRole("option", { name: "住宅IP" }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".node-row")).toHaveCount(1);
+  await expect(page.locator(".node-row")).toContainText(
+    "Broadcast residential",
+  );
+  await page
+    .getByRole("button", { name: "移除筛选 广播IP", exact: true })
+    .click();
+  await expect(page.locator(".node-row")).toHaveCount(2);
+  await page.getByRole("button", { name: "清空筛选", exact: true }).click();
+  await expect(page.locator(".node-row")).toHaveCount(3);
+  await expect(page.locator(".active-filters")).toHaveCount(0);
+});
+
 test("shows stored IPPure fields in desktop details and mobile cards", async ({
   page,
 }) => {

@@ -15,6 +15,7 @@ import {
   resolveExitCountry,
   configureProxyBatch,
 } from "./ippure-http.js";
+import { probeGitHub } from "./github-patrol.js";
 export {
   queryIPPure,
   resolveExitIP,
@@ -33,6 +34,7 @@ export function startIPPureCollector({
   query = queryIPPure,
   resolveIP = resolveExitIPInfo,
   resolveCountry = resolveExitCountry,
+  githubProbe = probeGitHub,
   intervalMs = 30000,
 }) {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 10)
@@ -42,14 +44,26 @@ export function startIPPureCollector({
   let lastError = null;
   let rotation = 0;
   async function collect() {
-    const snapshot = store.getCollectionSnapshot
-      ? await store.getCollectionSnapshot()
-      : await store.get();
+    const context = store.getCollectionContext
+      ? await store.getCollectionContext()
+      : {
+          snapshot:
+            (await store.getCollectionSnapshot?.()) ?? (await store.get()),
+          historical: store.ippureCandidates
+            ? await store.ippureCandidates()
+            : [],
+          aggregate: store.aggregate ? await store.aggregate() : undefined,
+        };
+    const snapshot = context.snapshot;
     if (!snapshot) return;
-    const historical = store.ippureCandidates
-      ? await store.ippureCandidates()
-      : [];
-    const aggregate = store.aggregate ? await store.aggregate() : undefined;
+    const historical = context.historical || [];
+    const aggregate = context.aggregate;
+    const snapshotChanged = async () => {
+      const id = store.latestSnapshotId
+        ? await store.latestSnapshotId()
+        : (await store.get())?.id;
+      return id !== snapshot.id;
+    };
     const visible = new Set(
       (aggregate?.nodes || []).map(
         (node) => `${node.snapshotId}:${aggregateIdentity(node)}`,
@@ -104,6 +118,9 @@ export function startIPPureCollector({
     const unavailable = new Set();
     const ipCache = new Map();
     const asnCache = new Map();
+    // Echo reachability is a per-exit property; remembering the winning
+    // endpoint spares known-good nodes the full batch sweep on later passes.
+    const preferredEndpoints = new Map();
     // Retiring a dead node requires proof the probe infrastructure itself
     // works: any successful result in this run provides that control.
     let healthyRun = false;
@@ -199,33 +216,46 @@ export function startIPPureCollector({
           ? old.checkedAt
           : undefined;
       // Every exit-IP probe burns the full multi-provider timeout budget.
-      // Nodes that keep failing before any exit IP is observed escalate to a
-      // one-day backoff after three attempts, so a backlog of dead nodes
+      // Nodes that keep failing before any exit IP is observed escalate to
+      // a 6-hour and then a one-day backoff, so a backlog of dead nodes
       // cannot starve never-checked ones out of the limited probe windows.
       const exitProbeFailures =
         old?.status === "error" && !old.ip && old.failureStage === "exit-ip";
-      const backoff =
-        exitProbeFailures && attempts >= 3
+      const backoff = exitProbeFailures
+        ? attempts >= 3
           ? 24 * 60 * 60 * 1000
-          : 30 * 60 * 1000;
+          : attempts >= 2
+            ? 6 * 60 * 60 * 1000
+            : 30 * 60 * 1000
+        : 30 * 60 * 1000;
       if (lastAttempt && Date.now() - Date.parse(lastAttempt) < backoff)
         continue;
       // A rewritten subscription may belong to a different detection round.
       const ownProxy = matchProxy(node);
       if (!ownProxy) {
-        if (node.rawLink)
-          await store.saveIPPure(snapshotId, index, {
+        // Persist why the node cannot be probed; otherwise sources that stop
+        // exposing share links leave their nodes as 待检测 forever. The
+        // share-link stage + current version keeps marked instances from
+        // re-entering every round.
+        await store.saveIPPure(
+          snapshotId,
+          index,
+          {
             status: "unsupported",
             checkedAt: new Date().toISOString(),
             attempts: 0,
             failureStage: "share-link",
             shareLinkVersion: SHARE_LINK_VERSION,
-            error: "节点分享链接格式或连接参数不受当前检测服务支持",
-          });
+            error: node.rawLink
+              ? "节点分享链接格式或连接参数不受当前检测服务支持"
+              : "节点缺少可用的连接配置（分享链接为空），无法构造检测通道",
+          },
+          identity,
+        );
         continue;
       }
       jobs.push({
-        identity: aggregateIdentity(node),
+        identity,
         snapshotId,
         index,
         node,
@@ -237,16 +267,18 @@ export function startIPPureCollector({
         shareOnly,
       });
     }
-    for (let offset = 0; offset < jobs.length; offset += concurrency) {
-      if (abort.signal.aborted || (await store.get())?.id !== snapshot.id)
-        return;
+    // One Mihomo reload per wave of concurrency * 3 jobs amortizes the
+    // configuration cost; jobs inside a wave no longer wait at a barrier.
+    const waveSize = concurrency * 3;
+    for (let offset = 0; offset < jobs.length; offset += waveSize) {
+      if (abort.signal.aborted || (await snapshotChanged())) return;
       const retired = store.retiredNodeIdentities
         ? await store.retiredNodeIdentities()
         : new Set();
-      let batch = jobs
-        .slice(offset, offset + concurrency)
+      let waveJobs = jobs
+        .slice(offset, offset + waveSize)
         .filter((job) => !retired.has(job.identity));
-      if (!batch.length) continue;
+      if (!waveJobs.length) continue;
       const donors = working.filter(
         (proxy) =>
           !unavailable.has(proxy) &&
@@ -260,7 +292,7 @@ export function startIPPureCollector({
               (_, i) => donors[(rotation + i) % donors.length],
             );
       let proxies = [
-        ...new Set([...batch.map((job) => job.ownProxy), ...pool]),
+        ...new Set([...waveJobs.map((job) => job.ownProxy), ...pool]),
       ];
       const configureBatch = (selected) =>
         configure({
@@ -275,15 +307,15 @@ export function startIPPureCollector({
         urls = await configureBatch(proxies);
       } catch (error) {
         // A malformed archived link must not prevent every other node in the
-        // batch from being detected. Isolate only explicit configuration errors;
+        // wave from being detected. Isolate only explicit configuration errors;
         // controller outages retain the collector's normal retry behavior.
         if (
           !/代理配置失败 \(HTTP (400|422)\)/.test(error.message) ||
-          !batch.some((job) => job.shareOnly)
+          !waveJobs.some((job) => job.shareOnly)
         )
           throw error;
         const valid = [];
-        for (const job of batch) {
+        for (const job of waveJobs) {
           if (!job.shareOnly) {
             valid.push(job);
             continue;
@@ -294,236 +326,292 @@ export function startIPPureCollector({
           } catch (failure) {
             if (!/代理配置失败 \(HTTP (400|422)\)/.test(failure.message))
               throw failure;
-            await store.saveIPPure(job.snapshotId, job.index, {
-              status: "unsupported",
-              checkedAt: new Date().toISOString(),
-              attempts: 0,
-              failureStage: "share-link",
-              shareLinkVersion: SHARE_LINK_VERSION,
-              error: "节点分享链接配置被当前检测服务拒绝",
-            });
+            await store.saveIPPure(
+              job.snapshotId,
+              job.index,
+              {
+                status: "unsupported",
+                checkedAt: new Date().toISOString(),
+                attempts: 0,
+                failureStage: "share-link",
+                shareLinkVersion: SHARE_LINK_VERSION,
+                error: "节点分享链接配置被当前检测服务拒绝",
+              },
+              job.identity,
+            );
           }
         }
-        batch = valid;
-        if (!batch.length) continue;
-        proxies = [...new Set([...batch.map((job) => job.ownProxy), ...pool])];
+        waveJobs = valid;
+        if (!waveJobs.length) continue;
+        proxies = [
+          ...new Set([...waveJobs.map((job) => job.ownProxy), ...pool]),
+        ];
         urls = await configureBatch(proxies);
       }
-      // A configuration reload happens only after all jobs in this batch finish.
-      const outcomes = await Promise.allSettled(
-        batch.map(
-          async ({
-            snapshotId,
-            index,
-            node,
-            old,
-            currentExitIP,
-            backfill,
-            attempts,
-            ownProxy,
-          }) => {
-            const result = {
-              checkedAt: new Date().toISOString(),
-              attempts: attempts + 1,
-              queryMode: "specified-exit",
-              exitIPMode: "proxy-echo",
-              transportMode: "http",
-              signatureVersion: 2,
-              exitIPVersion: EXIT_IP_VERSION,
-              exitIPProbeVersion: EXIT_IP_PROBE_VERSION,
-            };
-            let failureStage = "exit-ip";
+      // The window starts one job per freed slot instead of waiting for the
+      // whole wave; a rejection still fails the run, but only after every
+      // started job has drained.
+      const runJob = async ({
+        snapshotId,
+        index,
+        node,
+        identity,
+        old,
+        currentExitIP,
+        backfill,
+        attempts,
+        ownProxy,
+      }) => {
+        const result = {
+          checkedAt: new Date().toISOString(),
+          attempts: attempts + 1,
+          queryMode: "specified-exit",
+          exitIPMode: "proxy-echo",
+          transportMode: "http",
+          signatureVersion: 2,
+          exitIPVersion: EXIT_IP_VERSION,
+          exitIPProbeVersion: EXIT_IP_PROBE_VERSION,
+        };
+        let failureStage = "exit-ip";
+        try {
+          const options = {
+            controller,
+            proxyUrl,
+            secret,
+            apiOrigin,
+            asnCache,
+            signal: abort.signal,
+          };
+          const reuseExit =
+            currentExitIP &&
+            typeof old?.ip === "string" &&
+            isIP(old.ip) === 4;
+          const resolved = reuseExit
+            ? {
+                ip: old.ip,
+                provider: old.exitIPSource,
+                country: old.country,
+              }
+            : await resolveIP({
+                ...options,
+                proxyUrl: urls.get(ownProxy),
+                proxy: ownProxy,
+                preferredEndpoints: preferredEndpoints.get(identity) || [],
+                onProbeAttempt: (attempt) => {
+                  (result.exitIPAttempts ||= []).push(attempt);
+                },
+              });
+          // Verified exits probed before country collection keep their IP
+          // without a location; one trace request over the node's own
+          // transport fills it in. Best effort: a dead node retries on
+          // the normal backoff schedule instead of blocking the queue.
+          if (reuseExit && !resolved.country) {
             try {
-              const options = {
-                controller,
-                proxyUrl,
-                secret,
-                apiOrigin,
-                asnCache,
-                signal: abort.signal,
-              };
-              const reuseExit =
-                currentExitIP &&
-                typeof old?.ip === "string" &&
-                isIP(old.ip) === 4;
-              const resolved = reuseExit
-                ? {
-                    ip: old.ip,
-                    provider: old.exitIPSource,
-                    country: old.country,
-                  }
-                : await resolveIP({
-                    ...options,
-                    proxyUrl: urls.get(ownProxy),
-                    proxy: ownProxy,
-                    onProbeAttempt: (attempt) => {
-                      (result.exitIPAttempts ||= []).push(attempt);
-                    },
-                  });
-              // Verified exits probed before country collection keep their IP
-              // without a location; one trace request over the node's own
-              // transport fills it in. Best effort: a dead node retries on
-              // the normal backoff schedule instead of blocking the queue.
-              if (reuseExit && !resolved.country) {
-                try {
-                  resolved.country = await resolveCountry({
-                    ...options,
-                    proxyUrl: urls.get(ownProxy),
-                  });
-                } catch {
-                  /* retried on the next scheduled pass */
-                }
-              }
-              // Injected legacy resolvers return a string; production returns
-              // the address and the service that actually observed it.
-              const { ip: target, provider } =
-                typeof resolved === "string"
-                  ? { ip: resolved, provider: "ip.sb" }
-                  : resolved || {};
-              if (typeof target !== "string" || !isIP(target))
-                throw new Error("IPPure 无法获取有效的节点出口 IP");
-              result.ip = target;
-              result.exitIPSource = provider;
-              if (resolved?.country) result.country = resolved.country;
-              result.addressFamily = isIP(target);
-              result.queryTarget = target;
-              if (result.addressFamily === 6) {
-                result.status = "unsupported";
-                result.failureStage = "unsupported-ipv6";
-                result.error =
-                  "已获取 IPv6 出口，IPPure 风险评分接口暂不支持 IPv6";
-                if (
-                  abort.signal.aborted ||
-                  (await store.get())?.id !== snapshot.id
-                )
-                  return;
-                await store.saveIPPure(snapshotId, index, result);
-                return;
-              }
-              failureStage = "ippure-query";
-              const available = [
-                ...new Set([
-                  ...pool,
-                  ...working.filter((proxy) => proxies.includes(proxy)),
-                ]),
-              ].filter((proxy) => !unavailable.has(proxy));
-              // Bootstrap the pool through a node itself when no usable donor exists.
-              const candidates = available.length
-                ? Array.from(
-                    { length: Math.min(3, available.length) },
-                    (_, offset) =>
-                      available[(rotation + offset) % available.length],
-                  )
-                : [ownProxy];
-              rotation++;
-              const load = async () => {
-                let failure;
-                for (const proxy of candidates) {
-                  try {
-                    const data = await query({
-                      controller,
-                      proxyUrl: urls.get(proxy),
-                      secret,
-                      apiOrigin,
-                      asnCache,
-                      proxy,
-                      target,
-                      signal: abort.signal,
-                    });
+              resolved.country = await resolveCountry({
+                ...options,
+                proxyUrl: urls.get(ownProxy),
+              });
+            } catch {
+              /* retried on the next scheduled pass */
+            }
+          }
+          // Injected legacy resolvers return a string; production returns
+          // the address and the service that actually observed it.
+          const { ip: target, provider } =
+            typeof resolved === "string"
+              ? { ip: resolved, provider: "ip.sb" }
+              : resolved || {};
+          if (typeof target !== "string" || !isIP(target))
+            throw new Error("IPPure 无法获取有效的节点出口 IP");
+          result.ip = target;
+          result.exitIPSource = provider;
+          if (resolved?.endpoint)
+            preferredEndpoints.set(identity, resolved.endpoint);
+          if (resolved?.country) result.country = resolved.country;
+          result.addressFamily = isIP(target);
+          result.queryTarget = target;
+          if (result.addressFamily === 6) {
+            result.status = "unsupported";
+            result.failureStage = "unsupported-ipv6";
+            result.error =
+              "已获取 IPv6 出口，IPPure 风险评分接口暂不支持 IPv6";
+            if (abort.signal.aborted || (await snapshotChanged())) return;
+            await store.saveIPPure(snapshotId, index, result, identity);
+            return;
+          }
+          failureStage = "ippure-query";
+          const available = [
+            ...new Set([
+              ...pool,
+              ...working.filter((proxy) => proxies.includes(proxy)),
+            ]),
+          ].filter((proxy) => !unavailable.has(proxy));
+          // Bootstrap the pool through a node itself when no usable donor exists.
+          const candidates = available.length
+            ? Array.from(
+                { length: Math.min(3, available.length) },
+                (_, offset) =>
+                  available[(rotation + offset) % available.length],
+              )
+            : [ownProxy];
+          rotation++;
+          const load = async () => {
+            let failure;
+            for (const proxy of candidates) {
+              try {
+                const data = await query({
+                  controller,
+                  proxyUrl: urls.get(proxy),
+                  secret,
+                  apiOrigin,
+                  asnCache,
+                  proxy,
+                  target,
+                  signal: abort.signal,
+                });
 
-                    if (!working.includes(proxy)) working.push(proxy);
-                    if (!transportIdentities.has(proxy))
-                      transportIdentities.set(
-                        proxy,
-                        batch.find((job) => job.ownProxy === proxy)?.identity,
-                      );
-                    return data;
-                  } catch (error) {
-                    if (abort.signal.aborted) return;
-                    unavailable.add(proxy);
-                    failure = error;
-                  }
-                }
-                throw failure || new Error("IPPure 没有可用查询代理");
-              };
-              let cached = ipCache.get(target);
-              if (!cached) {
-                cached = load();
-                ipCache.set(target, cached);
-                cached.catch(() => {
-                  if (ipCache.get(target) === cached) ipCache.delete(target);
-                });
-              }
-              Object.assign(result, await cached, { status: "success" });
-              healthyRun = true;
-            } catch (error) {
-              if (abort.signal.aborted) return;
-              if (backfill) {
-                // Keep previously collected metrics if the organization refresh fails.
-                if ((await store.get())?.id !== snapshot.id) return;
-                await store.saveIPPure(snapshotId, index, {
-                  ...old,
-                  signatureVersion: 2,
-                  organizationAttempts:
-                    (old.signatureVersion === 2
-                      ? old.organizationAttempts || 0
-                      : 0) + 1,
-                  organizationCheckedAt: result.checkedAt,
-                });
-                return;
-              }
-              if (
-                failureStage === "exit-ip" &&
-                old?.status === "unsupported" &&
-                currentExitIP &&
-                isIP(old.ip || "") === 6
-              ) {
-                // A later unreachable echo service does not erase an observed
-                // IPv6 exit or turn IPv4 scoring support into node failure.
-                Object.assign(result, {
-                  status: "unsupported",
-                  ip: old.ip,
-                  exitIPSource: old.exitIPSource,
-                  addressFamily: 6,
-                  failureStage: "unsupported-ipv6",
-                  error: old.error,
-                });
-              } else {
-                result.status = "error";
-                result.failureStage = failureStage;
-                // Never persist proxy credentials or controller response bodies.
-                result.error =
-                  error.exitIPFailure ||
-                  /IPPure|IP\.SB|代理配置/.test(error.message)
-                    ? error.message.slice(0, 160)
-                    : failureStage === "exit-ip"
-                      ? "节点 IPv4 出口探测失败，请检查节点连接后重试"
-                      : "IPPure 查询代理连接失败，请稍后重试";
+                if (!working.includes(proxy)) working.push(proxy);
+                if (!transportIdentities.has(proxy))
+                  transportIdentities.set(
+                    proxy,
+                    waveJobs.find((job) => job.ownProxy === proxy)?.identity,
+                  );
+                return data;
+              } catch (error) {
+                if (abort.signal.aborted) return;
+                unavailable.add(proxy);
+                failure = error;
               }
             }
-            if (abort.signal.aborted || (await store.get())?.id !== snapshot.id)
-              return;
-            await store.saveIPPure(snapshotId, index, result);
-            // Three fast retries plus a one-day-later recheck that still
-            // cannot yield any exit IP means the node is dead; retire it so
-            // it leaves both the display and the collection queue. A later
-            // patrol recheck restores revived nodes.
-            if (
-              result.status === "error" &&
-              result.failureStage === "exit-ip" &&
-              result.attempts >= 4 &&
-              healthyRun
-            ) {
-              await store.retireNodes?.(
-                [node],
-                `IPPure: exit-IP probe failed ${result.attempts} times`,
-              );
-            }
-          },
-        ),
+            throw failure || new Error("IPPure 没有可用查询代理");
+          };
+          let cached = ipCache.get(target);
+          if (!cached) {
+            cached = load();
+            ipCache.set(target, cached);
+            cached.catch(() => {
+              if (ipCache.get(target) === cached) ipCache.delete(target);
+            });
+          }
+          Object.assign(result, await cached, { status: "success" });
+          healthyRun = true;
+        } catch (error) {
+          if (abort.signal.aborted) return;
+          if (backfill) {
+            // Keep previously collected metrics if the organization refresh fails.
+            if (await snapshotChanged()) return;
+            await store.saveIPPure(
+              snapshotId,
+              index,
+              {
+                ...old,
+                signatureVersion: 2,
+                organizationAttempts:
+                  (old.signatureVersion === 2
+                    ? old.organizationAttempts || 0
+                    : 0) + 1,
+                organizationCheckedAt: result.checkedAt,
+              },
+              identity,
+            );
+            return;
+          }
+          if (
+            failureStage === "exit-ip" &&
+            old?.status === "unsupported" &&
+            currentExitIP &&
+            isIP(old.ip || "") === 6
+          ) {
+            // A later unreachable echo service does not erase an observed
+            // IPv6 exit or turn IPv4 scoring support into node failure.
+            Object.assign(result, {
+              status: "unsupported",
+              ip: old.ip,
+              exitIPSource: old.exitIPSource,
+              addressFamily: 6,
+              failureStage: "unsupported-ipv6",
+              error: old.error,
+            });
+          } else {
+            result.status = "error";
+            result.failureStage = failureStage;
+            // Never persist proxy credentials or controller response bodies.
+            result.error =
+              error.exitIPFailure ||
+              /IPPure|IP\.SB|代理配置/.test(error.message)
+                ? error.message.slice(0, 160)
+                : failureStage === "exit-ip"
+                  ? "节点 IPv4 出口探测失败，请检查节点连接后重试"
+                  : "IPPure 查询代理连接失败，请稍后重试";
+          }
+        }
+        if (abort.signal.aborted || (await snapshotChanged())) return;
+        await store.saveIPPure(snapshotId, index, result, identity);
+        // Three fast retries plus a one-day-later recheck that still
+        // cannot yield any exit IP means the node is dead; retire it so
+        // it leaves both the display and the collection queue. A later
+        // patrol recheck restores revived nodes.
+        if (
+          result.status === "error" &&
+          result.failureStage === "exit-ip" &&
+          result.attempts >= 4 &&
+          healthyRun
+        ) {
+          // Echo endpoints can be blocked by the node's own egress while the
+          // transport is fine. Corroborate through the node's own tunnel with
+          // a GitHub probe before retiring, otherwise reachable nodes get
+          // deleted and later revived in a churn loop by the patrol.
+          let transportAlive = false;
+          try {
+            transportAlive = await githubProbe({
+              proxyUrl: urls.get(ownProxy),
+              timeoutMs: 12000,
+              signal: abort.signal,
+            });
+          } catch (error) {
+            if (abort.signal.aborted) return;
+          }
+          if (transportAlive) {
+            if (await snapshotChanged()) return;
+            await store.saveIPPure(
+              snapshotId,
+              index,
+              { ...result, githubReachable: true },
+              identity,
+            );
+          } else {
+            await store.retireNodes?.(
+              [node],
+              `IPPure: exit-IP probe failed ${result.attempts} times`,
+            );
+          }
+        }
+      };
+      // Sliding window: keep `concurrency` jobs in flight, starting the next
+      // one as soon as a slot frees up instead of waiting at a wave barrier.
+      let next = 0;
+      let rejection;
+      const worker = async () => {
+        while (next < waveJobs.length) {
+          const job = waveJobs[next++];
+          // Retirements can happen while earlier wave jobs run; recheck
+          // before spending a probe window on an already retired node.
+          if (
+            store.retiredNodeIdentities &&
+            (await store.retiredNodeIdentities()).has(job.identity)
+          )
+            continue;
+          try {
+            await runJob(job);
+          } catch (error) {
+            rejection ??= error;
+          }
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(concurrency, waveJobs.length) }, worker),
       );
-      const failed = outcomes.find((outcome) => outcome.status === "rejected");
-      if (failed) throw failed.reason;
+      if (rejection) throw rejection;
     }
   }
   const run = () => {
@@ -532,9 +620,13 @@ export function startIPPureCollector({
         .then(() => {
           lastError = null;
         })
-        .catch(() => {
-          lastError =
-            "IPPure 采集暂时不可用，请检查订阅文件、数据库与检测服务配置";
+        .catch((error) => {
+          // Expose the cause without persisting proxy credentials or
+          // controller response bodies that can ride on other messages.
+          const message = error?.message || "";
+          lastError = /IPPure|IP\.SB|代理配置|timeout/i.test(message)
+            ? `IPPure 采集暂时不可用：${message.slice(0, 160)}`
+            : "IPPure 采集暂时不可用，请检查订阅文件、数据库与检测服务配置";
         })
         .finally(() => {
           pending = null;

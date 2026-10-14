@@ -24,6 +24,11 @@ export async function probeGitHub({ proxyUrl, timeoutMs, signal }) {
   }
 }
 
+// One shared constant: recovery matches retired rows by this exact reason,
+// so any wording change must land here and at both retire call sites.
+export const PATROL_RETIRE_REASON =
+  "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed";
+
 export async function patrolOnce({
   store,
   controller,
@@ -140,10 +145,7 @@ export async function patrolOnce({
       const hostOK = confirmed.length && (await probe({ timeoutMs, signal }));
       const proxyOK = hostOK && control && (await check(control));
       if (proxyOK) {
-        summary.retired += await store.retireNodes(
-          confirmed,
-          "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed",
-        );
+        summary.retired += await store.retireNodes(confirmed, PATROL_RETIRE_REASON);
       } else {
         pending.push(...confirmed);
       }
@@ -167,14 +169,15 @@ export async function recoverRetiredNodes({
   signal,
   state = {},
   now = Date.now(),
-  intervalMs = 7200000,
+  // Half an hour between rounds: two consecutive passes revive a node within
+  // roughly an hour of it coming back, matching the patrol cadence.
+  intervalMs = 1800000,
   timeoutMs = 12000,
   configure = configureProxyBatch,
   probe = probeGitHub,
   onProgress = async () => {},
 }) {
-  const reason =
-    "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed";
+  const reason = PATROL_RETIRE_REASON;
   // IPPure retirements go through the same revival cycle: a node that passes
   // the GitHub probe twice has its transport back and deserves a recheck.
   const retired = (await store.retiredNodes()).filter(
@@ -201,13 +204,21 @@ export async function recoverRetiredNodes({
   for (const row of due) {
     signal.throwIfAborted();
     const node = nodes.get(row.identity);
+    // Recovery probes are the scarcest budget in the fleet: only residential
+    // exits are worth reviving, and datacenter nodes that come back invite
+    // the churn the retirement guards just cleaned up. Nodes without IPPure
+    // attributes (IPPure exit-IP retirements never collected any) stay
+    // retired; a residential node that degrades keeps its old attributes.
+    const residential = node?.ippure?.attributes?.includes("住宅IP");
     let config;
-    try {
-      config =
-        node?.rawConfig ||
-        (node?.rawLink && shareLinkProxy(node.rawLink, node.name));
-    } catch {
-      /* Unsupported archived link. */
+    if (residential) {
+      try {
+        config =
+          node?.rawConfig ||
+          (node?.rawLink && shareLinkProxy(node.rawLink, node.name));
+      } catch {
+        /* Unsupported archived link. */
+      }
     }
     if (!config) {
       summary.skipped++;

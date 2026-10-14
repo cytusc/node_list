@@ -115,7 +115,11 @@ function IPPureMetric({
           : result?.status === "error"
             ? result.ip
               ? "风险查询失败"
-              : "出口探测失败"
+              : result.githubReachable
+                ? "节点可达，探测受限"
+                : result.failureStage === "ippure-query"
+                  ? "风险查询失败"
+                  : "出口探测失败"
             : "待检测"}
       </span>
     );
@@ -265,7 +269,8 @@ export default function App() {
   const [countries, setCountries] = useState<string[]>([]);
   const [types, setTypes] = useState<string[]>([]);
   const [networks, setNetworks] = useState<string[]>([]);
-  const [features, setFeatures] = useState<string[]>([]);
+  const [ipSources, setIpSources] = useState<string[]>([]);
+  const [ipAttributes, setIpAttributes] = useState<string[]>([]);
   const [media, setMedia] = useState<string[]>([]);
   const [minSpeed, setMinSpeed] = useState("");
   const [selected, setSelected] = useState<NodeRecord | null>(null);
@@ -287,7 +292,8 @@ export default function App() {
     countries,
     types,
     networks,
-    features,
+    ipSources,
+    ipAttributes,
     media,
     minSpeed,
     sorting,
@@ -312,7 +318,8 @@ export default function App() {
     ["country", countries],
     ["type", types],
     ["network", networks],
-    ["features", features],
+    ["ipSource", ipSources],
+    ["ipAttributes", ipAttributes],
     ["media", media],
   ] as const) {
     if (values.length) params.set(key, values.join(","));
@@ -396,7 +403,8 @@ export default function App() {
   const regionOptions = snapshot?.facets.country || [];
   const typeOptions = snapshot?.facets.type || [];
   const networkOptions = snapshot?.facets.network || [];
-  const featureOptions = snapshot?.facets.features || [];
+  const ipSourceOptions = snapshot?.facets.ipSource || [];
+  const ipAttributeOptions = snapshot?.facets.ipAttributes || [];
   const mediaOptions = (snapshot?.facets.media || []).map((option) => ({
     ...option,
     label: platforms[option.value] || option.value,
@@ -406,7 +414,8 @@ export default function App() {
     setCountries([]);
     setTypes([]);
     setNetworks([]);
-    setFeatures([]);
+    setIpSources([]);
+    setIpAttributes([]);
     setMedia([]);
     setMinSpeed("");
   };
@@ -414,7 +423,8 @@ export default function App() {
     countries.length +
     types.length +
     networks.length +
-    features.length +
+    ipSources.length +
+    ipAttributes.length +
     media.length +
     Number(!!minSpeed) +
     Number(!!query.trim());
@@ -751,11 +761,18 @@ export default function App() {
                 onChange={setNetworks}
               />
               <FilterMenu
-                label="连接特性"
+                label="IP 来源"
+                icon={<Globe2 className="size-4" />}
+                options={ipSourceOptions}
+                selected={ipSources}
+                onChange={setIpSources}
+              />
+              <FilterMenu
+                label="IP 属性"
                 icon={<ShieldCheck className="size-4" />}
-                options={featureOptions}
-                selected={features}
-                onChange={setFeatures}
+                options={ipAttributeOptions}
+                selected={ipAttributes}
+                onChange={setIpAttributes}
               />
               {snapshot?.mediaCheck && (
                 <FilterMenu
@@ -843,9 +860,14 @@ export default function App() {
                     label: (v: string) => v.toUpperCase(),
                   },
                   {
-                    values: features,
-                    set: setFeatures,
-                    label: (v: string) => v.toUpperCase(),
+                    values: ipSources,
+                    set: setIpSources,
+                    label: (v: string) => v,
+                  },
+                  {
+                    values: ipAttributes,
+                    set: setIpAttributes,
+                    label: (v: string) => v,
                   },
                   {
                     values: media,

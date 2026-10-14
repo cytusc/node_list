@@ -87,6 +87,10 @@ export async function initializeResultsProjection(pool) {
           RETURN NULL;
         END $$;
     `);
+    // Rebuild persisted facets once when upgrading from the older metadata format.
+    await client.query(`UPDATE node_explorer_results_state SET built_revision = -1
+      WHERE metadata IS NOT NULL AND NOT (metadata->'facets' ? 'ipSource'
+        AND metadata->'facets' ? 'ipAttributes')`);
     for (const table of ["snapshots", "ippure_results", "retired_nodes"]) {
       const name = `node_explorer_${table}`;
       await client.query(`DO $$ BEGIN
@@ -323,6 +327,41 @@ export function cachedSnapshotStore(cache) {
   });
 }
 
+// Snapshot retention is enforced on PostgreSQL only; SQLite deployments manage
+// their own lifecycle. imported_at is an ISO string, so lexicographic
+// comparison against a JS ISO cutoff is exact. Deleting rows fires the
+// results_changed trigger and bumps source_revision, so the projection
+// rebuilds once afterwards — expected and self-healing. Volumes are a few
+// thousand rows, so one delete per table in an implicit transaction is
+// acceptable and avoids long-lived explicit locks.
+export async function pruneOldSnapshots(pool, cache, retentionDays) {
+  if (!(retentionDays > 0)) return { pruned: 0 };
+  // Throttle: at most one successful prune attempt per hour.
+  if (cache.lastPruneAt && Date.now() - cache.lastPruneAt < 3600000)
+    return { pruned: 0 };
+  const cutoff = new Date(
+    Date.now() - retentionDays * 24 * 3600 * 1000,
+  ).toISOString();
+  const ids = (
+    await pool.query(
+      "SELECT id FROM node_explorer_snapshots WHERE imported_at < $1",
+      [cutoff],
+    )
+  ).rows.map((row) => row.id);
+  if (ids.length) {
+    await pool.query(
+      "DELETE FROM node_explorer_ippure_results WHERE snapshot_id = ANY($1::integer[])",
+      [ids],
+    );
+    await pool.query(
+      "DELETE FROM node_explorer_snapshots WHERE id = ANY($1::integer[])",
+      [ids],
+    );
+  }
+  cache.lastPruneAt = Date.now();
+  return { pruned: ids.length };
+}
+
 export async function queryResultsProjection(pool, query) {
   const client = await pool.connect();
   try {
@@ -367,6 +406,17 @@ export async function queryResultsProjection(pool, query) {
     // at the SQL boundary as well. All user values use bound parameters.
     for (const feature of ["tls", "reality", "udp"]) {
       if (query.features.includes(feature)) conditions.push(feature);
+    }
+    if (query.ipSources?.length || query.ipAttributes?.length) {
+      conditions.push("payload::jsonb->'ippure'->>'status' = 'success'");
+      if (query.ipSources?.length)
+        conditions.push(
+          `payload::jsonb->'ippure'->>'source' = ANY(${param(query.ipSources)}::text[])`,
+        );
+      if (query.ipAttributes?.length)
+        conditions.push(
+          `(payload::jsonb->'ippure'->'attributes') ?| ${param(query.ipAttributes)}::text[]`,
+        );
     }
     if (query.q)
       conditions.push(

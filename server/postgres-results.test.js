@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import pg from "pg";
 import { createPostgresStore } from "./postgres-store.js";
 import { aggregateIdentity } from "./node-sources.js";
-import { refreshResultsProjection } from "./postgres-results.js";
+import {
+  pruneOldSnapshots,
+  refreshResultsProjection,
+} from "./postgres-results.js";
 import {
   paginateResults,
   parseResultsQuery,
@@ -121,6 +124,14 @@ test(
       { country: "unknown" },
       { country: "JP", type: "vless" },
       { network: "ws" },
+      { ipSource: "ISP" },
+      { ipSource: "ISP,missing" },
+      { ipAttributes: "住宅" },
+      { ipAttributes: "IPv4,missing" },
+      { ipSource: "ISP", ipAttributes: "住宅", country: "JP" },
+      { ipSource: "missing" },
+      { ipAttributes: "missing" },
+      { ipSource: "' OR 1=1 --" },
       { features: "tls,udp" },
       { features: "reality" },
       { media: "openai,netflix" },
@@ -373,5 +384,54 @@ test(
       json(paginateResults(await f.reference.aggregate(), query)),
     );
     assert.equal((await f.store.get(archived.id)).nodes.length, 0);
+  },
+);
+
+test(
+  "pruneOldSnapshots deletes expired batches once and throttles within the hour",
+  enabled,
+  async (t) => {
+    const f = await fixture(t);
+    await f.store.syncSnapshot({ nodes: [{ name: "Old" }] });
+    await f.store.syncSnapshot({ nodes: [{ name: "Keep" }] });
+    const ids = (
+      await f.admin.query(
+        `SELECT id FROM "${f.schema}".node_explorer_snapshots ORDER BY id`,
+      )
+    ).rows.map((row) => row.id);
+    const pool = new pg.Pool(f.config);
+    t.after(() => pool.end());
+    const cache = {};
+    // Retention disabled.
+    assert.deepEqual(await pruneOldSnapshots(pool, cache, 0), { pruned: 0 });
+    await f.admin.query(
+      `UPDATE "${f.schema}".node_explorer_snapshots SET imported_at = '2020-01-01T00:00:00.000Z' WHERE id = $1`,
+      [ids[0]],
+    );
+    assert.deepEqual(await pruneOldSnapshots(pool, cache, 7), { pruned: 1 });
+    assert.equal(await f.store.latestSnapshotId(), ids[1]);
+    assert.equal(
+      (
+        await f.admin.query(
+          `SELECT COUNT(*)::int AS count FROM "${f.schema}".node_explorer_ippure_results WHERE snapshot_id = $1`,
+          [ids[0]],
+        )
+      ).rows[0].count,
+      0,
+    );
+    // Throttled: a newly expired batch survives until the next window.
+    await f.admin.query(
+      `UPDATE "${f.schema}".node_explorer_snapshots SET imported_at = '2020-01-01T00:00:00.000Z' WHERE id = $1`,
+      [ids[1]],
+    );
+    assert.deepEqual(await pruneOldSnapshots(pool, cache, 7), { pruned: 0 });
+    assert.equal(
+      (
+        await f.admin.query(
+          `SELECT COUNT(*)::int AS count FROM "${f.schema}".node_explorer_snapshots`,
+        )
+      ).rows[0].count,
+      1,
+    );
   },
 );

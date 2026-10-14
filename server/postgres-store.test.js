@@ -76,6 +76,11 @@ test(
     );
     const latest = await (await get("/api/results")).json();
     assert.notEqual(latest.id, old.id);
+    assert.equal(await reopened.latestSnapshotId(), latest.id);
+    const context = await reopened.getCollectionContext();
+    assert.equal(context.snapshot.id, latest.id);
+    assert.deepEqual(context.historical, await reopened.ippureCandidates());
+    assert.ok(Array.isArray(context.aggregate.nodes));
     const history = await (await get("/api/history?limit=1&offset=1")).json();
     assert.equal(history.total, 2);
     assert.equal(history.items[0].id, old.id);

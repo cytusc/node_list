@@ -194,6 +194,54 @@ test("verified exit countries override source-claimed regions in every read path
   }
 });
 
+test("saveIPPure with an explicit identity skips the snapshot payload lookup", async () => {
+  let gets = 0,
+    saved;
+  const store = createSnapshotStore({
+    async get() {
+      gets++;
+      return undefined;
+    },
+    async saveIPPure(id, index, result, identity) {
+      saved = { id, index, result, identity };
+    },
+  });
+  await store.saveIPPure(7, 2, { status: "error" }, "identity-1");
+  assert.equal(gets, 0);
+  assert.deepEqual(saved, {
+    id: 7,
+    index: 2,
+    result: { status: "error" },
+    identity: "identity-1",
+  });
+  // Without an identity the wrapper still resolves it from the snapshot.
+  await store.saveIPPure(7, 2, { status: "error" });
+  assert.equal(gets, 1);
+  assert.equal(saved.identity, "identity-1");
+});
+
+test("latestSnapshotId tracks the newest batch and getCollectionContext batches three reads", async (t) => {
+  const store = createStore();
+  t.after(() => store.close());
+  assert.equal(await store.latestSnapshotId(), undefined);
+  const rawConfig = {
+    name: "batched",
+    type: "http",
+    server: "batched.example",
+    port: 443,
+  };
+  await store.syncSnapshot({
+    nodes: [{ ...summarizeProxy(rawConfig), rawConfig }],
+  });
+  const snapshot = await store.get();
+  assert.equal(await store.latestSnapshotId(), snapshot.id);
+  const context = await store.getCollectionContext();
+  assert.equal(context.snapshot.id, snapshot.id);
+  assert.deepEqual(context.historical, await store.ippureCandidates());
+  const json = (value) => JSON.parse(JSON.stringify(value));
+  assert.deepEqual(json(context.aggregate), json(await store.aggregate()));
+});
+
 test("unchanged files skip repeated import work and failed imports retry after repair", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "import-signature-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

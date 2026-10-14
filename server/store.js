@@ -148,6 +148,11 @@ export function createStore(databasePath = ":memory:") {
             .get()
         : db.prepare("SELECT id, payload FROM snapshots WHERE id = ?").get(id);
     },
+    latestSnapshotId() {
+      return db
+        .prepare("SELECT id FROM snapshots ORDER BY id DESC LIMIT 1")
+        .get()?.id;
+    },
     all() {
       return db
         .prepare(
@@ -397,11 +402,18 @@ export function createSnapshotStore(adapter) {
           refreshAggregate: () => adapter.refreshAggregate(),
         }
       : {}),
-    async saveIPPure(id, index, result) {
+    async saveIPPure(id, index, result, identity) {
+      // Callers that already know the node identity skip the payload lookup.
+      if (identity) return adapter.saveIPPure(id, index, result, identity);
       const row = await adapter.get(id);
       const node = row && JSON.parse(row.payload).nodes[index];
       if (!node) return;
       await adapter.saveIPPure(id, index, result, aggregateIdentity(node));
+    },
+    async latestSnapshotId() {
+      return adapter.latestSnapshotId
+        ? await adapter.latestSnapshotId()
+        : (await adapter.get())?.id;
     },
     async retireNodes(nodes, reason = "GitHub probe failed twice") {
       const identities = [...new Set(nodes.map(aggregateIdentity))];
@@ -466,6 +478,19 @@ export function createSnapshotStore(adapter) {
         preserveIndexes: true,
       });
     },
+    // Collectors batch the three reads behind one refresh round-trip when the
+    // adapter offers it; the fallback keeps SQLite and mock stores usable.
+    ...(adapter.getCollectionContext
+      ? { getCollectionContext: () => adapter.getCollectionContext() }
+      : {
+          async getCollectionContext() {
+            return {
+              snapshot: await this.getCollectionSnapshot(),
+              historical: await this.ippureCandidates(),
+              aggregate: await this.aggregate(),
+            };
+          },
+        }),
     async aggregate({ includeRetired = false } = {}) {
       if (adapter.aggregate) {
         const result = await adapter.aggregate({ includeRetired });

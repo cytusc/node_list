@@ -137,6 +137,7 @@ test("controller outages abort the patrol without retiring nodes", async () => {
 
 function recoveryFixture() {
   const item = node("recoverable");
+  item.ippure = { attributes: ["住宅IP"] };
   const identity = aggregateIdentity(item);
   const retiredAt = "2026-10-12T00:00:00.000Z";
   const automatic = {
@@ -152,7 +153,7 @@ function recoveryFixture() {
   const options = {
     ...f.options,
     state,
-    now: Date.parse(retiredAt) + 7200000,
+    now: Date.parse(retiredAt) + 1800000,
     probe: async () => true,
     store: {
       retiredNodes: async () => [automatic, manual],
@@ -166,10 +167,10 @@ function recoveryFixture() {
       },
     },
   };
-  return { options, state, restored, identity, retiredAt };
+  return { options, state, restored, identity, retiredAt, item };
 }
 
-test("recovery requires two successful rounds two hours apart and persists across restarts", async () => {
+test("recovery requires two successful rounds thirty minutes apart and persists across restarts", async () => {
   const f = recoveryFixture();
   assert.equal(
     (await recoverRetiredNodes({ ...f.options, now: f.options.now - 1 }))
@@ -179,7 +180,7 @@ test("recovery requires two successful rounds two hours apart and persists acros
   assert.equal((await recoverRetiredNodes(f.options)).restored, 0);
   assert.equal(f.state[f.identity].successes, 1);
   assert.equal(
-    (await recoverRetiredNodes({ ...f.options, now: f.options.now + 7199999 }))
+    (await recoverRetiredNodes({ ...f.options, now: f.options.now + 1799999 }))
       .checked,
     0,
   );
@@ -188,7 +189,7 @@ test("recovery requires two successful rounds two hours apart and persists acros
   const result = await recoverRetiredNodes({
     ...f.options,
     state: resumed,
-    now: f.options.now + 7200000,
+    now: f.options.now + 1800000,
   });
   assert.equal(result.restored, 1);
   assert.deepEqual(f.restored, [
@@ -206,17 +207,65 @@ test("failed recovery resets consecutive successes and a new retirement starts o
   await recoverRetiredNodes(f.options);
   await recoverRetiredNodes({
     ...f.options,
-    now: f.options.now + 7200000,
+    now: f.options.now + 1800000,
     probe: async () => false,
   });
   assert.equal(f.state[f.identity].successes, 0);
-  await recoverRetiredNodes({ ...f.options, now: f.options.now + 14400000 });
+  await recoverRetiredNodes({ ...f.options, now: f.options.now + 3600000 });
   assert.equal(f.state[f.identity].successes, 1);
   f.state[f.identity].retiredAt = "2026-10-11T00:00:00.000Z";
   f.state[f.identity].successes = 10;
-  await recoverRetiredNodes({ ...f.options, now: f.options.now + 21600000 });
+  await recoverRetiredNodes({ ...f.options, now: f.options.now + 5400000 });
   assert.equal(f.state[f.identity].successes, 1);
   assert.deepEqual(f.restored, []);
+});
+
+test("only residential exits are probed for recovery", async () => {
+  const f = recoveryFixture();
+  const probed = [];
+  const datacenter = node("datacenter");
+  datacenter.ippure = { attributes: ["机房IP"] };
+  const anonymous = node("anonymous");
+  const result = await recoverRetiredNodes({
+    ...f.options,
+    now: f.options.now + 1800000,
+    probe: async ({ proxyUrl }) => {
+      probed.push(proxyUrl);
+      return true;
+    },
+    store: {
+      ...f.options.store,
+      aggregate: async () => ({
+        nodes: [datacenter, anonymous, f.item],
+      }),
+      retiredNodes: async () => [
+        {
+          identity: aggregateIdentity(datacenter),
+          retiredAt: f.retiredAt,
+          reason: "IPPure: exit-IP probe failed 4 times",
+        },
+        {
+          identity: aggregateIdentity(anonymous),
+          retiredAt: f.retiredAt,
+          reason: "IPPure: exit-IP probe failed 4 times",
+        },
+        {
+          identity: f.identity,
+          retiredAt: f.retiredAt,
+          reason: "IPPure: exit-IP probe failed 4 times",
+        },
+      ],
+    },
+  });
+  // Datacenter and attribute-less nodes are skipped without a probe; only
+  // the residential node dials GitHub and earns a consecutive success.
+  assert.equal(result.checked, 1);
+  assert.equal(result.skipped, 2);
+  assert.equal(probed.length, 1);
+  assert.ok(probed[0].includes("recoverable"));
+  assert.equal(f.state[f.identity].successes, 1);
+  assert.equal(f.state[aggregateIdentity(datacenter)], undefined);
+  assert.equal(f.state[aggregateIdentity(anonymous)], undefined);
 });
 
 test("controller failures preserve recovery state and never restore a node", async () => {

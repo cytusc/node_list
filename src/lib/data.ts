@@ -14,6 +14,7 @@ export type IPPureResult = {
   country?: string;
   addressFamily?: 4 | 6;
   failureStage?: string;
+  githubReachable?: boolean;
   asn?: string;
   asnOrganization?: string;
   humanPercent?: number | null;
@@ -68,6 +69,8 @@ export type Snapshot = {
     type: FacetOption[];
     network: FacetOption[];
     features: FacetOption[];
+    ipSource: FacetOption[];
+    ipAttributes: FacetOption[];
     media: FacetOption[];
   };
   ippureCollector?: {

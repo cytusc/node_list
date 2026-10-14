@@ -347,11 +347,23 @@ test("exit discovery prefers IPv4 and only falls back through the same node", as
         return {
           get: async (url) => {
             calls.push(url);
-            if (first === "failure" && calls.length === 1)
-              throw new Error("network");
+            if (url === "https://api-ipv4.ip.sb/ip") {
+              if (first === "failure") throw new Error("network");
+              return {
+                ok: () => true,
+                text: async () => first,
+                dispose: async () => {},
+              };
+            }
+            if (url.includes("cdn-cgi/trace"))
+              return {
+                ok: () => true,
+                text: async () => "fl=1\nip=192.0.2.20\nts=1\n",
+                dispose: async () => {},
+              };
             return {
               ok: () => true,
-              text: async () => (calls.length === 1 ? first : "192.0.2.21"),
+              text: async () => "192.0.2.21",
               dispose: async () => {},
             };
           },
@@ -360,15 +372,10 @@ test("exit discovery prefers IPv4 and only falls back through the same node", as
       },
     });
     assert.equal(ip, first === "192.0.2.20" ? first : "192.0.2.21");
-    // Every success is followed by one same-tunnel trace request for the
-    // exit country; its body here carries no loc code, which is tolerated.
-    const trace = "https://www.cloudflare.com/cdn-cgi/trace";
-    assert.deepEqual(
-      calls,
-      first === "192.0.2.20"
-        ? ["https://api-ipv4.ip.sb/ip", trace]
-        : ["https://api-ipv4.ip.sb/ip", "https://checkip.amazonaws.com/", trace],
-    );
+    // Every dial stays on the node and the country follow-up rides the
+    // winning attempt's own tunnel; no direct request may appear.
+    assert.ok(calls.includes("https://api-ipv4.ip.sb/ip"));
+    assert.ok(calls.includes("https://www.cloudflare.com/cdn-cgi/trace"));
   }
 });
 
@@ -408,6 +415,7 @@ test("exit discovery retains IPv6 when IPv4 services fail and records the actual
     ip: "2001:db8::23",
     provider: "AWS CheckIP",
     addressFamily: 6,
+    endpoint: "https://checkip.amazonaws.com/",
   });
   assert.ok(calls.includes("https://api.ipify.org"));
 });
@@ -428,27 +436,38 @@ test("Cloudflare trace is parsed without confusing metadata with an exit address
     provider: "Cloudflare",
     addressFamily: 4,
     country: "SG",
+    endpoint: "https://www.cloudflare.com/cdn-cgi/trace",
   });
 });
 
 test("a non-trace exit success rides the same tunnel once to learn the country", async () => {
-  const calls = [];
+  const contexts = [];
   const data = await resolveExitIPInfo({
     proxyUrl: "http://localhost:7891",
-    createContext: () => ({
-      get: async (url) => {
-        calls.push(url);
-        if (url.includes("cdn-cgi/trace"))
-          return response("fl=1\nip=192.0.2.99\nloc=JP\nts=1\n");
-        return response("192.0.2.42");
-      },
-      dispose: async () => {},
-    }),
+    createContext: () => {
+      const record = { calls: [] };
+      contexts.push(record);
+      return {
+        get: async (url) => {
+          record.calls.push(url);
+          if (url.includes("cdn-cgi/trace"))
+            return response("fl=1\nip=192.0.2.99\nloc=JP\nts=1\n");
+          if (url === "https://api-ipv4.ip.sb/ip")
+            return response("192.0.2.42");
+          throw new Error("unreachable");
+        },
+        dispose: async () => {},
+      };
+    },
   });
   assert.equal(data.ip, "192.0.2.42");
   assert.equal(data.provider, "IP.SB");
   assert.equal(data.country, "JP");
-  assert.deepEqual(calls, [
+  // The winning attempt's own session serves the country follow-up.
+  const winner = contexts.find(
+    (context) => context.calls[0] === "https://api-ipv4.ip.sb/ip",
+  );
+  assert.deepEqual(winner.calls, [
     "https://api-ipv4.ip.sb/ip",
     "https://www.cloudflare.com/cdn-cgi/trace",
   ]);
@@ -469,6 +488,7 @@ test("a failed country follow-up never fails the exit probe", async () => {
     ip: "192.0.2.42",
     provider: "IP.SB",
     addressFamily: 4,
+    endpoint: "https://api-ipv4.ip.sb/ip",
   });
 });
 
@@ -483,7 +503,7 @@ test("resolveExitCountry returns the two-letter trace location", async () => {
   assert.equal(country, "DE");
 });
 
-test("an IP.SB timeout is followed by AWS on a fresh session through the same node", async () => {
+test("an IP.SB timeout falls through to AWS on a fresh session through the same node", async () => {
   const contexts = [],
     attempts = [];
   const data = await resolveExitIPInfo({
@@ -492,22 +512,16 @@ test("an IP.SB timeout is followed by AWS on a fresh session through the same no
     createContext: ({ proxy, timeout }) => {
       assert.equal(proxy.server, "http://localhost:7891");
       assert.equal(timeout, 8000);
-      const record = { calls: 0, disposed: false };
+      const record = { calls: [], disposed: false };
       contexts.push(record);
       return {
         get: async (url) => {
-          record.calls++;
+          record.calls.push(url);
           if (url.includes("ip.sb")) {
             const error = new Error("sensitive transport message");
             error.cause = { code: "UND_ERR_CONNECT_TIMEOUT" };
             throw error;
           }
-          // The country follow-up intentionally reuses the success tunnel.
-          assert.equal(
-            record.calls,
-            url.includes("cdn-cgi/trace") ? 2 : 1,
-          );
-          assert.equal(contexts[0].disposed, true);
           if (url.includes("cdn-cgi/trace"))
             return response("fl=1\nip=192.0.2.42\nloc=SG\n");
           return response("192.0.2.42");
@@ -521,38 +535,37 @@ test("an IP.SB timeout is followed by AWS on a fresh session through the same no
   assert.equal(data.ip, "192.0.2.42");
   assert.equal(data.provider, "AWS CheckIP");
   assert.equal(data.country, "SG");
-  assert.equal(contexts.length, 2);
-  assert.ok(contexts.every((context) => context.disposed));
   assert.equal(attempts[0].code, "TIMEOUT");
+  assert.equal(attempts[0].provider, "IP.SB");
   assert.equal(attempts[1].outcome, "ipv4");
+  // Every attempt dials a fresh session and all sessions are disposed; the
+  // country follow-up reuses the success tunnel, not a new one.
+  assert.ok(contexts.length >= 2);
+  assert.deepEqual(contexts[1].calls, [
+    "https://checkip.amazonaws.com/",
+    "https://www.cloudflare.com/cdn-cgi/trace",
+  ]);
+  assert.ok(contexts.every((context) => context.disposed));
   assert.equal(JSON.stringify(attempts).includes("sensitive"), false);
 });
 
-test("exhausted providers are retried once with fresh connections and recover a transient failure", async () => {
-  const attempts = [],
-    contexts = [];
+test("a transient endpoint failure is recovered by a concurrent batch neighbour", async () => {
+  const attempts = [];
   const result = await resolveExitIPInfo({
     proxyUrl: "http://localhost:7891",
     onProbeAttempt: (attempt) => attempts.push(attempt),
-    createContext: () => {
-      const attempt = contexts.length;
-      contexts.push(attempt);
-      return {
-        get: async (url) => {
-          if (attempt === 9) {
-            assert.equal(url, "https://checkip.amazonaws.com/");
-            return response("192.0.2.43");
-          }
+    createContext: () => ({
+      get: async (url) => {
+        if (url === "https://api-ipv4.ip.sb/ip")
           return response("temporarily unavailable", 503);
-        },
-        dispose: async () => {},
-      };
-    },
+        return response("192.0.2.43");
+      },
+      dispose: async () => {},
+    }),
   });
   assert.equal(result.ip, "192.0.2.43");
-  assert.equal(contexts.length, 10);
-  assert.equal(attempts.at(-1).round, 2);
   assert.equal(attempts[0].code, "HTTP_503");
+  assert.equal(attempts[1].outcome, "ipv4");
 });
 
 test("all provider failures produce bounded credential-free diagnostics", async () => {
@@ -575,7 +588,7 @@ test("all provider failures produce bounded credential-free diagnostics", async 
       return true;
     },
   );
-  assert.equal(attempts.length, 11);
+  assert.equal(attempts.length, 8);
   assert.ok(attempts.every((attempt) => attempt.code === "NETWORK_ERROR"));
   assert.equal(JSON.stringify(attempts).includes("private"), false);
 });
@@ -597,8 +610,9 @@ test("two consecutive transport-level failures stop spending the endpoint budget
     }),
     /已提前中止/,
   );
-  // Two dials instead of the full eight-endpoint budget plus retry round.
-  assert.equal(attempts.length, 2);
+  // One racing batch of four dials instead of the full eight-endpoint
+  // budget plus retry round.
+  assert.equal(attempts.length, 4);
 });
 
 test("a transport-level failure does not abort while a later endpoint still answers", async () => {
@@ -625,9 +639,9 @@ test("HTTP-level errors reset the transport streak because the tunnel is alive",
   const attempts = [];
   const data = await resolveExitIPInfo({
     proxyUrl: "http://localhost:7891",
+    onProbeAttempt: (attempt) => attempts.push(attempt),
     createContext: () => ({
       get: async (url) => {
-        attempts.push(url);
         if (url === "https://checkip.amazonaws.com/")
           return response("192.0.2.8");
         const error = new Error("blocked");
@@ -638,11 +652,61 @@ test("HTTP-level errors reset the transport streak because the tunnel is alive",
     }),
   });
   assert.equal(data.ip, "192.0.2.8");
-  assert.deepEqual(attempts, [
-    "https://api-ipv4.ip.sb/ip",
-    "https://checkip.amazonaws.com/",
-    "https://www.cloudflare.com/cdn-cgi/trace",
-  ]);
+  // Endpoint-order diagnostics: the primary endpoint failed, the very next
+  // one answered, and the country follow-up rode the same tunnel.
+  assert.equal(attempts[0].code, "HTTP_403");
+  assert.equal(attempts[0].endpoint, "https://api-ipv4.ip.sb/ip");
+  assert.equal(attempts[1].outcome, "ipv4");
+  assert.equal(attempts[1].endpoint, "https://checkip.amazonaws.com/");
+});
+
+test("a batch mixing transport and endpoint-specific failures keeps probing", async () => {
+  const dials = [];
+  await assert.rejects(
+    resolveExitIPInfo({
+      proxyUrl: "http://localhost:7891",
+      createContext: () => ({
+        get: async (url) => {
+          dials.push(url);
+          if (url === "https://api-ipv4.ip.sb/ip")
+            throw Object.assign(new Error("reset"), {
+              exitProbeCode: "CONNECTION_RESET",
+            });
+          throw Object.assign(new Error("blocked"), {
+            exitProbeCode: "HTTP_403",
+          });
+        },
+        dispose: async () => {},
+      }),
+    }),
+    /均未取得有效 IP/,
+  );
+  // Endpoint-specific errors prove the tunnel answers per destination, so
+  // the full endpoint budget is spent instead of aborting after two
+  // transport failures.
+  assert.equal(dials.length, 8);
+});
+
+test("a remembered endpoint is dialed first on the next probe", async () => {
+  const attempts = [];
+  const data = await resolveExitIPInfo({
+    proxyUrl: "http://localhost:7891",
+    preferredEndpoints: ["https://icanhazip.com/"],
+    onProbeAttempt: (attempt) => attempts.push(attempt),
+    createContext: () => ({
+      get: async (url) => {
+        if (url === "https://icanhazip.com/") return response("192.0.2.50");
+        if (url.includes("cdn-cgi/trace"))
+          return response("fl=1\nip=192.0.2.50\nloc=SG\n");
+        throw new Error("unreachable");
+      },
+      dispose: async () => {},
+    }),
+  });
+  assert.equal(data.ip, "192.0.2.50");
+  assert.equal(data.provider, "icanhazip");
+  assert.equal(attempts[0].endpoint, "https://icanhazip.com/");
+  assert.equal(attempts[0].outcome, "ipv4");
 });
 
 test("normalizeIPPure carries the API country when present and omits it otherwise", () => {

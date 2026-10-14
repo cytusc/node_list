@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fetchQilanSnapshot } from "./qilan-source.js";
+import { fetchQilanSnapshot, startQilanSource } from "./qilan-source.js";
 import { createStore } from "./store.js";
 
 const item = (id) => ({
@@ -48,6 +48,21 @@ test("Qilan rejects a failed later page without publishing a partial snapshot", 
       : { ok: false, status: 403 },
   }), /HTTP 403/);
   assert.equal(requests, 2);
+});
+
+test("Qilan rejects a degraded session that strips every share link", async () => {
+  let requests = 0;
+  await assert.rejects(fetchQilanSnapshot({
+    session: "stale-cookie", sleep: async () => {},
+    fetchImpl: async () => {
+      requests++;
+      return { ok: true, status: 200, json: async () => ({
+        total: 50,
+        data: Array.from({ length: 50 }, (_, i) => ({ ...item(i + 1), link: "" })),
+      }) };
+    },
+  }), /stale session/);
+  assert.equal(requests, 1); // no retry loop against a degraded session
 });
 
 test("Qilan deduplicates connections across pages and keeps the newest check", async () => {
@@ -99,6 +114,98 @@ test("existing Qilan history merges changing metadata but retains distinct conne
     assert.equal(aggregate.nodes[0].checkedAt, "2026-10-12T07:00:00Z");
     assert.equal((await store.history(10, 0)).total, 2);
   } finally {
+    await store.close();
+  }
+});
+
+test("Qilan session failure pushes one Feishu alert and a recovery notice", async () => {
+  const messages = [];
+  const store = createStore();
+  let fail = true;
+  const source = startQilanSource({
+    store,
+    session: "test-cookie",
+    intervalMs: 60_000,
+    fetchImpl: async () =>
+      fail
+        ? { ok: false, status: 403 }
+        : {
+            ok: true,
+            status: 200,
+            json: async () => ({ total: 1, data: [item(1)] }),
+          },
+    notify: async (message) => {
+      messages.push(message);
+      return true;
+    },
+  });
+  try {
+    await source.refresh(); // initial failing refresh
+    assert.equal(messages.length, 1);
+    assert.match(messages[0], /Qilan 登录状态失效/);
+    assert.match(messages[0], /403/);
+    await source.refresh(); // still broken: edge-triggered, no repeat alert
+    assert.equal(messages.length, 1);
+    fail = false;
+    await source.refresh();
+    assert.equal(messages.length, 2);
+    assert.match(messages[1], /Qilan 登录状态已恢复/);
+    await source.refresh(); // healthy again: nothing new
+    assert.equal(messages.length, 2);
+  } finally {
+    await source.close();
+    await store.close();
+  }
+});
+
+test("Qilan stale-session link stripping pushes the Feishu alert", async () => {
+  const messages = [];
+  const store = createStore();
+  const source = startQilanSource({
+    store,
+    session: "stale-cookie",
+    intervalMs: 60_000,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        total: 2,
+        data: [item(1), item(2)].map((node) => ({ ...node, link: "" })),
+      }),
+    }),
+    notify: async (message) => {
+      messages.push(message);
+      return true;
+    },
+  });
+  try {
+    await source.refresh();
+    assert.equal(messages.length, 1);
+    assert.match(messages[0], /stale session/);
+  } finally {
+    await source.close();
+    await store.close();
+  }
+});
+
+test("Qilan non-session failures do not push a Feishu alert", async () => {
+  const messages = [];
+  const store = createStore();
+  const source = startQilanSource({
+    store,
+    session: "test-cookie",
+    intervalMs: 60_000,
+    fetchImpl: async () => ({ ok: false, status: 500 }),
+    notify: async (message) => {
+      messages.push(message);
+      return true;
+    },
+  });
+  try {
+    await source.refresh();
+    assert.equal(messages.length, 0);
+  } finally {
+    await source.close();
     await store.close();
   }
 });

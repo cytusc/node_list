@@ -7,6 +7,7 @@ import path from "node:path";
 import { createStore } from "./store.js";
 import { aggregateIdentity, summarizeProxy } from "./node-sources.js";
 import { startIPPureCollector, queryIPPure } from "./ippure.js";
+import { EXIT_IP_VERSION, EXIT_IP_PROBE_VERSION } from "./exit-ip.js";
 
 test("legacy exit failures recover before pending links and persist provider diagnostics without rechecking verified exits", async (t) => {
   const id = "12345678-1234-1234-1234-123456789abc";
@@ -178,6 +179,60 @@ test("Qilan share links enter historical collection without all.yaml and reuse r
   assert.equal(probes, 1);
 });
 
+test("nodes with an empty rawLink are marked unsupported instead of silently skipped", async (t) => {
+  const store = createStore();
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ippure-empty-link-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(path.join(dir, "output"));
+  await writeFile(
+    path.join(dir, "output", "all.yaml"),
+    JSON.stringify({ proxies: [] }),
+  );
+  await store.syncSnapshot({
+    checkedAt: "2026-10-14T00:00:00Z",
+    nodes: [
+      {
+        name: "LT 03 [Qilan]",
+        subTag: "Qilan",
+        type: "ss",
+        server: "195.238.126.20",
+        port: "9068",
+        rawLink: "",
+      },
+    ],
+  });
+  const archived = await store.get();
+  let probes = 0;
+  const collector = startIPPureCollector({
+    store,
+    subDir: dir,
+    intervalMs: 999999,
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p, i) => [p, `http://127.0.0.1:${7900 + i}`])),
+    resolveIP: async () => {
+      probes++;
+      return { ip: "192.0.2.1", provider: "AWS CheckIP" };
+    },
+    query: async () => {
+      probes++;
+      return { ip: "192.0.2.1", asnOrganization: "Never" };
+    },
+  });
+  t.after(async () => {
+    await collector.close();
+    await store.close();
+  });
+  await collector.run();
+  assert.equal(probes, 0);
+  const saved = (await store.get(archived.id)).nodes[0].ippure;
+  assert.equal(saved.status, "unsupported");
+  assert.equal(saved.failureStage, "share-link");
+  assert.match(saved.error, /分享链接为空/);
+  // A marked instance must not re-enter the queue on the next round.
+  await collector.run();
+  assert.equal(probes, 0);
+});
+
 test("one rejected Qilan configuration is isolated while other nodes are probed", async (t) => {
   const store = createStore();
   const id = "12345678-1234-1234-1234-123456789abc";
@@ -331,7 +386,8 @@ test("IPPure saves per-node results, retries failures without rechecking success
   assert.equal(first.nodes[0].ippure.score, 32);
   assert.equal(first.nodes[1].ippure.status, "error");
   assert.equal(JSON.stringify(first).includes("private"), false);
-  assert.equal(first.nodes[2].ippure, undefined);
+  assert.equal(first.nodes[2].ippure.status, "unsupported");
+  assert.equal(first.nodes[2].ippure.failureStage, "share-link");
   await collector.run();
   assert.equal(calls.length, 2);
   await store.saveIPPure(first.id, 1, {
@@ -750,7 +806,8 @@ test("batch collection runs concurrently, deduplicates exit IPs and drains befor
     },
     configure: async ({ proxies }) => {
       assert.equal(active, 0);
-      assert.ok(proxies.length <= 6);
+      // A wave carries every pending job plus the donor pool.
+      assert.ok(proxies.length <= 10);
       configurations++;
       return new Map(
         proxies.map((proxy, i) => [proxy, `http://localhost:${7890 + i}`]),
@@ -779,7 +836,8 @@ test("batch collection runs concurrently, deduplicates exit IPs and drains befor
   t.after(() => collector.close());
   await Promise.all([collector.run(), collector.run()]);
   assert.equal(maxActive, 3);
-  assert.equal(configurations, 3);
+  // All seven jobs fit in one wave, so a single reload serves the whole run.
+  assert.equal(configurations, 1);
   assert.equal(calls.filter((ip) => ip === "192.0.2.1").length, 1);
   assert.equal(
     nodes.filter((node) => node.ippure.status === "success").length,
@@ -787,7 +845,7 @@ test("batch collection runs concurrently, deduplicates exit IPs and drains befor
   );
   assert.equal(nodes[3].ippure.ip, "192.0.2.1");
   await collector.run();
-  assert.equal(configurations, 3);
+  assert.equal(configurations, 1);
 });
 
 test("a changed snapshot prevents stale concurrent writes and stops further batches", async (t) => {
@@ -1362,6 +1420,7 @@ test("fourth exit-IP failure retires the node when the run has a healthy control
       return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
     },
     query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+    githubProbe: async () => false,
   });
   t.after(() => collector.close());
   // The never-checked node succeeds first and proves the transport healthy;
@@ -1374,6 +1433,77 @@ test("fourth exit-IP failure retires the node when the run has a healthy control
   // Retired identities leave the collection queue entirely.
   await collector.run();
   assert.deepEqual(calls, ["fresh", "stuck"]);
+});
+
+test("a fourth exit-IP failure keeps a GitHub-reachable node in the fleet", async (t) => {
+  const stuck = {
+    name: "stuck",
+    type: "vless",
+    server: "stuck.example",
+    port: "443",
+    rawLink:
+      "vless://42345678-1234-1234-1234-123456789abc@stuck.example:443",
+    ippure: {
+      status: "error",
+      failureStage: "exit-ip",
+      attempts: 3,
+      checkedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      queryMode: "specified-exit",
+      exitIPMode: "proxy-echo",
+      transportMode: "http",
+      signatureVersion: 2,
+      exitIPVersion: 3,
+      exitIPProbeVersion: 1,
+    },
+  };
+  const fresh = {
+    name: "fresh",
+    type: "vless",
+    server: "fresh.example",
+    port: "443",
+    rawLink:
+      "vless://52345678-1234-1234-1234-123456789abc@fresh.example:443",
+  };
+  const nodes = [stuck, fresh],
+    retirements = [],
+    probes = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 1,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      aggregate: async () => ({ nodes }),
+      saveIPPure: async (id, index, result) => {
+        nodes[index].ippure = result;
+      },
+      retiredNodeIdentities: async () => new Set(),
+      retireNodes: async (items, reason) => {
+        retirements.push([items[0].name, reason]);
+        return items.length;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, `http://localhost:7891/${p.name}`])),
+    resolveIP: async ({ proxy }) => {
+      if (proxy.name === "stuck") throw new Error("connection reset");
+      return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
+    },
+    query: async ({ target }) => ({ ip: target, asnOrganization: "Verified" }),
+    // Echo endpoints are blocked, but the node's own tunnel reaches GitHub.
+    githubProbe: async ({ proxyUrl }) => {
+      probes.push(proxyUrl);
+      return true;
+    },
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  assert.deepEqual(retirements, []);
+  assert.equal(nodes[0].ippure.githubReachable, true);
+  assert.equal(nodes[0].ippure.attempts, 4);
+  assert.equal(nodes[0].ippure.failureStage, "exit-ip");
+  // The corroboration probe dials the stuck node's own isolated listener.
+  assert.equal(probes.length, 1);
+  assert.ok(probes[0].includes("stuck"));
 });
 
 test("exit-IP failures never retire when the whole run is unhealthy", async (t) => {
@@ -1485,4 +1615,107 @@ test("success results verified before country collection gain it via one trace r
   // With the country stored the result is final and never scheduled again.
   await collector.run();
   assert.equal(countryCalls.length, 1);
+});
+
+test("exit-IP failure backoff escalates through 30 minutes, 6 hours and 24 hours", async (t) => {
+  const makeNode = (name, attempts) => ({
+    name,
+    rawConfig: { name, type: "http", server: `${name}.example`, port: 443 },
+    ippure: {
+      status: "error",
+      failureStage: "exit-ip",
+      attempts,
+      checkedAt: new Date().toISOString(),
+      queryMode: "specified-exit",
+      exitIPMode: "proxy-echo",
+      transportMode: "http",
+      signatureVersion: 2,
+      exitIPVersion: EXIT_IP_VERSION,
+      exitIPProbeVersion: EXIT_IP_PROBE_VERSION,
+    },
+  });
+  const nodes = [makeNode("a1", 1), makeNode("a2", 2), makeNode("a3", 3)];
+  const calls = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 3,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      aggregate: async () => ({ nodes }),
+      saveIPPure: async (_id, index, result) => {
+        nodes[index].ippure = result;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => {
+      calls.push(proxy.name);
+      return { ip: "192.0.2.11", provider: "AWS CheckIP", addressFamily: 4 };
+    },
+    query: async ({ target }) => ({
+      ip: target,
+      asnOrganization: "Verified",
+      country: "DE",
+    }),
+  });
+  t.after(() => collector.close());
+  const age = (ms) => {
+    for (const node of nodes)
+      node.ippure.checkedAt = new Date(Date.now() - ms).toISOString();
+  };
+  // Recent failures of any attempt count stay inside their backoff window.
+  await collector.run();
+  assert.deepEqual(calls, []);
+  // Past 30 minutes only the first failure retries; 6h/24h still hold.
+  age(31 * 60 * 1000);
+  await collector.run();
+  assert.deepEqual(calls, ["a1"]);
+  // Past 6 hours the second failure retries; 24h still holds.
+  age(7 * 60 * 60 * 1000);
+  await collector.run();
+  assert.deepEqual(calls, ["a1", "a2"]);
+  // Past 24 hours the third failure gets its final scheduled probe.
+  age(25 * 60 * 60 * 1000);
+  await collector.run();
+  assert.deepEqual(calls, ["a1", "a2", "a3"]);
+});
+
+test("a slow job inside a wave does not block other jobs from finishing", async (t) => {
+  const nodes = ["slow", "fast1", "fast2", "fast3"].map((name) => ({
+    name,
+    rawConfig: { name, type: "http", server: `${name}.example`, port: 443 },
+  }));
+  const targets = { slow: "192.0.2.9", fast1: "192.0.2.1", fast2: "192.0.2.2", fast3: "192.0.2.3" };
+  const saved = [];
+  const collector = startIPPureCollector({
+    intervalMs: 999999,
+    concurrency: 2,
+    store: {
+      get: async () => ({ id: 1, nodes }),
+      saveIPPure: async (_id, index, result) => {
+        saved.push(nodes[index].name);
+        nodes[index].ippure = result;
+      },
+    },
+    configure: async ({ proxies }) =>
+      new Map(proxies.map((p) => [p, "http://localhost:7891"])),
+    resolveIP: async ({ proxy }) => targets[proxy.name],
+    query: async ({ target }) => {
+      // The stalled job occupies one window slot; the other slot keeps
+      // draining the remaining wave jobs meanwhile.
+      if (target === targets.slow)
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      return { ip: target, asnOrganization: "Verified", country: "DE" };
+    },
+  });
+  t.after(() => collector.close());
+  await collector.run();
+  // All four jobs share one wave; the fast jobs finish and persist while the
+  // slow job is still stalled, which a batch barrier would have prevented.
+  assert.deepEqual(saved, ["fast1", "fast2", "fast3", "slow"]);
+  assert.equal(
+    nodes.filter((node) => node.ippure.status === "success").length,
+    4,
+  );
+  assert.equal(collector.status().error, null);
 });

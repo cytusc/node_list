@@ -44,6 +44,8 @@ export function parseResultsQuery(params) {
     "type",
     "network",
     "features",
+    "ipSource",
+    "ipAttributes",
     "media",
     "minSpeed",
     "sort",
@@ -70,6 +72,8 @@ export function parseResultsQuery(params) {
     types: list("type"),
     networks: list("network"),
     features,
+    ipSources: list("ipSource"),
+    ipAttributes: list("ipAttributes"),
     media: list("media"),
     minSpeed,
     sort: params.sort,
@@ -93,6 +97,20 @@ export function resultsMetadata(snapshot) {
         label: key === "country" ? countryName(value) : value.toUpperCase(),
       }));
   };
+  const ipCounts = (key) => {
+    const values = new Map();
+    for (const node of nodes) {
+      if (node.ippure?.status !== "success") continue;
+      const items =
+        key === "source" ? [node.ippure.source] : node.ippure.attributes || [];
+      for (const value of new Set(items.filter(Boolean))) {
+        values.set(value, (values.get(value) || 0) + 1);
+      }
+    }
+    return [...values]
+      .sort((a, b) => b[1] - a[1])
+      .map(([value, count]) => ({ value, label: value, count }));
+  };
   const speeds = nodes
     .map((n) => n.speed || 0)
     .filter((s) => s > 0)
@@ -111,6 +129,8 @@ export function resultsMetadata(snapshot) {
     country: counts("country"),
     type: counts("type"),
     network: counts("network"),
+    ipSource: ipCounts("source"),
+    ipAttributes: ipCounts("attributes"),
     features: ["tls", "reality", "udp"].map((value) => ({
       value,
       label: value === "reality" ? "Reality" : value.toUpperCase(),
@@ -189,6 +209,14 @@ export function paginateResults(snapshot, query) {
       (!query.networks.length ||
         query.networks.includes(n.network || "unknown")) &&
       query.features.every((key) => !!n[key]) &&
+      (!query.ipSources?.length ||
+        (n.ippure?.status === "success" &&
+          query.ipSources.includes(n.ippure.source))) &&
+      (!query.ipAttributes?.length ||
+        (n.ippure?.status === "success" &&
+          n.ippure.attributes?.some((value) =>
+            query.ipAttributes.includes(value),
+          ))) &&
       (!snapshot.speedTest || (n.speed || 0) >= query.minSpeed * 1024) &&
       (!snapshot.mediaCheck ||
         query.media.every((p) =>
