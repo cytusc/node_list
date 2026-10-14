@@ -430,11 +430,6 @@ export function createSnapshotStore(adapter) {
         (await adapter.retiredNodes()).map((item) => item.identity),
       );
     },
-    async departedNodeIdentities() {
-      return adapter.departedNodeIdentities
-        ? new Set(await adapter.departedNodeIdentities())
-        : new Set();
-    },
     retiredNodes: () => adapter.retiredNodes(),
     restoreNode: (identity, retiredAt, reason) =>
       adapter.restoreNode(identity, retiredAt, reason),

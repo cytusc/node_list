@@ -59,12 +59,6 @@ export async function initializeResultsProjection(pool) {
           .join(",")},
         PRIMARY KEY (position), UNIQUE (identity) DEFERRABLE INITIALLY DEFERRED
       );
-      CREATE TABLE IF NOT EXISTS node_explorer_departed_nodes (
-        identity text PRIMARY KEY,
-        source text NOT NULL,
-        last_seen_at text NOT NULL,
-        departed_at text NOT NULL
-      );
       CREATE INDEX IF NOT EXISTS node_explorer_current_speed
         ON node_explorer_current_nodes(rank_speed DESC NULLS LAST, position);
       CREATE INDEX IF NOT EXISTS node_explorer_current_name
@@ -127,14 +121,16 @@ export async function initializeResultsProjection(pool) {
 const DEPARTED_QILAN_MS = 45 * 60 * 1000;
 const DEPARTED_SUBS_MS = 4 * 60 * 60 * 1000;
 
-// One pass over every snapshot builds the shared presence map: last sighting
-// per identity, the source kind that saw it, and the newest import time.
-function computePresence(rows) {
-  const rowsArray = [...rows];
+export function filterDepartedNodes(nodes, snapshots) {
+  // Callers pass Map iterators (allRows.values()); materialize once so the
+  // emptiness check and the single pass below cannot silently no-op on an
+  // iterator without .length.
+  const rows = [...snapshots];
+  if (!rows.length) return nodes;
   const lastSeen = new Map();
   const source = new Map();
   let referenceAt = -Infinity;
-  for (const row of rowsArray) {
+  for (const row of rows) {
     const at = Date.parse(row.importedAt);
     if (!Number.isFinite(at)) continue;
     referenceAt = Math.max(referenceAt, at);
@@ -147,47 +143,16 @@ function computePresence(rows) {
       }
     }
   }
-  return { lastSeen, source, referenceAt };
-}
-
-function departureLimit(kind) {
-  return kind === "qilan" ? DEPARTED_QILAN_MS : DEPARTED_SUBS_MS;
-}
-
-export function filterDepartedNodes(nodes, snapshots) {
-  // Callers pass Map iterators (allRows.values()); materialize once so the
-  // emptiness check and the single pass below cannot silently no-op on an
-  // iterator without .length.
-  const { lastSeen, source, referenceAt } = computePresence(snapshots);
   if (referenceAt === -Infinity) return nodes;
   return nodes.filter((node) => {
-    const identity = aggregateIdentity(node);
-    const seen = lastSeen.get(identity);
+    const seen = lastSeen.get(aggregateIdentity(node));
     if (seen === undefined) return true;
-    return referenceAt - seen <= departureLimit(source.get(identity));
+    const limit =
+      source.get(aggregateIdentity(node)) === "qilan"
+        ? DEPARTED_QILAN_MS
+        : DEPARTED_SUBS_MS;
+    return referenceAt - seen <= limit;
   });
-}
-
-// The database-facing counterpart of filterDepartedNodes: every aggregate node
-// that crossed its source threshold, as rows for node_explorer_departed_nodes.
-// Materializing them makes departure queryable state instead of a per-refresh
-// recomputation, and lets the probe queue skip dead identities.
-export function departedIdentities(nodes, snapshots) {
-  const { lastSeen, source, referenceAt } = computePresence(snapshots);
-  if (referenceAt === -Infinity) return [];
-  const rows = [];
-  for (const node of nodes) {
-    const identity = aggregateIdentity(node);
-    const seen = lastSeen.get(identity);
-    if (seen === undefined) continue;
-    if (referenceAt - seen > departureLimit(source.get(identity)))
-      rows.push({
-        identity,
-        source: source.get(identity),
-        last_seen_at: new Date(seen).toISOString(),
-      });
-  }
-  return rows;
 }
 
 function projectionRows(snapshot) {
@@ -322,13 +287,7 @@ export async function refreshResultsProjection(pool, cache = {}) {
     });
     const snapshot = await store.aggregate();
     // Departure filtering feeds both the rows and the facets so filter counts
-    // always match the visible list. The same judgement is materialized into
-    // node_explorer_departed_nodes below so queue consumers read persistent
-    // state instead of recomputing it.
-    const departedRows = departedIdentities(
-      snapshot?.nodes || [],
-      allRows.values(),
-    );
+    // always match the visible list.
     const visibleNodes = snapshot
       ? filterDepartedNodes(snapshot.nodes, allRows.values())
       : [];
@@ -377,21 +336,6 @@ export async function refreshResultsProjection(pool, cache = {}) {
         [JSON.stringify(changedNodes.slice(offset, offset + 250))],
       );
     }
-    // Exact-set sync: a row survives only while its identity stays departed;
-    // a returning (or retired-then-irrelevant) identity is dropped. Replacing
-    // last_seen_at keeps the row truthful, departed_at records first detection.
-    await client.query(
-      "DELETE FROM node_explorer_departed_nodes WHERE NOT (identity = ANY($1::text[]))",
-      [departedRows.map((row) => row.identity)],
-    );
-    if (departedRows.length)
-      await client.query(
-        `INSERT INTO node_explorer_departed_nodes (identity, source, last_seen_at, departed_at)
-        SELECT identity, source, last_seen_at, $2
-        FROM jsonb_to_recordset($1::jsonb) AS departed(identity text, source text, last_seen_at text)
-        ON CONFLICT (identity) DO UPDATE SET source = EXCLUDED.source, last_seen_at = EXCLUDED.last_seen_at`,
-        [JSON.stringify(departedRows), new Date().toISOString()],
-      );
     await client.query(
       "UPDATE node_explorer_results_state SET built_revision = $1, metadata = $2::jsonb",
       [state.source_revision, JSON.stringify(metadata)],
