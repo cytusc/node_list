@@ -58,21 +58,10 @@ export function startIPPureCollector({
     if (!snapshot) return;
     const historical = context.historical || [];
     const aggregate = context.aggregate;
-    const snapshotChanged = async () => {
-      const id = store.latestSnapshotId
-        ? await store.latestSnapshotId()
-        : (await store.get())?.id;
-      return id !== snapshot.id;
-    };
     const visible = new Set(
       (aggregate?.nodes || []).map(
         (node) => `${node.snapshotId}:${aggregateIdentity(node)}`,
       ),
-    );
-    historical.sort(
-      (a, b) =>
-        Number(visible.has(`${b.snapshotId}:${aggregateIdentity(b.node)}`)) -
-        Number(visible.has(`${a.snapshotId}:${aggregateIdentity(a.node)}`)),
     );
     if (!snapshot.nodes.length && !historical.length) return;
     const document = snapshot.nodes.every(
@@ -145,6 +134,9 @@ export function startIPPureCollector({
       const { node, snapshotId } = entry;
       entry.identity = aggregateIdentity(node);
       entry.shareOnly = !node.rawConfig && !!node.rawLink;
+      entry.visibleRank = Number(
+        visible.has(`${snapshotId}:${entry.identity}`),
+      );
       if (!entry.shareOnly) {
         entry.priority = 0;
         continue;
@@ -160,11 +152,25 @@ export function startIPPureCollector({
         saved.exitIPProbeVersion !== EXIT_IP_PROBE_VERSION;
       entry.priority =
         (outdatedLink || outdatedProbe ? 4 : !saved ? 2 : 0) +
-        Number(visible.has(`${snapshotId}:${entry.identity}`));
+        entry.visibleRank;
     }
-    // New source batches must not restart probes at the same first few nodes.
-    // Probe each connection once per run and prioritize never-checked visible nodes.
-    entries.sort((a, b) => b.priority - a.priority);
+    // Probe each connection once per run and prioritize never-checked visible
+    // nodes. Within an equal (priority, visibility), the oldest identity goes
+    // first: raw snapshot index order structurally starves nodes parked near
+    // the tail of every batch (small country groups never reach the per-run
+    // probe budget — the AE nodes pending since their first import).
+    const firstSeen = new Map();
+    for (const { identity, snapshotId } of entries)
+      firstSeen.set(
+        identity,
+        Math.min(firstSeen.get(identity) ?? Infinity, snapshotId),
+      );
+    entries.sort(
+      (a, b) =>
+        b.priority - a.priority ||
+        b.visibleRank - a.visibleRank ||
+        firstSeen.get(a.identity) - firstSeen.get(b.identity),
+    );
     const seen = new Set();
     for (const { snapshotId, index, node, identity, shareOnly } of entries) {
       if (abort.signal.aborted) return;
@@ -269,9 +275,12 @@ export function startIPPureCollector({
     }
     // One Mihomo reload per wave of concurrency * 3 jobs amortizes the
     // configuration cost; jobs inside a wave no longer wait at a barrier.
+    // The queue drains across snapshot changes: results are keyed to each
+    // entry's own (snapshotId, index), so a newer snapshot never invalidates
+    // pending work, and retirement is re-checked at every wave boundary.
     const waveSize = concurrency * 3;
     for (let offset = 0; offset < jobs.length; offset += waveSize) {
-      if (abort.signal.aborted || (await snapshotChanged())) return;
+      if (abort.signal.aborted) return;
       const retired = store.retiredNodeIdentities
         ? await store.retiredNodeIdentities()
         : new Set();
@@ -435,7 +444,7 @@ export function startIPPureCollector({
             result.failureStage = "unsupported-ipv6";
             result.error =
               "已获取 IPv6 出口，IPPure 风险评分接口暂不支持 IPv6";
-            if (abort.signal.aborted || (await snapshotChanged())) return;
+            if (abort.signal.aborted) return;
             await store.saveIPPure(snapshotId, index, result, identity);
             return;
           }
@@ -499,7 +508,6 @@ export function startIPPureCollector({
           if (abort.signal.aborted) return;
           if (backfill) {
             // Keep previously collected metrics if the organization refresh fails.
-            if (await snapshotChanged()) return;
             await store.saveIPPure(
               snapshotId,
               index,
@@ -545,7 +553,9 @@ export function startIPPureCollector({
                   : "IPPure 查询代理连接失败，请稍后重试";
           }
         }
-        if (abort.signal.aborted || (await snapshotChanged())) return;
+        // Results are keyed to the entry's own immutable (snapshotId, index);
+        // a newer snapshot arriving mid-run never invalidates them.
+        if (abort.signal.aborted) return;
         await store.saveIPPure(snapshotId, index, result, identity);
         // Three fast retries plus a one-day-later recheck that still
         // cannot yield any exit IP means the node is dead; retire it so
@@ -572,7 +582,6 @@ export function startIPPureCollector({
             if (abort.signal.aborted) return;
           }
           if (transportAlive) {
-            if (await snapshotChanged()) return;
             await store.saveIPPure(
               snapshotId,
               index,

@@ -848,10 +848,11 @@ test("batch collection runs concurrently, deduplicates exit IPs and drains befor
   assert.equal(configurations, 1);
 });
 
-test("a changed snapshot prevents stale concurrent writes and stops further batches", async (t) => {
+test("a changed snapshot keeps completed results and drains the remaining batches", async (t) => {
   let snapshotId = 1;
   let configured = 0;
-  const nodes = Array.from({ length: 4 }, (_, i) => ({
+  const saved = [];
+  const nodes = Array.from({ length: 8 }, (_, i) => ({
     rawConfig: { name: String(i) },
   }));
   const collector = startIPPureCollector({
@@ -859,7 +860,8 @@ test("a changed snapshot prevents stale concurrent writes and stops further batc
     intervalMs: 999999,
     store: {
       get: async () => ({ id: snapshotId, nodes }),
-      saveIPPure: async () => assert.fail("stale result written"),
+      saveIPPure: async (id, index) =>
+        saved.push(`${id}:${index}`),
     },
     configure: async ({ proxies }) => {
       configured++;
@@ -873,7 +875,14 @@ test("a changed snapshot prevents stale concurrent writes and stops further batc
   });
   t.after(() => collector.close());
   await collector.run();
-  assert.equal(configured, 1);
+  // Results belong to their own immutable (snapshotId, index) pairs; the
+  // queue drains across the snapshot change instead of discarding work.
+  assert.equal(saved.length, nodes.length);
+  assert.deepEqual(
+    [...new Set(saved.map((entry) => entry.split(":")[0]))].sort(),
+    ["1"],
+  );
+  assert.equal(configured, 2);
 });
 
 test("failed saves do not release the batch until all concurrent requests settle", async (t) => {
