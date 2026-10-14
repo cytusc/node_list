@@ -39,6 +39,8 @@ test("reads each snapshot afresh and strips credential fields", async (t) => {
         speed: 1000,
         password: "secret",
         uuid: "private",
+        rawLink: "ss://cipher:secret@example.org:443#node",
+        rawConfig: { server: "example.org", password: "secret" },
       },
     ],
   };
@@ -50,6 +52,8 @@ test("reads each snapshot afresh and strips credential fields", async (t) => {
   assert.equal(result.nodes[0].name, "HK 1");
   assert.equal("password" in result.nodes[0], false);
   assert.equal("uuid" in result.nodes[0], false);
+  assert.equal("rawLink" in result.nodes[0], false);
+  assert.equal("rawConfig" in result.nodes[0], false);
   await writeFile(f.resultsFile, JSON.stringify({ ...snapshot, nodes: [] }));
   result = await (await f.get("/api/results")).json();
   assert.deepEqual(result.nodes, []);
@@ -154,7 +158,8 @@ test("API refreshes always archive node sources, including after the initial imp
     );
     assert.equal((await f.get(route)).status, 200);
     const result = await (await f.get("/api/results")).json();
-    assert.deepEqual(result.nodes[0].rawConfig, proxy);
+    assert.equal("rawConfig" in result.nodes[0], false);
+    assert.equal("rawLink" in result.nodes[0], false);
     assert.equal(result.nodes.length, 1);
   }
   assert.equal((await (await f.get("/api/history")).json()).total, 3);
@@ -171,17 +176,12 @@ test("distinguishes missing results from corrupted files without leaking paths",
   assert.equal((await response.json()).code, "READ_FAILED");
 });
 
-test("downloads only allowlisted output files and reports missing formats", async (t) => {
+test("temporarily disables public subscription download endpoints", async (t) => {
   const f = await fixture(t);
   await mkdir(path.join(f.subDir, "output"));
   await writeFile(path.join(f.subDir, "output", "all.yaml"), "proxies: []\n");
-  const list = await (await f.get("/api/downloads")).json();
-  assert.equal(list.find((d) => d.id === "clash").available, true);
-  assert.equal(list.find((d) => d.id === "mihomo").available, false);
-  const response = await f.get("/api/download/clash");
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-disposition"), /all.yaml/);
-  assert.equal(await response.text(), "proxies: []\n");
+  assert.equal((await f.get("/api/downloads")).status, 404);
+  assert.equal((await f.get("/api/download/clash")).status, 404);
   assert.equal((await f.get("/api/download/mihomo")).status, 404);
   assert.equal((await f.get("/api/download/constructor")).status, 404);
   assert.equal((await f.get("/api/download/%2e%2e%2fconfig.yaml")).status, 404);

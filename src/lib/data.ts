@@ -48,8 +48,6 @@ export type NodeRecord = {
   subTag?: string;
   media?: MediaTag[];
   details?: { k: string; v: string }[];
-  rawLink?: string;
-  rawConfig?: Record<string, unknown>;
 };
 export type HistoryItem = {
   id: number;
@@ -85,12 +83,6 @@ export type Snapshot = {
   speedTest: boolean;
   mediaCheck: boolean;
   nodes: NodeRecord[];
-};
-export type Download = {
-  id: string;
-  label: string;
-  available: boolean;
-  updatedAt?: string;
 };
 export const platforms: Record<string, string> = {
   openai: "OpenAI",

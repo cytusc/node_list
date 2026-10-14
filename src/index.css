@@ -700,19 +700,6 @@ select option {
   margin-right: 8px;
   font-variant-numeric: tabular-nums;
 }
-.page-footer {
-  padding: 20px 0 30px;
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 10px;
-  color: var(--muted-foreground);
-}
-.page-footer span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 .node-sheet {
   padding: 0;
   gap: 0;
@@ -778,10 +765,6 @@ select option {
 .detail-note svg {
   flex-shrink: 0;
   margin-top: 2px;
-}
-.detail-footer {
-  border-top: 1px solid var(--border);
-  padding: 18px 26px;
 }
 .error-banner {
   border: 1px solid #e9caa4;
@@ -1044,10 +1027,6 @@ select option {
   }
   .page-size {
     display: none;
-  }
-  .page-footer {
-    flex-direction: column;
-    gap: 8px;
   }
   .node-sheet {
     width: 100%;
