@@ -60,6 +60,7 @@ const app = createApp({
           intervalMs: Number.isFinite(qilanRefreshSeconds)
             ? Math.max(60_000, qilanRefreshSeconds * 1000)
             : 15 * 60_000,
+          feishuWebhook: process.env.FEISHU_WEBHOOK_URL || undefined,
         }
       : undefined,
   resultsFile: process.env.RESULTS_FILE,

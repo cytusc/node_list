@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { aggregateIdentity } from "./node-sources.js";
+import { createFeishuNotifier } from "./feishu-notify.js";
 
 const baseUrl = "https://www.qilan.de";
 const pageSize = 200;
@@ -162,10 +163,13 @@ export function startQilanSource({
   userAgent,
   intervalMs = 15 * 60_000,
   fetchImpl,
+  feishuWebhook,
+  notify = createFeishuNotifier({ webhook: feishuWebhook }),
   onError = (error) => console.error(`Qilan source refresh failed: ${error.message}`),
 } = {}) {
   let closed = false;
   let pending;
+  let sessionBroken = false;
   const refresh = async () => {
     if (closed || pending) return pending;
     pending = (async () => {
@@ -176,8 +180,27 @@ export function startQilanSource({
         fetchImpl,
       });
       await store.syncSnapshot(snapshot);
+      if (sessionBroken) {
+        sessionBroken = false;
+        await notify(
+          `✅ Qilan 登录状态已恢复，节点快照同步继续。\n时间: ${new Date().toISOString()}`,
+        );
+      }
     })()
-      .catch(onError)
+      .catch(async (error) => {
+        onError(error);
+        // Session failures degrade silently (HTTP 403 or stripped share
+        // links), so escalate them to the Feishu bot. Edge-triggered: one
+        // alert per outage, one recovery notice when sync resumes.
+        if (/session|403/i.test(String(error.message))) {
+          const wasBroken = sessionBroken;
+          sessionBroken = true;
+          if (!wasBroken)
+            await notify(
+              `⚠️ Qilan 登录状态失效，节点快照同步已暂停。\n原因: ${error.message}\n时间: ${new Date().toISOString()}\n请更新 QILAN_SESSION（session.txt）后等待自动恢复。`,
+            );
+        }
+      })
       .finally(() => {
         pending = undefined;
       });
