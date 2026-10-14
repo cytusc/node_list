@@ -180,7 +180,7 @@ export async function resolveExitIPInfo(options) {
     const started = Date.now();
     try {
       const outcome = await withHTTP(
-        { ...options, timeout: options.timeoutMs ?? 8000 },
+        { ...options, timeout: options.timeoutMs ?? 5000 },
         async (context, signal) => {
           const response = await context.get(url);
           try {
@@ -315,7 +315,7 @@ export async function resolveExitIP(options) {
 // request through the node's own transport.
 export async function resolveExitCountry(options) {
   return withHTTP(
-    { ...options, timeout: options.timeoutMs ?? 8000 },
+    { ...options, timeout: options.timeoutMs ?? 5000 },
     async (context, signal) => {
       const response = await context.get(
         "https://www.cloudflare.com/cdn-cgi/trace",
