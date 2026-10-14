@@ -87,6 +87,10 @@ export async function initializeResultsProjection(pool) {
           RETURN NULL;
         END $$;
     `);
+    // Rebuild persisted facets once when upgrading from the older metadata format.
+    await client.query(`UPDATE node_explorer_results_state SET built_revision = -1
+      WHERE metadata IS NOT NULL AND NOT (metadata->'facets' ? 'ipSource'
+        AND metadata->'facets' ? 'ipAttributes')`);
     for (const table of ["snapshots", "ippure_results", "retired_nodes"]) {
       const name = `node_explorer_${table}`;
       await client.query(`DO $$ BEGIN
@@ -402,6 +406,17 @@ export async function queryResultsProjection(pool, query) {
     // at the SQL boundary as well. All user values use bound parameters.
     for (const feature of ["tls", "reality", "udp"]) {
       if (query.features.includes(feature)) conditions.push(feature);
+    }
+    if (query.ipSources?.length || query.ipAttributes?.length) {
+      conditions.push("payload::jsonb->'ippure'->>'status' = 'success'");
+      if (query.ipSources?.length)
+        conditions.push(
+          `payload::jsonb->'ippure'->>'source' = ANY(${param(query.ipSources)}::text[])`,
+        );
+      if (query.ipAttributes?.length)
+        conditions.push(
+          `(payload::jsonb->'ippure'->'attributes') ?| ${param(query.ipAttributes)}::text[]`,
+        );
     }
     if (query.q)
       conditions.push(

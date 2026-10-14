@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import pg from "pg";
 import { createPostgresStore } from "./postgres-store.js";
 import { aggregateIdentity } from "./node-sources.js";
-import { pruneOldSnapshots, refreshResultsProjection } from "./postgres-results.js";
+import {
+  pruneOldSnapshots,
+  refreshResultsProjection,
+} from "./postgres-results.js";
 import {
   paginateResults,
   parseResultsQuery,
@@ -121,6 +124,14 @@ test(
       { country: "unknown" },
       { country: "JP", type: "vless" },
       { network: "ws" },
+      { ipSource: "ISP" },
+      { ipSource: "ISP,missing" },
+      { ipAttributes: "住宅" },
+      { ipAttributes: "IPv4,missing" },
+      { ipSource: "ISP", ipAttributes: "住宅", country: "JP" },
+      { ipSource: "missing" },
+      { ipAttributes: "missing" },
+      { ipSource: "' OR 1=1 --" },
       { features: "tls,udp" },
       { features: "reality" },
       { media: "openai,netflix" },

@@ -69,6 +69,8 @@ export type Snapshot = {
     type: FacetOption[];
     network: FacetOption[];
     features: FacetOption[];
+    ipSource: FacetOption[];
+    ipAttributes: FacetOption[];
     media: FacetOption[];
   };
   ippureCollector?: {
