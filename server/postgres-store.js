@@ -112,6 +112,13 @@ export async function createPostgresStore(
           ippureCandidates: () => runMaintenance("candidates"),
           getCollectionContext: () => runMaintenance("collect-context"),
           refreshAggregate,
+          async departedNodeIdentities() {
+            return (
+              await pool.query(
+                "SELECT identity FROM node_explorer_departed_nodes",
+              )
+            ).rows.map((row) => row.identity);
+          },
         }
       : {}),
     async insert({ fingerprint, snapshot, payload }) {

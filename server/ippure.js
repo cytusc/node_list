@@ -165,6 +165,12 @@ export function startIPPureCollector({
         identity,
         Math.min(firstSeen.get(identity) ?? Infinity, snapshotId),
       );
+    // Departed panel members are materialized in node_explorer_departed_nodes
+    // by the projection worker; probing them only burns the budget that live
+    // nodes need, and their historical results are already on file.
+    const departed = store.departedNodeIdentities
+      ? await store.departedNodeIdentities()
+      : new Set();
     entries.sort(
       (a, b) =>
         b.priority - a.priority ||
@@ -174,6 +180,7 @@ export function startIPPureCollector({
     const seen = new Set();
     for (const { snapshotId, index, node, identity, shareOnly } of entries) {
       if (abort.signal.aborted) return;
+      if (departed.has(identity)) continue;
       if (shareOnly && seen.has(identity)) continue;
       if (shareOnly) seen.add(identity);
       const old = (shareOnly && aggregateResults.get(identity)) || node.ippure;
