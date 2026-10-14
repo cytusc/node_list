@@ -4,9 +4,14 @@ import { fileURLToPath } from "node:url";
 import { createPostgresStore } from "./postgres-store.js";
 import { aggregateIdentity } from "./node-sources.js";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const root = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+);
 const input = process.argv[2];
-if (!input) throw new Error("Usage: node server/retire-nodes.js targets.json");
+if (!input)
+  throw new Error("Usage: node legacy/node-server/retire-nodes.js targets.json");
 const request = JSON.parse(await readFile(input, "utf8"));
 const validTargets = (targets) =>
   Array.isArray(targets) &&

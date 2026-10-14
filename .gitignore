@@ -11,3 +11,15 @@ data/
 test-results/
 playwright-report/
 .DS_Store
+
+# Go backend build output.
+backend/node-explorer
+backend/github-patrol
+backend/idcheck
+backend/idscan
+backend/linkdiff
+backend/sortchk
+backend/*.exe
+backend/tools/*.tsv
+.workbuddy/
+*.md

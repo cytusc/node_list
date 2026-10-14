@@ -2,7 +2,7 @@
 services:
   github-patrol:
     image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-v1.3.19}
-    command: ["node", "server/github-patrol-service.js"]
+    command: ["/usr/local/bin/github-patrol"]
     restart: unless-stopped
     init: true
     environment:
@@ -24,7 +24,7 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     healthcheck:
-      test: ["CMD", "node", "server/github-patrol-service.js", "--health"]
+      test: ["CMD", "/usr/local/bin/github-patrol", "--health"]
       interval: 30s
       timeout: 5s
       start_period: 30s

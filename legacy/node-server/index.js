@@ -1,3 +1,9 @@
+// ARCHIVED: the Node.js implementation of the collector, scheduler and API.
+// The Go service in ../../backend is the runtime; this tree is kept as the
+// behavioural reference the Go rewrite was verified against (see
+// ../../backend/README.md and the parity tooling in ../../backend/cmd). It is
+// no longer built into the container, and nothing in the shipped path imports
+// it. The unit tests still run under `npm test` so the reference stays honest.
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { loadEnvFile } from "node:process";
@@ -5,7 +11,11 @@ import { fileURLToPath } from "node:url";
 import { createPostgresStore } from "./postgres-store.js";
 import { createApp } from "./app.js";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const root = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+);
 try {
   loadEnvFile(path.join(root, ".env"));
 } catch (error) {

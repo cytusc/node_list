@@ -8,5 +8,5 @@
 !src/**
 !public/
 !public/**
-!server/
-!server/**
+!backend/
+!backend/**

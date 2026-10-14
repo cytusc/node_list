@@ -1,33 +1,44 @@
-# Frontend assets and server sources are platform-independent. Compile them on
-# the builder host to avoid running the Vite/Rolldown toolchain under QEMU.
-FROM --platform=$BUILDPLATFORM node:22-alpine AS build
+# Frontend assets are platform-independent. Compile them on the builder host to
+# avoid running the Vite/Rolldown toolchain under QEMU.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY index.html tsconfig.json vite.config.ts ./
 COPY public ./public
 COPY src ./src
-COPY server ./server
-RUN npm test && npm run build
+RUN npm run build
 
-# Production dependencies are pure JavaScript; install them on the builder
-# host to avoid Node/V8 crashes under QEMU when targeting ARM64.
-FROM --platform=$BUILDPLATFORM node:22-alpine AS dependencies
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# The backend is Go. Cross-compile it on the builder host for the same reason:
+# CGO is disabled, so the target architecture needs no emulated toolchain.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS backend
+WORKDIR /src
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+COPY backend ./
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+      go build -trimpath -ldflags "-s -w" -o /out/node-explorer ./cmd/node-explorer \
+ && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+      go build -trimpath -ldflags "-s -w" -o /out/github-patrol ./cmd/github-patrol
 
-# HTTP collection requires no Chromium installation.
-FROM node:22-bookworm-slim AS runtime
+# Runtime: alpine plus a CA bundle, nothing else. The Go binaries are static,
+# so no Node runtime or production dependencies are shipped. The service binds
+# no privileged port and runs as uid 1000, matching the data volumes.
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates \
+ && adduser -D -u 1000 -h /home/node node \
+ && mkdir -p /app /data/history \
+ && chown -R node:node /app /data/history
 WORKDIR /app
-ENV NODE_ENV=production HOST=0.0.0.0 API_PORT=3001 SUBS_CHECK_DIR=/data/sub DATABASE_PATH=/data/history/nodes.sqlite
-COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
-COPY --from=dependencies --chown=node:node /app/package.json ./package.json
-COPY --from=build --chown=node:node /app/dist ./dist
-COPY --from=build --chown=node:node /app/server ./server
-RUN mkdir -p /data/history && chown node:node /data/history
+ENV HOST=0.0.0.0 API_PORT=3001 SUBS_CHECK_DIR=/data/sub DATABASE_PATH=/data/history/nodes.sqlite
+COPY --from=frontend --chown=node:node /app/dist ./dist
+COPY --from=backend --chown=node:node /out/node-explorer /usr/local/bin/node-explorer
+COPY --from=backend --chown=node:node /out/github-patrol /usr/local/bin/github-patrol
 VOLUME ["/data/history"]
 USER node
 EXPOSE 3001
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD node -e "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["node", "server/index.js"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:3001/api/health || exit 1
+CMD ["/usr/local/bin/node-explorer"]

@@ -1,5 +1,5 @@
 import type { Route } from "@playwright/test";
-import { paginateResults, parseResultsQuery } from "../server/results-query.js";
+import { paginateResults, parseResultsQuery } from "../legacy/node-server/results-query.js";
 
 export function fulfillRoute(
   route: Route,
