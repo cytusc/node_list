@@ -1,17 +1,18 @@
 {
   "name": "node-explorer",
-  "version": "1.3.9",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:backend\" \"vite --host 0.0.0.0\"",
     "dev:backend": "go -C backend run ./cmd/node-explorer",
     "build": "tsc -b && vite build",
-    "build:backend": "go -C backend build -o node-explorer ./cmd/node-explorer && go -C backend build -o github-patrol ./cmd/github-patrol",
+    "build:backend": "go -C backend build -o node-explorer ./cmd/node-explorer && go -C backend build -o node-worker ./cmd/node-worker",
     "start": "./backend/node-explorer",
     "test": "node --test legacy/node-server/*.test.js",
     "test:backend": "go -C backend vet ./... && go -C backend test -race ./...",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "dev:worker": "go -C backend run ./cmd/node-worker"
   },
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.3.12",

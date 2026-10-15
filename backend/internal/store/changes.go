@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"github.com/cytusc/node_list/backend/internal/domain"
 )
 
 // Changes is one consistent database generation. SnapshotIDs includes deleted
@@ -15,6 +16,7 @@ type Changes struct {
 	Enrichments    []Enrichment
 	Retired        []RetiredRow
 	RetiredChanged bool
+	Runtime        map[string]domain.NodeState
 }
 
 // ChangeReader allows independent processes to follow compact per-batch versions.
@@ -80,6 +82,9 @@ func (s *Store) ApplyChanges(c Changes) error {
 		}
 	}
 	s.revision = c.Revision
+	if c.Runtime != nil {
+		s.runtime = c.Runtime
+	}
 	if c.Full || len(c.SnapshotIDs) > 0 || len(decoded) > 0 {
 		s.rebuildOrderLocked()
 	}

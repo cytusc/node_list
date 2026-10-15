@@ -1,10 +1,2 @@
-services:
-  github-patrol:
-    environment:
-      PGHOST: ${PGHOST:?Set PGHOST in .env}
-      PGPORT: ${PGPORT:-5432}
-      PGDATABASE: ${PGDATABASE:?Set PGDATABASE in .env}
-      PGUSER: ${PGUSER:?Set PGUSER in .env}
-      PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
-    networks:
-      - postgres
+# Compatibility overlay. PostgreSQL and modular workers are now included in compose.yaml.
+services: {}

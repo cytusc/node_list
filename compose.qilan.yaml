@@ -1,6 +1,6 @@
 # Append to COMPOSE_FILE to enable the Qilan source with a host session file.
 services:
-  node-explorer:
+  source-ingest:
     environment:
       QILAN_SESSION_FILE: /run/secrets/qilan-session.txt
       QILAN_REFRESH_INTERVAL_SECONDS: ${QILAN_REFRESH_INTERVAL_SECONDS:-900}

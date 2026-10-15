@@ -119,6 +119,7 @@ type Store struct {
 	order    []int // batch ids, newest first
 	enrich   map[int]map[int]json.RawMessage
 	retired  map[string]RetiredRow
+	runtime  map[string]domain.NodeState
 	revision int64
 
 	syncFlight    *flight
@@ -516,6 +517,9 @@ func (s *Store) aggregateLocked(includeRetired bool) *domain.Snapshot {
 			domain.ApplyExitCountry(&node)
 		}
 		result = append(result, node)
+		if state, ok := s.runtime[identity]; ok {
+			state.Apply(&result[len(result)-1])
+		}
 	}
 
 	head := batches[0]

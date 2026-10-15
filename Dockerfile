@@ -21,7 +21,7 @@ ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
       go build -trimpath -ldflags "-s -w" -o /out/node-explorer ./cmd/node-explorer \
  && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-      go build -trimpath -ldflags "-s -w" -o /out/github-patrol ./cmd/github-patrol
+      go build -trimpath -ldflags "-s -w" -o /out/node-worker ./cmd/node-worker
 
 # Runtime: alpine plus a CA bundle, nothing else. The Go binaries are static,
 # so no Node runtime or production dependencies are shipped. The service binds
@@ -29,17 +29,13 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates \
  && adduser -D -u 1000 -h /home/node node \
- && mkdir -p /app /data/history \
- && chown -R node:node /app /data/history
+ && mkdir -p /app \
+ && chown -R node:node /app
 WORKDIR /app
-ENV HOST=0.0.0.0 API_PORT=3001 SUBS_CHECK_DIR=/data/sub DATABASE_PATH=/data/history/nodes.sqlite
+ENV HOST=0.0.0.0 API_PORT=3001 SUBS_CHECK_DIR=/data/sub
 COPY --from=frontend --chown=node:node /app/dist ./dist
 COPY --from=backend --chown=node:node /out/node-explorer /usr/local/bin/node-explorer
-COPY --from=backend --chown=node:node /out/github-patrol /usr/local/bin/github-patrol
-# Preserve old Compose patrol commands and health checks during image-only
-# upgrades. This is a narrow dispatcher, not a Node runtime.
-COPY --chmod=0755 deploy/legacy-node-launcher.sh /usr/local/bin/node
-VOLUME ["/data/history"]
+COPY --from=backend --chown=node:node /out/node-worker /usr/local/bin/node-worker
 USER node
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
+	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/cytusc/node_list/backend/internal/store"
 )
 
@@ -143,6 +144,9 @@ func NewProjector(ctx context.Context, pool *pgxpool.Pool, st *store.Store, cfg 
 		}
 	}
 	if err := p.initSchema(ctx); err != nil {
+		return nil, err
+	}
+	if err := (&Adapter{pool: pool}).initServices(ctx); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -582,7 +586,7 @@ const rankingRevision = "icu-numeric-1"
 
 // nodePayloadRevision invalidates persisted nodes when serialization or inclusion
 // rules change, even when no snapshot/enrichment has changed since deployment.
-const nodePayloadRevision = "all-active-history-3-residential-tie"
+const nodePayloadRevision = "modular-observations-4"
 
 // storedMetadata is the metadata column layout. The API must not see the
 // ranking marker, so it lives in a wrapper rather than on domain.Metadata,
@@ -705,6 +709,15 @@ func (p *Projector) QueryPage(ctx context.Context, q *Query) (*Result, error) {
 		page = max
 	}
 	key, direction := domain.ResultsSort(metadata, q.Sort, q.Direction)
+	preferred := q.Sort == "preferred" || q.Sort == ""
+	if preferred {
+		key = "speed"
+		direction = "desc"
+		if !metadata.SpeedTest {
+			key = "name"
+			direction = "asc"
+		}
+	}
 	order := "DESC"
 	if direction == "asc" {
 		order = "ASC"
@@ -714,6 +727,24 @@ func (p *Projector) QueryPage(ctx context.Context, q *Query) (*Result, error) {
 	query := fmt.Sprintf(`SELECT payload FROM `+tableCurrent+` %s
 		ORDER BY %s %s NULLS LAST, position LIMIT %s OFFSET %s`,
 		where, domain.SortColumn(key), order, limit, offset)
+	if preferred {
+		// Time-dependent freshness is evaluated when queried, even if workers stop.
+		preference := `coalesce((payload::jsonb->'connectivity'->>'reachable')::boolean,false)
+ AND coalesce(payload::jsonb->'connectivity'->>'error','')=''
+ AND coalesce(payload::jsonb->'lifecycle'->>'status','active')='active'
+ AND coalesce(payload::jsonb->'exit'->>'error','')=''
+ AND coalesce(payload::jsonb->'exit'->>'ip','')<>''
+ AND (payload::jsonb->'connectivity'->>'checkedAt')::timestamptz BETWEEN now()-interval '10 minutes' AND now()+interval '1 minute'
+ AND (payload::jsonb->'exit'->>'checkedAt')::timestamptz BETWEEN now()-interval '10 minutes' AND now()+interval '1 minute'
+ AND payload::jsonb->'ippure'->'classification'->>'state'='residential'
+ AND payload::jsonb->'ippure'->'classification'->>'version'='` + strconv.Itoa(ipcheck.VotingVersion) + `'
+ AND payload::jsonb->'ippure'->>'ip'=payload::jsonb->'exit'->>'ip'
+ AND payload::jsonb->'ippure'->'classification'->>'ip'=payload::jsonb->'exit'->>'ip'
+ AND (payload::jsonb->'ippure'->'classification'->>'checkedAt')::timestamptz BETWEEN now()-interval '24 hours' AND now()+interval '1 minute'
+ AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(payload::jsonb->'ippure'->'classification'->'evidence','[]'::jsonb)) e
+ WHERE nullif(e->>'checkedAt','') IS NULL OR NOT ((e->>'checkedAt')::timestamptz BETWEEN now()-interval '24 hours' AND now()+interval '1 minute'))`
+		query = fmt.Sprintf(`SELECT payload FROM `+tableCurrent+` %s ORDER BY (%s) DESC NULLS LAST,%s %s NULLS LAST,position LIMIT %s OFFSET %s`, where, preference, domain.SortColumn(key), order, limit, offset)
+	}
 	rows, err := tx.Query(ctx, query, values...)
 	if err != nil {
 		return nil, err

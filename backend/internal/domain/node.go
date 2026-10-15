@@ -140,7 +140,10 @@ type Node struct {
 	RawConfig      ProxyConfig `json:"rawConfig,omitempty"`
 
 	// Enrichment and presentation state. Never part of a snapshot fingerprint.
-	IPPure *IPPureResult `json:"ippure,omitempty"`
+	IPPure       *IPPureResult      `json:"ippure,omitempty"`
+	Connectivity *ConnectivityState `json:"connectivity,omitempty"`
+	Exit         *ExitState         `json:"exit,omitempty"`
+	Lifecycle    *LifecycleState    `json:"lifecycle,omitempty"`
 
 	// Runtime coordinates. The aggregate view publishes the batch each node
 	// came from, so those three are pointers and stay absent from a
