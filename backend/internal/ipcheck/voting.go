@@ -2,7 +2,7 @@ package ipcheck
 
 import "time"
 
-const VotingVersion = 4
+const VotingVersion = 5
 
 type Vote struct {
 	Provider string   `json:"provider"`
@@ -18,6 +18,7 @@ type Result struct {
 	CheckedAt        string         `json:"checkedAt"`
 	State            string         `json:"state"`
 	Types            []TypeEvidence `json:"types,omitempty"`
+	Evidence         []Evidence     `json:"evidence,omitempty"`
 	Score            int            `json:"-"`
 	ResidentialVotes int            `json:"-"`
 	DatacenterVotes  int            `json:"-"`
@@ -53,6 +54,9 @@ func Score(ip string, evidence []Evidence, now time.Time) Result {
 			newest, selected = stamp, e
 		}
 		v := Vote{Provider: provider, Evidence: selected, Reason: "unknown-or-unavailable"}
+		if selected.CheckedAt != "" {
+			r.Evidence = append(r.Evidence, selected)
+		}
 		types := selected.networkTypes()
 		if types.UsageType != "" || types.CompanyType != "" {
 			r.Types = append(r.Types, types)
@@ -102,8 +106,8 @@ func IPPureEvidence(ip string, attributes []string, checkedAt string) Evidence {
 	return e
 }
 
-// Attributes displays the databases' explicit network types. Recovery votes
-// cannot turn a business/education classification into "unknown" or residential.
+// Attributes summarizes explicit usage types by independent provider. Detailed
+// source disagreements remain in Types; unrelated attributes are preserved.
 func (r Result) Attributes(original []string) []string {
 	attributes := []string{}
 	seen := map[string]bool{}
@@ -114,7 +118,7 @@ func (r Result) Attributes(original []string) []string {
 		}
 	}
 	for _, a := range original {
-		if a == "性质争议" || a == "性质未知" || a == "类型未知" {
+		if a == "性质争议" || a == "性质未知" || a == "类型未知" || a == "类型待确认" {
 			continue
 		}
 		isType := false
@@ -129,12 +133,33 @@ func (r Result) Attributes(original []string) []string {
 		}
 	}
 	if len(r.Types) > 0 {
+		counts := map[string]int{}
+		providers := map[string]bool{}
 		for _, types := range r.Types {
-			if types.UsageType != "" {
-				appendLabel(types.UsageType)
-			} else {
-				appendLabel(types.CompanyType)
+			if providers[types.Provider] {
+				continue
 			}
+			providers[types.Provider] = true
+			label := types.UsageType
+			if label == "" {
+				label = types.CompanyType
+			}
+			if label != "" {
+				counts[label]++
+			}
+		}
+		winner, best, tied := "", 0, false
+		for label, count := range counts {
+			if count > best {
+				winner, best, tied = label, count, false
+			} else if count == best {
+				tied = true
+			}
+		}
+		if len(counts) == 1 || (best >= 2 && !tied) {
+			appendLabel(winner)
+		} else {
+			appendLabel("类型待确认")
 		}
 		return attributes
 	}

@@ -64,8 +64,8 @@ func TestSourceDisagreementKeepsEachUsageType(t *testing.T) {
 		ParseAbuseIPDB([]byte(`{"data":{"ipAddress":"8.8.8.8","usageType":"Mobile ISP"}}`), "8.8.8.8", stamp),
 	}
 	r := Score("8.8.8.8", evidence, now)
-	if got := r.Attributes([]string{"性质争议", "住宅IP"}); !reflect.DeepEqual(got, []string{"商业宽带", "机房IP", "移动网络"}) {
-		t.Fatalf("source types were collapsed: %v", got)
+	if got := r.Attributes([]string{"性质争议", "住宅IP"}); !reflect.DeepEqual(got, []string{"类型待确认"}) {
+		t.Fatalf("unresolved summary: %v", got)
 	}
 	if len(r.Types) != 3 || r.Types[1].CompanyType != "商业宽带" {
 		t.Fatalf("missing database comparison: %+v", r.Types)
@@ -121,5 +121,28 @@ func TestFiveProviderMajorityAndTie(t *testing.T) {
 		if r := Score("8.8.8.8", input, now); r.State != tc.state {
 			t.Fatalf("wrong five-provider decision: %+v", r)
 		}
+	}
+}
+
+func TestSummaryUsesIndependentProviderMajority(t *testing.T) {
+	r := Result{Types: []TypeEvidence{
+		{Provider: "ippure", UsageType: "住宅IP"},
+		{Provider: "ip-api", UsageType: "机房IP"},
+		{Provider: "ipregistry", UsageType: "机房IP", CompanyType: "机房IP"},
+	}}
+	if got := r.Attributes([]string{"住宅IP", "机房IP", "原生IP", "类型待确认"}); !reflect.DeepEqual(got, []string{"原生IP", "机房IP"}) {
+		t.Fatalf("incorrect summary: %v", got)
+	}
+	raw, _ := json.Marshal(r)
+	var restored Result
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if got := restored.Attributes(nil); !reflect.DeepEqual(got, []string{"机房IP"}) {
+		t.Fatalf("persisted result differs: %v", got)
+	}
+	r.Types = []TypeEvidence{{Provider: "ippure", UsageType: "住宅IP"}, {Provider: "ippure", UsageType: "住宅IP"}, {Provider: "ip-api", UsageType: "机房IP"}}
+	if got := r.Attributes(nil); !reflect.DeepEqual(got, []string{"类型待确认"}) {
+		t.Fatalf("duplicate provider counted: %v", got)
 	}
 }

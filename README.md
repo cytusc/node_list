@@ -286,3 +286,19 @@ IP 类型属性按 [xykt/IPQuality](https://github.com/xykt/IPQuality/blob/main/
 结果独立关联原批次和节点，保存到 SQLite/PostgreSQL；不会改变原始快照的去重指纹。列表可按系数排序，电脑列表以独立列展示 ASN 组织、IP 来源、IP 属性、系数等级及人机流量比，各列可单独显示、隐藏和排序；手机卡片按字段展示，系数和人机比例配有绿红渐变条，节点详情展示全部指标和检测时间。刷新页面可读取采集进度。已有成功结果缺少 ASN 组织时自动补采当前批次，补采失败保留原指标，间隔 30 分钟最多重试 3 次；完整成功结果不重复请求；失败间隔 30 分钟持续重试，重启保留累计次数；切换检测方式后，旧方式失败的节点获得新一轮重试机会。已获取的出口 IP 会随失败结果保存，重试时可以复用。新检测批次重新采集，聚合列表显示节点最新批次的 IPPure 结果。历史批次有完整代理配置的失败、待检测及信息不完整记录也会补采，优先处理聚合列表正在展示的记录，并复用历史已成功节点作为查询代理；旧版 IPv6 失败记录重新探测 IPv4 并获得新一轮重试机会。仅能获取 IPv6 的节点显示风险评分接口暂不支持 IPv6，出口连接失败与接口查询失败分别记录。已被覆盖的完整代理配置不会从历史展示字段重建。订阅尚未生成或无法匹配的节点等待后续检查。
 
 非容器运行时设置 `IPPURE_CONTROLLER`、`IPPURE_PROXY_URL`；控制器配置了密钥时同时设置 `IPPURE_CONTROLLER_SECRET`。仅设置其中一个地址不会启动采集。多个页面实例不要共用一个检测代理，以免切换节点相互干扰。IPPure 接口签名变化、限流或节点故障均可能导致检测失败，页面会保留失败状态。
+
+### 全库出口 IP 属性清洗
+
+`ip-type-clean` 覆盖 `node_explorer_ippure_results` 中所有有效出口 IP，包括历史批次和已退役节点；按 IP 去重，不使用节点服务器地址替代出口。它不探测节点当前出口，也不刷新 IPPure 风险分数。它使用四家外部查询来源和已保存的 IPPure 类型；公共接口失败时只复用同一 IP 在 24 小时内的来源证据，保留各来源时间，过期数据不算新结果。
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go -C backend build -o ip-type-clean ./cmd/ip-type-clean
+bash deploy/ip-type-clean.sh --ip 51.158.105.199        # 单 IP 预览
+bash deploy/ip-type-clean.sh --refresh=false           # 全库已有证据预览
+bash deploy/ip-type-clean.sh --refresh=false --apply   # 全库已有证据清洗
+bash deploy/ip-type-clean.sh --apply                   # 全库联网补查并清洗
+```
+
+在部署主机执行包装脚本；它从应用容器安全读取数据库配置，通过临时容器运行，报告写入宿主机 `ip-type-clean-reports/`。可通过 `IP_TYPE_CLEAN_CONTAINER`、`IP_TYPE_CLEAN_BINARY`、`IP_TYPE_CLEAN_REPORT_DIR` 覆盖默认值。二进制也可直接使用 PostgreSQL 标准环境变量运行。
+
+默认不写数据库；`--apply` 在每个 IP 的事务中锁定当前记录，先将原始 JSON 备份至 `node_explorer_ip_type_clean_backup`（按运行 ID、批次、节点索引唯一），再仅更新 `classification` 和 `attributes`。保留节点、检测时间、风险分数、真实出口及其他字段，避免覆盖并发采集结果。失败重跑会重新读取当前数据，数据库互斥锁阻止两个清洗任务同时运行。JSONL 报告记录每个 IP 的证据、来源缺失和更新数量；终端出现 `COMPLETE` 才表示该次全量处理结束。主标签采用独立来源的多数类型；无多数时显示“类型待确认”，各来源原始类型保留在明细中。
