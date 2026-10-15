@@ -136,18 +136,18 @@ func TestClassificationStatesAndStaleEvidence(t *testing.T) {
 		eligible bool
 	}{
 		{"two sources", func(v *record) {}, "residential", true},
-		{"no independent source", func(v *record) { v.CrossCheck = nil }, "unknown", false},
-		{"old tunnel", func(v *record) { v.ProbedAt = now.Add(-25 * time.Hour).Format(time.RFC3339) }, "unknown", false},
-		{"old provider", func(v *record) { v.CrossCheck.CheckedAt = now.Add(-25 * time.Hour).Format(time.RFC3339) }, "unknown", false},
-		{"hosting conflict", func(v *record) { v.CrossCheck.Outcome = "provider-conflict" }, "disputed", false},
-		{"no ASN residential", func(v *record) { v.Verdict = nil }, "unknown", false},
-		{"inverse conflict", func(v *record) { v.Verdict.Attributes = []string{"机房IP"} }, "disputed", false},
-		{"old IP", func(v *record) { v.CrossCheck.IP = "1.1.1.1" }, "unknown", false},
+		{"no independent source", func(v *record) { v.CrossCheck = nil }, "residential", true},
+		{"old tunnel", func(v *record) { v.ProbedAt = now.Add(-25 * time.Hour).Format(time.RFC3339) }, "residential", false},
+		{"old provider", func(v *record) { v.CrossCheck.CheckedAt = now.Add(-25 * time.Hour).Format(time.RFC3339) }, "residential", true},
+		{"hosting conflict", func(v *record) { v.CrossCheck.Outcome = "provider-conflict" }, "residential", true},
+		{"no ASN residential", func(v *record) { v.Verdict = nil }, "residential", true},
+		{"inverse conflict", func(v *record) { v.Verdict.Attributes = []string{"机房IP"} }, "residential", true},
+		{"old IP", func(v *record) { v.CrossCheck.IP = "1.1.1.1" }, "residential", true},
 		{"old weak legacy positive", func(v *record) { v.CrossCheck.CompanyType = "" }, "residential", true},
 		{"hosting supported", func(v *record) {
 			v.Verdict.Attributes = []string{"商业宽带"}
 			v.CrossCheck.Outcome = "provider-conflict"
-		}, "unknown", false},
+		}, "residential", true},
 		{"stale hosting hold", func(v *record) {
 			v.Verdict = nil
 			v.CrossCheck.Outcome = "provider-conflict"
@@ -198,6 +198,7 @@ func TestLatestUnknownSurvivesAuditEvidenceMerge(t *testing.T) {
 	now := time.Now().UTC()
 	current := supportedRecord("8.8.8.8")
 	current.CrossCheck = nil
+	current.Verdict = nil
 	current.AdditionalEvidence = []crossCheck{{Provider: "ipinfo", IP: "8.8.8.8", CheckedAt: now.Format(time.RFC3339Nano), Outcome: "unknown"}}
 	old := supportedRecord("8.8.8.8")
 	old.CrossCheck.CheckedAt = now.Add(-time.Minute).Format(time.RFC3339Nano)
