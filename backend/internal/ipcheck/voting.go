@@ -2,7 +2,7 @@ package ipcheck
 
 import "time"
 
-const VotingVersion = 7
+const VotingVersion = 8
 
 type Vote struct {
 	Provider string   `json:"provider"`
@@ -28,7 +28,7 @@ type Result struct {
 }
 
 // Score gives each named service at most one vote for this exact IP. Unknown
-// responses abstain; the most frequent type wins, with ties resolved to residential.
+// responses abstain; tied leaders prefer residential, then business, then hosting.
 func Score(ip string, evidence []Evidence, now time.Time) Result {
 	r := Result{Version: VotingVersion, IP: ip, CheckedAt: now.UTC().Format(time.RFC3339), State: "unknown"}
 	providers := []string{"ippure", "ipinfo", "ip-api"}
@@ -81,6 +81,13 @@ func Score(ip string, evidence []Evidence, now time.Time) Result {
 		r.Votes = append(r.Votes, v)
 	}
 	r.HasDisagreement = r.ResidentialVotes > 0 && r.DatacenterVotes > 0
+	r.Reclassify()
+	return r
+}
+
+// Reclassify applies the current policy to stored types without changing source
+// evidence, query timestamps or freshness. Old records need no network refresh.
+func (r *Result) Reclassify() {
 	switch r.summaryType() {
 	case "住宅IP":
 		r.State = "residential"
@@ -89,7 +96,6 @@ func Score(ip string, evidence []Evidence, now time.Time) Result {
 	default:
 		r.State = "unknown"
 	}
-	return r
 }
 
 func IPPureEvidence(ip string, attributes []string, checkedAt string) Evidence {
@@ -137,7 +143,8 @@ func (r Result) Attributes(original []string) []string {
 }
 
 // Each provider has one type vote: usage type first, company type as fallback.
-// Failed lookups abstain. A nonempty tie always selects residential by policy.
+// Failed lookups abstain. Only tied leaders qualify for the residential/business
+// preference; all remaining ties resolve to hosting.
 func (r Result) summaryType() string {
 	counts := map[string]int{}
 	providers := map[string]bool{}
@@ -177,7 +184,13 @@ func (r Result) summaryType() string {
 		return "类型未知"
 	}
 	if tied {
-		return "住宅IP"
+		if counts["住宅IP"] == best {
+			return "住宅IP"
+		}
+		if counts["商业宽带"] == best {
+			return "商业宽带"
+		}
+		return "机房IP"
 	}
 	return winner
 }

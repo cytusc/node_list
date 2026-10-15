@@ -582,7 +582,7 @@ const rankingRevision = "icu-numeric-1"
 
 // nodePayloadRevision invalidates persisted nodes when serialization or inclusion
 // rules change, even when no snapshot/enrichment has changed since deployment.
-const nodePayloadRevision = "all-active-history-2"
+const nodePayloadRevision = "all-active-history-3-residential-tie"
 
 // storedMetadata is the metadata column layout. The API must not see the
 // ranking marker, so it lives in a wrapper rather than on domain.Metadata,
