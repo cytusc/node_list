@@ -81,6 +81,14 @@ func (e Evidence) networkTypes() TypeEvidence {
 	return TypeEvidence{Provider: e.Provider, UsageType: NetworkTypeLabel(usage), CompanyType: NetworkTypeLabel(e.CompanyType)}
 }
 
+// StoredTypeEvidence migrates older persisted source details. Keep the original
+// timestamp so a failed refresh cannot extend the life of stale source evidence.
+func StoredTypeEvidence(ip, checkedAt string, t TypeEvidence) Evidence {
+	e := Evidence{Provider: t.Provider, IP: ip, CheckedAt: checkedAt, UsageType: t.UsageType, CompanyType: t.CompanyType}
+	e.classifyUsage()
+	return e
+}
+
 // Recovery needs explicit ISP evidence. A false hosting flag alone says
 // nothing about whether the IP is residential, mobile, business or education.
 func (e *Evidence) classifyUsage() {

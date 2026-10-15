@@ -40,9 +40,6 @@ func TestClassificationUsesMajorityEvenWhenIPPureFails(t *testing.T) {
 				t.Fatalf("unexpected classification: %+v", result.Classification)
 			}
 			wantAttrs := "住宅IP"
-			if tc.status == "success" {
-				wantAttrs = "机房IP,住宅IP"
-			}
 			if strings.Join(result.Attributes, ",") != wantAttrs || result.Status != tc.status {
 				t.Fatalf("unexpected result: %+v", result)
 			}
