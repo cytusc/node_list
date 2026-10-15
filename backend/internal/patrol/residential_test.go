@@ -25,7 +25,7 @@ func TestCurrentResidentialVerification(t *testing.T) {
 		{"two sources", `{"ip":"8.8.8.8","is_hosting":false,"company":{"type":"isp"}}`, "isp", "8.8.8.8", false, true},
 		{"VPN is independent", `{"ip":"8.8.8.8","is_hosting":false,"is_vpn":true,"company":{"type":"isp"}}`, "isp", "8.8.8.8", false, true},
 		{"provider hosting conflict", `{"ip":"8.8.8.8","is_hosting":true,"company":{"type":"isp"}}`, "isp", "8.8.8.8", false, false},
-		{"explicit non-hosting vote", `{"ip":"8.8.8.8","is_hosting":false,"company":{"type":"business"}}`, "isp", "8.8.8.8", false, true},
+		{"business nonhosting is not residential", `{"ip":"8.8.8.8","is_hosting":false,"company":{"type":"business"}}`, "isp", "8.8.8.8", false, false},
 		{"reverse conflict", `{"ip":"8.8.8.8","is_hosting":false,"company":{"type":"isp"}}`, "hosting", "8.8.8.8", false, false},
 		{"quota error", `{"error":"quota exceeded"}`, "isp", "8.8.8.8", false, false},
 		{"rotating exit", `{}`, "isp", "1.1.1.1", false, false},

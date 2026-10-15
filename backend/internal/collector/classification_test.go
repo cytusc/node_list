@@ -23,21 +23,27 @@ func TestClassificationUsesMajorityEvenWhenIPPureFails(t *testing.T) {
 		{"IPPure unavailable", nil, "error", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := ipcheck.NewClient("", "")
+			c := ipcheck.NewClient("", "", "fixture-registry-key")
 			c.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				body := `{"ip":"8.8.8.8","is_hosting":false}`
+				body := `{"ip":"8.8.8.8","asn":{"type":"isp"}}`
 				if r.URL.Host == "ip-api.com" {
 					body = `{"status":"success","query":"8.8.8.8","hosting":false}`
+				} else if r.URL.Host == "api.ipregistry.co" {
+					body = `{"ip":"8.8.8.8","connection":{"type":"isp","asn":15169}}`
 				}
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 			})}
 			s := &Scheduler{classification: c}
 			result := &domain.IPPureResult{IP: "8.8.8.8", Status: tc.status, Attributes: tc.attrs, CheckedAt: time.Now().UTC().Format(time.RFC3339)}
 			s.classify(context.Background(), result, tc.attrs)
-			if result.Classification == nil || result.Classification.State != "residential" || result.Classification.ResidentialVotes != 2 || result.Classification.UnknownVotes != tc.wantUnknown {
+			if result.Classification == nil || result.Classification.State != "residential" || result.Classification.ResidentialVotes != 2 || result.Classification.UnknownVotes != tc.wantUnknown+1 {
 				t.Fatalf("unexpected classification: %+v", result.Classification)
 			}
-			if strings.Join(result.Attributes, ",") != "住宅IP" || result.Status != tc.status {
+			wantAttrs := "住宅IP"
+			if tc.status == "success" {
+				wantAttrs = "机房IP,住宅IP"
+			}
+			if strings.Join(result.Attributes, ",") != wantAttrs || result.Status != tc.status {
 				t.Fatalf("unexpected result: %+v", result)
 			}
 		})
