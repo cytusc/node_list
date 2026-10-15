@@ -203,7 +203,7 @@ func TestLatestUnknownSurvivesAuditEvidenceMerge(t *testing.T) {
 	old.CrossCheck.CheckedAt = now.Add(-time.Minute).Format(time.RFC3339Nano)
 	r := report{Records: []record{current}}
 	mergeClassificationEvidence(&r, &report{Records: []record{old}})
-	if r.Records[0].Residential || r.Records[0].Voting.ResidentialVotes != 1 {
+	if r.Records[0].Residential || r.Records[0].Classification != "unknown" {
 		t.Fatalf("old success replaced new abstention: %+v", r.Records[0])
 	}
 }

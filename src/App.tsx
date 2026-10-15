@@ -102,21 +102,7 @@ function IPPureMetric({
   metric: IPPureMetricName;
 }) {
   if (metric === "attributes" && result?.classification) {
-    const voting = result.classification;
-    const title = voting.votes
-      .map(
-        (v) =>
-          `${v.provider}: ${v.points > 0 ? "+" : ""}${v.points} (${v.reason})`,
-      )
-      .join("\n");
-    return (
-      <span title={title}>
-        {result.attributes?.join(" · ") || "性质未知"} · 住宅{" "}
-        {voting.residentialVotes} / 机房 {voting.datacenterVotes} / 未知{" "}
-        {voting.unknownVotes}
-        {voting.hasDisagreement ? "（来源有分歧）" : ""}
-      </span>
-    );
+    return <span>{result.attributes?.join(" · ") || "性质未知"}</span>;
   }
   if (result?.status !== "success")
     return (

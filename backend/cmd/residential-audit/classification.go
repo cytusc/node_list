@@ -49,7 +49,6 @@ func classifyRecord(v *record, now time.Time) {
 	v.EvidenceConflict = false
 	v.Classification = "unknown"
 	v.ClassificationReason = "insufficient-evidence"
-	v.Voting = nil
 	if !v.Reachable || v.VerifiedIP == "" {
 		return
 	}
@@ -62,9 +61,8 @@ func classifyRecord(v *record, now time.Time) {
 		evidence = append(evidence, ipcheck.IPPureEvidence(v.VerifiedIP, v.Verdict.Attributes, v.ProbedAt))
 	}
 	result := ipcheck.Score(v.VerifiedIP, evidence, now)
-	v.Voting = &result
 	v.Classification = result.State
-	v.ClassificationReason = result.String()
+	v.ClassificationReason = result.State
 	v.EvidenceConflict = result.HasDisagreement
 	checked, err := time.Parse(time.RFC3339Nano, v.ProbedAt)
 	v.Residential = result.State == "residential" && err == nil && !checked.After(now.Add(5*time.Minute)) && now.Sub(checked) <= 24*time.Hour

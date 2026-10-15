@@ -7,12 +7,6 @@ export type MediaTag = {
 export type IPClassification = {
   version: number;
   state: "residential" | "datacenter" | "disputed" | "unknown";
-  score: number;
-  residentialVotes: number;
-  datacenterVotes: number;
-  unknownVotes: number;
-  hasDisagreement: boolean;
-  votes: { provider: string; points: number; reason: string }[];
 };
 export type IPPureResult = {
   classification?: IPClassification;

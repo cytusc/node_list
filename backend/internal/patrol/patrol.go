@@ -457,7 +457,6 @@ func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]Recov
 		var success bool
 		var currentIP string
 		classification := "unknown"
-		var voting *ipcheck.Result
 		if outbound := outbounds[0]; outbound != nil && outbound.Error == nil {
 			probeCtx, cancel := context.WithTimeout(ctx, p.timeout)
 			success, _ = p.probe(probeCtx, outbound.Client)
@@ -465,9 +464,7 @@ func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]Recov
 			if success {
 				verifyCtx, verifyCancel := context.WithTimeout(ctx, 60*time.Second)
 				if p.residentialAssessment != nil {
-					var votes ipcheck.Result
-					currentIP, votes, err = p.residentialAssessment(verifyCtx, outbound.Client)
-					voting = &votes
+					currentIP, _, err = p.residentialAssessment(verifyCtx, outbound.Client)
 				} else {
 					currentIP, err = p.residentialVerifier(verifyCtx, outbound.Client)
 				}
@@ -508,7 +505,6 @@ func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]Recov
 			Success:               success,
 			VerifiedIP:            currentIP,
 			ClassificationVersion: ipcheck.VotingVersion,
-			Voting:                voting,
 			Classification:        classification,
 		}
 		summary.Checked++
@@ -529,14 +525,13 @@ func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]Recov
 
 // RecoveryState tracks consecutive revival successes across restarts.
 type RecoveryState struct {
-	Voting                *ipcheck.Result `json:"voting,omitempty"`
-	Classification        string          `json:"classification,omitempty"`
-	VerifiedIP            string          `json:"verifiedIP,omitempty"`
-	ClassificationVersion int             `json:"classificationVersion,omitempty"`
-	RetiredAt             string          `json:"retiredAt"`
-	CheckedAt             string          `json:"checkedAt"`
-	Successes             int             `json:"successes"`
-	Success               bool            `json:"success"`
+	Classification        string `json:"classification,omitempty"`
+	VerifiedIP            string `json:"verifiedIP,omitempty"`
+	ClassificationVersion int    `json:"classificationVersion,omitempty"`
+	RetiredAt             string `json:"retiredAt"`
+	CheckedAt             string `json:"checkedAt"`
+	Successes             int    `json:"successes"`
+	Success               bool   `json:"success"`
 }
 
 func rankSuccess(node domain.Node) int {
