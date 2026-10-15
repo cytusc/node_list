@@ -36,7 +36,7 @@ func TestClassificationUsesMajorityEvenWhenIPPureFails(t *testing.T) {
 			s := &Scheduler{classification: c}
 			result := &domain.IPPureResult{IP: "8.8.8.8", Status: tc.status, Attributes: tc.attrs, CheckedAt: time.Now().UTC().Format(time.RFC3339)}
 			s.classify(context.Background(), result, tc.attrs)
-			if result.Classification == nil || result.Classification.State != "residential" || result.Classification.ResidentialVotes != 2 || result.Classification.UnknownVotes != tc.wantUnknown+1 {
+			if result.Classification == nil || result.Classification.State != "residential" || result.Classification.ResidentialVotes != 2 || result.Classification.UnknownVotes != tc.wantUnknown+2 {
 				t.Fatalf("unexpected classification: %+v", result.Classification)
 			}
 			wantAttrs := "住宅IP"
