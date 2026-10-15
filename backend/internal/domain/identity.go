@@ -294,8 +294,7 @@ func SnapshotFingerprint(s Snapshot) (string, error) {
 	}
 	for i, n := range s.Nodes {
 		copy := n
-		copy.RawLink = ""
-		copy.RawConfig = nil
+		copy.ClearCredentials()
 		original.Nodes[i] = copy
 	}
 	b, err := marshalJSON(original)

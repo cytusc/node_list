@@ -42,10 +42,9 @@ def node(i, batch):
     """One node with a realistic spread of filterable attributes.
 
     Key presence matters as much as the values: the JavaScript ingest copies a
-    whitelist field only when the source has the key, and production payloads
-    never contain a falsy "reality", an empty "media" array or a false
-    "githubReachable". Emitting them here would compare shapes the pipeline
-    cannot actually produce.
+    whitelist field only when the source has the key. This fixture uses a
+    typical spread of source fields; the Go model also preserves explicit zero
+    values and nulls when supplied by upstream JSON.
     """
     country = COUNTRIES[(i * 3 + batch) % len(COUNTRIES)]
     kind = TYPES[(i + batch) % len(TYPES)]
@@ -79,12 +78,7 @@ def node(i, batch):
         media.append({"platform": "youtube", "tag": country})
     if media:
         out["media"] = media
-    # Nodes without an IPPure row omit the country entirely, which is how the
-    # "unknown" facet bucket arises. Deleting the key rather than writing ""
-    # matters: the JavaScript ingest copies only keys the source has, while the
-    # Go model uses omitempty, so an explicit empty string is the one shape the
-    # two cannot agree on (production never produces it: 705/705 nodes carried a
-    # non-empty country). Absent is modelled identically by both.
+    # Nodes without an IPPure row omit country to exercise the "unknown" facet.
     if i % 3 == 2:
         del out["country"]
     return out

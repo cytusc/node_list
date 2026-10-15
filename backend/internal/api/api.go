@@ -225,8 +225,7 @@ func publicSnapshot(s domain.Snapshot) domain.Snapshot {
 	nodes := make([]domain.Node, len(s.Nodes))
 	copy(nodes, s.Nodes)
 	for i := range nodes {
-		nodes[i].RawLink = ""
-		nodes[i].RawConfig = nil
+		nodes[i].ClearCredentials()
 	}
 	s.Nodes = nodes
 	return s

@@ -213,8 +213,8 @@ func sameSnapshotContent(left, right []byte) bool {
 	}
 	for i := range a.Nodes {
 		x, y := a.Nodes[i], b.Nodes[i]
-		x.RawLink, y.RawLink = "", ""
-		x.RawConfig, y.RawConfig = nil, nil
+		x.ClearCredentials()
+		y.ClearCredentials()
 		xb, _ := json.Marshal(x)
 		yb, _ := json.Marshal(y)
 		if string(xb) != string(yb) {

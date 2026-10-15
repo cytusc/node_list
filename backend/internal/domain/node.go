@@ -63,6 +63,8 @@ func (m Media) MarshalJSON() ([]byte, error) {
 
 // IPPureResult is the enrichment attached to a probed node.
 type IPPureResult struct {
+	shape jsonShape
+
 	CheckedAt string `json:"checkedAt"`
 	Attempts  int    `json:"attempts"`
 
@@ -110,15 +112,16 @@ type ExitIPAttempt struct {
 
 // Node is one detected connection inside a snapshot.
 type Node struct {
+	shape jsonShape
+
 	Name     string `json:"name,omitempty"`
 	BaseName string `json:"baseName,omitempty"`
 	Type     string `json:"type,omitempty"`
 	Server   string `json:"server,omitempty"`
 	Port     string `json:"port,omitempty"`
 	SNI      string `json:"sni,omitempty"`
-	// TLS/UDP/Speed are always rendered, even when false or zero: the results
-	// view reads them directly and the stored payload must stay byte-compatible
-	// with what the JavaScript service wrote.
+	// Programmatically created nodes render TLS/UDP/Speed by default. Decoded
+	// nodes additionally preserve the source's absent/zero/null distinctions.
 	TLS            bool        `json:"tls"`
 	Reality        bool        `json:"reality,omitempty"`
 	UDP            bool        `json:"udp"`
@@ -179,7 +182,12 @@ func (n *Node) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
+	shape, err := readJSONShape(data, nodeJSONFields)
+	if err != nil {
+		return err
+	}
 	*n = Node(decoded.plain)
+	n.shape = shape
 	if len(decoded.Port) > 0 && string(decoded.Port) != "null" {
 		if decoded.Port[0] == '"' {
 			var s string
@@ -196,6 +204,58 @@ func (n *Node) UnmarshalJSON(data []byte) error {
 		}
 	}
 	return nil
+}
+
+// MarshalJSON preserves explicitly supplied zero values without adding absent
+// optional properties. Typed fields still supply any subsequently updated value.
+func (n Node) MarshalJSON() ([]byte, error) {
+	type plain Node
+	return marshalJSONShape(plain(n), n.shape, nodeJSONFields)
+}
+
+// ClearCredentials removes both the values and their JSON presence. Public
+// responses and snapshot identities must exclude even empty credential fields.
+func (n *Node) ClearCredentials() {
+	n.RawLink = ""
+	n.RawConfig = nil
+	for i, f := range nodeJSONFields {
+		if f.name == "rawLink" || f.name == "rawConfig" {
+			bit := uint64(1) << i
+			n.shape.present &^= bit
+			n.shape.nulls &^= bit
+		}
+	}
+}
+
+func (r *IPPureResult) UnmarshalJSON(data []byte) error {
+	type plain IPPureResult
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	shape, err := readJSONShape(data, ippureJSONFields)
+	if err != nil {
+		return err
+	}
+	*r = IPPureResult(decoded)
+	r.shape = shape
+	return nil
+}
+
+func (r IPPureResult) MarshalJSON() ([]byte, error) {
+	type plain IPPureResult
+	shape := r.shape
+	if !shape.decoded && r.Status == "success" {
+		// A newly collected successful verdict always has a score, including
+		// the valid value 0. Failed/unsupported results must not gain one.
+		shape.decoded = true
+		for i, f := range ippureJSONFields {
+			if !f.omitEmpty || f.name == "score" {
+				shape.present |= uint64(1) << i
+			}
+		}
+	}
+	return marshalJSONShape(plain(r), shape, ippureJSONFields)
 }
 
 // Snapshot is one detection batch.
