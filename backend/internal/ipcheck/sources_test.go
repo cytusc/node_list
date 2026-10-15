@@ -122,7 +122,7 @@ func TestNetworkTypeSourcesUseConfiguredCredentialsAndPublicDefaults(t *testing.
 		t.Fatalf("optional sources not decoded: %+v", evidence)
 	}
 	r := Score("8.8.8.8", evidence, time.Now())
-	if strings.Join(r.Attributes(nil), ",") != "类型待确认" || r.ResidentialVotes != 0 {
+	if strings.Join(r.Attributes(nil), ",") != "住宅IP" || r.ResidentialVotes != 0 {
 		t.Fatalf("incorrect optional source types: %+v", r)
 	}
 	public := NewClient("", "")
@@ -132,7 +132,7 @@ func TestNetworkTypeSourcesUseConfiguredCredentialsAndPublicDefaults(t *testing.
 	if calls["ipregistry.co"] != 1 || calls["api.ipregistry.co"] != 2 || calls["ipinfo.check.place"] != 5 || calls["api.abuseipdb.com"] != 1 {
 		t.Fatalf("public lookups should use the script's endpoints and cache results: %v", calls)
 	}
-	if got := strings.Join(Score("8.8.8.8", publicEvidence, time.Now()).Attributes(nil), ","); got != "类型待确认" {
+	if got := strings.Join(Score("8.8.8.8", publicEvidence, time.Now()).Attributes(nil), ","); got != "住宅IP" {
 		t.Fatalf("public source types were not decoded: %s", got)
 	}
 }

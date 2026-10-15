@@ -34,12 +34,10 @@ func TestAllThreeSourceVoteCombinations(t *testing.T) {
 					}
 					want := "unknown"
 					switch {
-					case positive >= 2:
+					case positive > 0 && positive >= negative:
 						want = "residential"
-					case negative >= 2:
+					case negative > positive:
 						want = "datacenter"
-					case positive > 0 && negative > 0:
-						want = "disputed"
 					}
 					r := Score("8.8.8.8", []Evidence{evidence("ippure", a, now), evidence("ipinfo", b, now), evidence("ip-api", c, now)}, now)
 					if r.State != want || r.Score != a+b+c || r.ResidentialVotes != positive || r.DatacenterVotes != negative || len(r.Votes) != 3 {
@@ -68,7 +66,7 @@ func TestVotesCannotBeMultipliedOrTransferred(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := Score("8.8.8.8", []Evidence{evidence("ippure", 1, now), tc.extra}, now)
-			if r.State != "unknown" || r.ResidentialVotes != 1 {
+			if r.State != "residential" || r.ResidentialVotes != 1 {
 				t.Fatalf("invalid evidence counted: %+v", r)
 			}
 		})
@@ -76,7 +74,7 @@ func TestVotesCannotBeMultipliedOrTransferred(t *testing.T) {
 	old := evidence("ipinfo", 1, now.Add(-time.Minute))
 	failed := evidence("ipinfo", 0, now)
 	r := Score("8.8.8.8", []Evidence{old, failed, evidence("ippure", 1, now)}, now)
-	if r.State != "unknown" {
+	if r.State != "residential" {
 		t.Fatal("a failed fresh lookup reused an older positive vote")
 	}
 }

@@ -2,7 +2,7 @@ package ipcheck
 
 import "time"
 
-const VotingVersion = 6
+const VotingVersion = 7
 
 type Vote struct {
 	Provider string   `json:"provider"`
@@ -28,7 +28,7 @@ type Result struct {
 }
 
 // Score gives each named service at most one vote for this exact IP. Unknown
-// responses abstain; two agreeing independent sources are required.
+// responses abstain; the most frequent type wins, with ties resolved to residential.
 func Score(ip string, evidence []Evidence, now time.Time) Result {
 	r := Result{Version: VotingVersion, IP: ip, CheckedAt: now.UTC().Format(time.RFC3339), State: "unknown"}
 	providers := []string{"ippure", "ipinfo", "ip-api"}
@@ -81,13 +81,13 @@ func Score(ip string, evidence []Evidence, now time.Time) Result {
 		r.Votes = append(r.Votes, v)
 	}
 	r.HasDisagreement = r.ResidentialVotes > 0 && r.DatacenterVotes > 0
-	switch {
-	case r.ResidentialVotes >= 2 && r.ResidentialVotes > r.DatacenterVotes:
+	switch r.summaryType() {
+	case "住宅IP":
 		r.State = "residential"
-	case r.DatacenterVotes >= 2 && r.DatacenterVotes > r.ResidentialVotes:
+	case "机房IP":
 		r.State = "datacenter"
-	case r.HasDisagreement:
-		r.State = "disputed"
+	default:
+		r.State = "unknown"
 	}
 	return r
 }
@@ -132,37 +132,52 @@ func (r Result) Attributes(original []string) []string {
 			appendLabel(a)
 		}
 	}
-	if len(r.Types) > 0 {
-		counts := map[string]int{}
-		providers := map[string]bool{}
-		for _, types := range r.Types {
-			if providers[types.Provider] {
-				continue
-			}
-			providers[types.Provider] = true
-			label := types.UsageType
-			if label == "" {
-				label = types.CompanyType
-			}
-			if label != "" {
-				counts[label]++
-			}
-		}
-		winner, best, tied := "", 0, false
-		for label, count := range counts {
-			if count > best {
-				winner, best, tied = label, count, false
-			} else if count == best {
-				tied = true
-			}
-		}
-		if len(counts) == 1 || (best >= 2 && !tied) {
-			appendLabel(winner)
-		} else {
-			appendLabel("类型待确认")
-		}
-		return attributes
-	}
-	appendLabel("类型未知")
+	appendLabel(r.summaryType())
 	return attributes
+}
+
+// Each provider has one type vote: usage type first, company type as fallback.
+// Failed lookups abstain. A nonempty tie always selects residential by policy.
+func (r Result) summaryType() string {
+	counts := map[string]int{}
+	providers := map[string]bool{}
+	for _, t := range r.Types {
+		if providers[t.Provider] {
+			continue
+		}
+		providers[t.Provider] = true
+		label := t.UsageType
+		if label == "" {
+			label = t.CompanyType
+		}
+		if label != "" {
+			counts[label]++
+		}
+	}
+	// Older in-memory callers may carry explicit outcomes without type fields.
+	if len(counts) == 0 {
+		for _, vote := range r.Votes {
+			if vote.Points == 1 {
+				counts["住宅IP"]++
+			}
+			if vote.Points == -1 {
+				counts["机房IP"]++
+			}
+		}
+	}
+	winner, best, tied := "", 0, false
+	for label, count := range counts {
+		if count > best {
+			winner, best, tied = label, count, false
+		} else if count == best {
+			tied = true
+		}
+	}
+	if best == 0 {
+		return "类型未知"
+	}
+	if tied {
+		return "住宅IP"
+	}
+	return winner
 }

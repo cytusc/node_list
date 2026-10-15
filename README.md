@@ -273,7 +273,7 @@ COMPOSE_FILE=compose.yaml:compose.subs-check.yaml:compose.ippure.yaml
 
 IP 类型属性按 [xykt/IPQuality](https://github.com/xykt/IPQuality/blob/main/ip.sh) 的映射规则处理 ASN/使用类型、公司类型与 AbuseIPDB `usageType`：`business`/`Commercial` 为商业宽带，`isp`/`Fixed Line ISP` 为住宅 IP，`hosting`/`Data Center/Web Hosting/Transit` 为机房 IP，`Mobile ISP` 为移动网络，并识别教育、政府、银行、组织、军事、图书馆、CDN、搜索引擎和保留地址等用途。IP-API 的 `mobile=true`、`hosting=true` 分别识别移动、机房属性；`hosting=false` 不推断为住宅。来源缺少字段时不生成类型，有未识别的类型值时显示其他网络。
 
-每家来源的使用类型和公司类型分别保存在 `classification.types`，节点详情按数据库逐项展示，列表优先显示各来源的使用类型，缺少时使用公司类型，相同标签去重。不同来源的判断会同时保留；已识别的商业、教育等用途不再附加“性质未知/性质争议”。所有来源均无类型信息时显示“类型未知”。住宅恢复使用的多数判定与页面属性分别处理，至少两家明确支持 ISP 且住宅票多于机房票才允许继续恢复流程。
+每家来源的使用类型和公司类型分别保存在 `classification.types`，节点详情显示全部 7 家。每家最多一票，优先使用使用类型，缺少时使用公司类型；请求失败、缺少类型的来源弃权。有效票中票数最多的类型作为汇总结果，最高票并列时统一判为住宅 IP；全部弃权时显示“类型未知”。各来源原始判断保留在明细中，住宅恢复采用同一汇总判定。
 
 默认查询 7 家来源：IPPure、IPinfo、IP-API（ip-api.com）、IPregistry、AbuseIPDB、ipapi.is 和 IP2Location。脚本“IP 类型属性”的 5 家来源均已接入；IP-API 与 ipapi.is 是独立服务。ipapi.is 和 IP2Location 分别复用脚本的 `https://ipinfo.check.place/{IP}?db=ipapi` 与 `?db=ip2location`，按 `asn.type`/`company.type` 和 `usage_type`/`as_info.as_usage_type` 分别保存使用类型与公司类型，无需额外密钥。IPinfo 使用脚本同款公开 widget 接口；IPregistry 按脚本从 `https://ipregistry.co` 提取公开演示 Key，无法提取时使用脚本的演示默认值，并带官网 Origin/Referer 查询 `api.ipregistry.co`；AbuseIPDB 使用脚本的 `https://ipinfo.check.place/{IP}?db=abuseipdb` 转发入口。演示 Key 获取结果会缓存，避免每个 IP 重复抓取官网。设置 `IPINFO_TOKEN`、`IPREGISTRY_API_KEY`、`ABUSEIPDB_API_KEY` 时优先使用对应个人凭据和官方接口，Compose 采集和巡检容器均会接收这些配置。公开入口限流、失败或缺少字段时按未知处理。
 
@@ -289,7 +289,7 @@ IP 类型属性按 [xykt/IPQuality](https://github.com/xykt/IPQuality/blob/main/
 
 ### 全库出口 IP 属性清洗
 
-`ip-type-clean` 覆盖 `node_explorer_ippure_results` 中所有有效出口 IP，包括历史批次和已退役节点；按 IP 去重，不使用节点服务器地址替代出口。它不探测节点当前出口，也不刷新 IPPure 风险分数。它使用四家外部查询来源和已保存的 IPPure 类型；公共接口失败时只复用同一 IP 在 24 小时内的来源证据，保留各来源时间，过期数据不算新结果。
+`ip-type-clean` 覆盖 `node_explorer_ippure_results` 中所有有效出口 IP，包括历史批次和已退役节点；按 IP 去重，不使用节点服务器地址替代出口。它不探测节点当前出口，也不刷新 IPPure 风险分数。它使用六家外部查询来源和已保存的 IPPure 类型；公共接口失败时只复用同一 IP 在 24 小时内的来源证据，保留各来源时间，过期数据不算新结果。
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go -C backend build -o ip-type-clean ./cmd/ip-type-clean
@@ -301,4 +301,4 @@ bash deploy/ip-type-clean.sh --apply                   # 全库联网补查并�
 
 在部署主机执行包装脚本；它从应用容器安全读取数据库配置，通过临时容器运行，报告写入宿主机 `ip-type-clean-reports/`。可通过 `IP_TYPE_CLEAN_CONTAINER`、`IP_TYPE_CLEAN_BINARY`、`IP_TYPE_CLEAN_REPORT_DIR` 覆盖默认值。二进制也可直接使用 PostgreSQL 标准环境变量运行。
 
-默认不写数据库；`--apply` 在每个 IP 的事务中锁定当前记录，先将原始 JSON 备份至 `node_explorer_ip_type_clean_backup`（按运行 ID、批次、节点索引唯一），再仅更新 `classification` 和 `attributes`。保留节点、检测时间、风险分数、真实出口及其他字段，避免覆盖并发采集结果。失败重跑会重新读取当前数据，数据库互斥锁阻止两个清洗任务同时运行。JSONL 报告记录每个 IP 的证据、来源缺失和更新数量；终端出现 `COMPLETE` 才表示该次全量处理结束。主标签采用独立来源的多数类型；无多数时显示“类型待确认”，各来源原始类型保留在明细中。
+默认不写数据库；`--apply` 在每个 IP 的事务中锁定当前记录，先将原始 JSON 备份至 `node_explorer_ip_type_clean_backup`（按运行 ID、批次、节点索引唯一），再仅更新 `classification` 和 `attributes`。保留节点、检测时间、风险分数、真实出口及其他字段，避免覆盖并发采集结果。失败重跑会重新读取当前数据，数据库互斥锁阻止两个清洗任务同时运行。JSONL 报告记录每个 IP 的证据、来源缺失和更新数量；终端出现 `COMPLETE` 才表示该次全量处理结束。主标签采用独立来源票数最多的类型；最高票并列时判为住宅 IP，全部弃权时显示“类型未知”，各来源原始类型保留在明细中。
