@@ -184,6 +184,9 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 		}
 	}
 	if resp.StatusCode != 200 {
+		// Public demo endpoints may reject an entire egress address. Avoid
+		// repeating that rejection for every IP in a maintenance sweep.
+		c.next[provider] = time.Now().Add(time.Minute)
 		if provider == "ipregistry" && c.IPRegistryKey == "" && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 			// Refresh rejected demo keys on the next lookup, with bounded pacing.
 			c.registryDemoUntil = time.Time{}

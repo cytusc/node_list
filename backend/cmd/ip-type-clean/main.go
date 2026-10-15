@@ -63,6 +63,7 @@ func run() error {
 		return err
 	}
 	byIP := map[string]saved{}
+	history := map[string][]ipcheck.Evidence{}
 	records := 0
 	invalid := 0
 	for rows.Next() {
@@ -84,6 +85,7 @@ func run() error {
 			continue
 		}
 		records++
+		history[v.IP] = append(history[v.IP], storedEvidence(v)...)
 		old, ok := byIP[v.IP]
 		if !ok || v.CheckedAt > old.CheckedAt {
 			byIP[v.IP] = v
@@ -114,17 +116,27 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		// Avoid a full enrichment-table scan for every distinct exit IP. Build
+		// concurrently so regular collection and API reads can keep running.
+		if _, err := db.Exec(ctx, `CREATE INDEX CONCURRENTLY IF NOT EXISTS node_explorer_ippure_exit_ip_idx ON node_explorer_ippure_results ((payload::jsonb->>'ip'))`); err != nil {
+			return err
+		}
 	}
 	runID := time.Now().UTC().Format("20060102T150405.000000000Z")
 	fmt.Printf("run=%s apply=%t records=%d uniqueIPs=%d invalidIPs=%d\n", runID, *apply, records, len(ips), invalid)
 	client := ipcheck.NewClient(os.Getenv("IPINFO_TOKEN"), os.Getenv("IP_API_PRO_KEY"), os.Getenv("IPREGISTRY_API_KEY"), os.Getenv("ABUSEIPDB_API_KEY"))
+	if *refresh {
+		fmt.Printf("Priming IP-API batches (%d IPs, <=100 IPs/request, <=15 requests/minute)\n", len(ips))
+		if err := client.PrimeIPAPIBatch(ctx, ips); err != nil {
+			return err
+		}
+	}
 	var total int64
 	missing := 0
 	for i, ip := range ips {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		previous := byIP[ip]
 		now := time.Now()
 		var ev []ipcheck.Evidence
 		if *refresh {
@@ -132,21 +144,7 @@ func run() error {
 		}
 		// Preserve unexpired source evidence when the public API is unavailable.
 		// Never reinterpret merged attributes as the IPPure source.
-		var prior []ipcheck.Evidence
-		if previous.Classification != nil && previous.Classification.IP == ip {
-			prior = previous.Classification.Evidence
-			if len(prior) == 0 {
-				for _, t := range previous.Classification.Types {
-					stamp := previous.Classification.CheckedAt
-					if t.Provider == "ippure" {
-						stamp = previous.CheckedAt
-					}
-					prior = append(prior, ipcheck.StoredTypeEvidence(ip, stamp, t))
-				}
-			}
-		} else if previous.Classification == nil && len(previous.Attributes) == 1 {
-			prior = append(prior, ipcheck.IPPureEvidence(ip, previous.Attributes, previous.CheckedAt))
-		}
+		prior := ipcheck.Score(ip, history[ip], now).Evidence
 		// Current explicit evidence replaces the same provider. Failed requests
 		// do not erase a still-valid successful result.
 		for _, old := range prior {
@@ -252,4 +250,33 @@ func update(ctx context.Context, db *pgx.Conn, runID, ip string, result ipcheck.
 		}
 	}
 	return int64(len(all)), tx.Commit(ctx)
+}
+
+// Historical rows can hold newer provider evidence than the most recent risk
+// query. Resolve each provider independently across all rows for this exit IP.
+func storedEvidence(previous saved) []ipcheck.Evidence {
+	if previous.Classification != nil && previous.Classification.IP == previous.IP {
+		if len(previous.Classification.Evidence) > 0 {
+			var usable []ipcheck.Evidence
+			for _, e := range previous.Classification.Evidence {
+				if e.ASNType != "" || e.UsageType != "" || e.CompanyType != "" {
+					usable = append(usable, e)
+				}
+			}
+			return usable
+		}
+		var result []ipcheck.Evidence
+		for _, t := range previous.Classification.Types {
+			stamp := previous.Classification.CheckedAt
+			if t.Provider == "ippure" {
+				stamp = previous.CheckedAt
+			}
+			result = append(result, ipcheck.StoredTypeEvidence(previous.IP, stamp, t))
+		}
+		return result
+	}
+	if previous.Classification == nil && len(previous.Attributes) == 1 {
+		return []ipcheck.Evidence{ipcheck.IPPureEvidence(previous.IP, previous.Attributes, previous.CheckedAt)}
+	}
+	return nil
 }
