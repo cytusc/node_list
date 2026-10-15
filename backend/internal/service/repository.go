@@ -83,10 +83,10 @@ func (r *Repository) Schedule(ctx context.Context, kind, key string, p Payload, 
 
 func (r *Repository) Publish(ctx context.Context, q taskqueue.Queue, kinds []string) error {
 	rows, err := r.Pool.Query(ctx, `SELECT id,generation,kind,priority,due_at FROM (
-	SELECT id,generation,kind,priority,due_at,row_number() OVER(PARTITION BY kind,(priority>0) ORDER BY due_at,id) AS lane_position FROM node_explorer_work
+	SELECT id,generation,kind,priority,due_at,row_number() OVER(PARTITION BY kind,(priority>0) ORDER BY CASE WHEN kind='recovery' AND payload ? 'startedAt' THEN 0 ELSE 1 END,due_at,id) AS lane_position FROM node_explorer_work
 	WHERE kind=ANY($1) AND ((state='queued' AND due_at<=now()+interval '10 seconds')
 	OR (state='running' AND lease_until<now()))) pending
-	WHERE lane_position<=1000 ORDER BY priority DESC,due_at,id`, kinds)
+	WHERE lane_position<=CASE WHEN kind='recovery' THEN 2 ELSE 1000 END ORDER BY priority DESC,due_at,id`, kinds)
 	if err != nil {
 		return err
 	}
@@ -125,11 +125,33 @@ func (r *Repository) Claim(ctx context.Context, kind, ref string, high bool) (*J
 		return nil, nil
 	}
 	j := &Job{ID: id, Generation: generation, Kind: kind, Token: randomToken()}
+	query := r.Pool.QueryRow
+	var admission pgx.Tx
+	if kind == KindRecovery {
+		// Bound complete assessments, including coordinators awaiting probes.
+		// A lane-specific transaction lock makes admission safe across replicas.
+		admission, e = r.Pool.Begin(ctx)
+		if e != nil {
+			return nil, e
+		}
+		defer admission.Rollback(ctx)
+		lane := "normal"
+		if high {
+			lane = "residential"
+		}
+		if _, e = admission.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext($1))`, "recovery-admission:"+lane); e != nil {
+			return nil, e
+		}
+		query = admission.QueryRow
+	}
 	var raw []byte
-	err := r.Pool.QueryRow(ctx, `UPDATE node_explorer_work SET state='running',lease_token=$4,
+	err := query(ctx, `UPDATE node_explorer_work SET state='running',lease_token=$4,
 	lease_until=now()+interval '3 minutes',attempts=attempts+1,
  payload=CASE WHEN kind='recovery' AND (NOT(payload ? 'startedAt') OR payload->>'startedAt' LIKE '0001-%') THEN payload || jsonb_build_object('startedAt',to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ELSE payload END WHERE id=$1 AND generation=$2 AND kind=$3
 	AND (priority>0)=$5 AND due_at<=now() AND (state='queued' OR (state='running' AND lease_until<now()))
+ AND (kind<>'recovery' OR (payload ? 'startedAt' AND payload->>'startedAt' NOT LIKE '0001-%') OR
+ (SELECT count(*) FROM node_explorer_work active WHERE active.kind='recovery' AND (active.priority>0)=$5
+ AND active.state<>'done' AND active.payload ? 'startedAt' AND active.payload->>'startedAt' NOT LIKE '0001-%')<2)
 	RETURNING key,payload,priority,attempts,due_at`, id, generation, kind, j.Token, high).Scan(&j.Key, &raw, &j.Priority, &j.Attempts, &j.Due)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -139,6 +161,11 @@ func (r *Repository) Claim(ctx context.Context, kind, ref string, high bool) (*J
 	}
 	if err = json.Unmarshal(raw, &j.Payload); err != nil {
 		return nil, err
+	}
+	if admission != nil {
+		if err = admission.Commit(ctx); err != nil {
+			return nil, err
+		}
 	}
 	return j, nil
 }

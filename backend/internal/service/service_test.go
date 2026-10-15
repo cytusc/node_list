@@ -556,3 +556,107 @@ func TestStrongExitRequiresAgreementAndDistinctHostEgress(t *testing.T) {
 		})
 	}
 }
+
+// A startup backlog must not start clocks and create probes for every candidate.
+func TestRecoveryAdmissionBoundsBacklogAndReservesResidentialLane(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	p := f.retirement(t)
+	refs := make([]string, 40)
+	for i := range refs {
+		key := fmt.Sprintf("backlog-%d", i)
+		if err := f.repo.Schedule(ctx, KindRecovery, key, p, 0, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.repo.Pool.QueryRow(ctx, `SELECT id::text||':'||generation::text FROM node_explorer_work WHERE kind=$1 AND key=$2`, KindRecovery, key).Scan(&refs[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	admitted := []Job{}
+	for _, ref := range refs {
+		wg.Add(1)
+		go func(ref string) {
+			defer wg.Done()
+			j, err := f.repo.Claim(ctx, KindRecovery, ref, false)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				t.Error(err)
+			}
+			if j != nil {
+				admitted = append(admitted, *j)
+			}
+		}(ref)
+	}
+	wg.Wait()
+	if len(admitted) != 2 {
+		t.Fatalf("admitted %d backlog assessments, want 2", len(admitted))
+	}
+	var clocks int
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE payload ? 'startedAt'`).Scan(&clocks); err != nil || clocks != 2 {
+		t.Fatalf("unadmitted clocks started: %d %v", clocks, err)
+	}
+	// A residential assessment remains admissible while the ordinary lane is full.
+	if err := f.repo.Schedule(ctx, KindRecovery, "residential", p, 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var highRef string
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT id::text||':'||generation::text FROM node_explorer_work WHERE key='residential'`).Scan(&highRef); err != nil {
+		t.Fatal(err)
+	}
+	high, err := f.repo.Claim(ctx, KindRecovery, highRef, true)
+	if err != nil || high == nil {
+		t.Fatal("ordinary backlog blocked residential admission", err)
+	}
+	if high.Payload.StartedAt.IsZero() {
+		t.Fatal("residential admission did not start assessment")
+	}
+	// Retried admitted work must be published before untouched old backlog rows.
+	retry := admitted[0]
+	if err := f.repo.Retry(ctx, retry, time.Second, "dependency"); err != nil {
+		t.Fatal(err)
+	}
+	q := &recordingQueue{}
+	if err := f.repo.Publish(ctx, q, []string{KindRecovery}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	found := false
+	for _, ref := range q.refs {
+		if ref == retry.Ref() {
+			found = true
+		}
+	}
+	mu.Unlock()
+	if !found || len(q.refs) > 4 {
+		t.Fatalf("admitted retry starved or backlog flooded: %v", q.refs)
+	}
+	// Finishing a cycle releases exactly one admission slot.
+	if err := f.repo.Finish(ctx, admitted[1], func(tx pgx.Tx) error { return recur(ctx, tx, admitted[1], 30*time.Minute) }); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, ref := range refs {
+		j, err := f.repo.Claim(ctx, KindRecovery, ref, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if j != nil {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("released slot admitted %d new cycles", count)
+	}
+}
+
+type recordingQueue struct{ refs []string }
+
+func (q *recordingQueue) Push(_ context.Context, _ string, _ bool, ref string, _ time.Time) error {
+	q.refs = append(q.refs, ref)
+	return nil
+}
+func (q *recordingQueue) Pop(context.Context, string, bool) (string, error) { return "", nil }
+func (q *recordingQueue) Close() error                                      { return nil }
