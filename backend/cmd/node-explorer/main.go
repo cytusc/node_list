@@ -205,7 +205,7 @@ func run() error {
 	if len(cfg.ippureInstances) > 0 {
 		scheduler, err = collector.NewScheduler(st, router, collector.SchedulerConfig{
 			Concurrency:    cfg.concurrency,
-			Classification: ipcheck.NewClient(os.Getenv("IPINFO_TOKEN"), os.Getenv("IP_API_PRO_KEY")),
+			Classification: ipcheck.NewClient(os.Getenv("IPINFO_TOKEN"), os.Getenv("IP_API_PRO_KEY"), os.Getenv("IPREGISTRY_API_KEY"), os.Getenv("ABUSEIPDB_API_KEY")),
 			Interval:       cfg.collectInterval,
 			APIOrigin:      cfg.ippureOrigin,
 		})

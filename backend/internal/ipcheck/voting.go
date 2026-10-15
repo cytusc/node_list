@@ -2,7 +2,7 @@ package ipcheck
 
 import "time"
 
-const VotingVersion = 2
+const VotingVersion = 4
 
 type Vote struct {
 	Provider string   `json:"provider"`
@@ -11,25 +11,35 @@ type Vote struct {
 	Evidence Evidence `json:"evidence"`
 }
 
-// Result keeps voting details in memory only; JSON stores the final classification.
+// Result persists network types and the recovery decision. Vote details stay in memory.
 type Result struct {
-	Version          int    `json:"version"`
-	IP               string `json:"ip"`
-	CheckedAt        string `json:"checkedAt"`
-	State            string `json:"state"`
-	Score            int    `json:"-"`
-	ResidentialVotes int    `json:"-"`
-	DatacenterVotes  int    `json:"-"`
-	UnknownVotes     int    `json:"-"`
-	HasDisagreement  bool   `json:"-"`
-	Votes            []Vote `json:"-"`
+	Version          int            `json:"version"`
+	IP               string         `json:"ip"`
+	CheckedAt        string         `json:"checkedAt"`
+	State            string         `json:"state"`
+	Types            []TypeEvidence `json:"types,omitempty"`
+	Score            int            `json:"-"`
+	ResidentialVotes int            `json:"-"`
+	DatacenterVotes  int            `json:"-"`
+	UnknownVotes     int            `json:"-"`
+	HasDisagreement  bool           `json:"-"`
+	Votes            []Vote         `json:"-"`
 }
 
 // Score gives each named service at most one vote for this exact IP. Unknown
-// responses abstain. Two agreeing sources are required, even if the third fails.
+// responses abstain; two agreeing independent sources are required.
 func Score(ip string, evidence []Evidence, now time.Time) Result {
 	r := Result{Version: VotingVersion, IP: ip, CheckedAt: now.UTC().Format(time.RFC3339), State: "unknown"}
-	for _, provider := range []string{"ippure", "ipinfo", "ip-api"} {
+	providers := []string{"ippure", "ipinfo", "ip-api"}
+	for _, optional := range []string{"ipregistry", "abuseipdb"} {
+		for _, e := range evidence {
+			if e.Provider == optional {
+				providers = append(providers, optional)
+				break
+			}
+		}
+	}
+	for _, provider := range providers {
 		selected := Evidence{Provider: provider, IP: ip, Outcome: "unknown"}
 		var newest time.Time
 		for _, e := range evidence {
@@ -43,12 +53,16 @@ func Score(ip string, evidence []Evidence, now time.Time) Result {
 			newest, selected = stamp, e
 		}
 		v := Vote{Provider: provider, Evidence: selected, Reason: "unknown-or-unavailable"}
+		types := selected.networkTypes()
+		if types.UsageType != "" || types.CompanyType != "" {
+			r.Types = append(r.Types, types)
+		}
 		if selected.Outcome != "unknown" {
 			switch {
 			case selected.Hosting != nil && *selected.Hosting, selected.Outcome == "provider-conflict", selected.Outcome == "datacenter":
 				v.Points, v.Reason = -1, "hosting"
-			case selected.Outcome == "supports-residential", selected.Outcome == "non-hosting":
-				v.Points, v.Reason = 1, "residential-or-non-hosting"
+			case selected.Outcome == "supports-residential":
+				v.Points, v.Reason = 1, "explicit-isp"
 			}
 		}
 		r.Score += v.Points
@@ -64,9 +78,9 @@ func Score(ip string, evidence []Evidence, now time.Time) Result {
 	}
 	r.HasDisagreement = r.ResidentialVotes > 0 && r.DatacenterVotes > 0
 	switch {
-	case r.ResidentialVotes >= 2:
+	case r.ResidentialVotes >= 2 && r.ResidentialVotes > r.DatacenterVotes:
 		r.State = "residential"
-	case r.DatacenterVotes >= 2:
+	case r.DatacenterVotes >= 2 && r.DatacenterVotes > r.ResidentialVotes:
 		r.State = "datacenter"
 	case r.HasDisagreement:
 		r.State = "disputed"
@@ -77,34 +91,53 @@ func Score(ip string, evidence []Evidence, now time.Time) Result {
 func IPPureEvidence(ip string, attributes []string, checkedAt string) Evidence {
 	e := Evidence{Provider: "ippure", IP: ip, CheckedAt: checkedAt, Outcome: "unknown"}
 	for _, a := range attributes {
-		if a == "机房IP" {
-			e.Outcome = "datacenter"
-			return e
-		}
-		if a == "住宅IP" {
-			e.Outcome = "supports-residential"
+		for kind, label := range typeLabels {
+			if a == label {
+				e.ASNType = kind
+				e.classifyUsage()
+				return e
+			}
 		}
 	}
 	return e
 }
 
-// Attributes keeps unrelated labels while making filtering agree with the vote.
+// Attributes displays the databases' explicit network types. Recovery votes
+// cannot turn a business/education classification into "unknown" or residential.
 func (r Result) Attributes(original []string) []string {
 	attributes := []string{}
-	for _, a := range original {
-		if a != "住宅IP" && a != "机房IP" && a != "性质争议" && a != "性质未知" {
-			attributes = append(attributes, a)
+	seen := map[string]bool{}
+	appendLabel := func(label string) {
+		if label != "" && !seen[label] {
+			attributes = append(attributes, label)
+			seen[label] = true
 		}
 	}
-	switch r.State {
-	case "residential":
-		attributes = append(attributes, "住宅IP")
-	case "datacenter":
-		attributes = append(attributes, "机房IP")
-	case "disputed":
-		attributes = append(attributes, "性质争议")
-	default:
-		attributes = append(attributes, "性质未知")
+	for _, a := range original {
+		if a == "性质争议" || a == "性质未知" || a == "类型未知" {
+			continue
+		}
+		isType := false
+		for _, label := range typeLabels {
+			if a == label {
+				isType = true
+				break
+			}
+		}
+		if !isType {
+			appendLabel(a)
+		}
 	}
+	if len(r.Types) > 0 {
+		for _, types := range r.Types {
+			if types.UsageType != "" {
+				appendLabel(types.UsageType)
+			} else {
+				appendLabel(types.CompanyType)
+			}
+		}
+		return attributes
+	}
+	appendLabel("类型未知")
 	return attributes
 }

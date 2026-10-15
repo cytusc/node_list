@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cytusc/node_list/backend/internal/ipcheck"
 )
 
 // exitProbe describes one echo service used to discover the node's exit IP.
@@ -541,11 +543,6 @@ var scoreBands = []struct {
 	{50, "轻度风险"}, {70, "中度风险"}, {100, "极度风险"},
 }
 
-var asnTypes = map[string]string{
-	"isp": "住宅IP", "hosting": "机房IP", "business": "商业宽带",
-	"enterprise": "商业宽带", "education": "教育IP", "government": "政府IP",
-}
-
 // QueryIPPure resolves the risk verdict for one exit IP.
 func QueryIPPure(ctx context.Context, c *IPPureClient, target string, asnCache *ASNCache) (*IPPureResult, error) {
 	if net.ParseIP(target) == nil {
@@ -601,6 +598,7 @@ func NormalizeIPPure(target string, basic, risk map[string]any, bot map[string]a
 		}
 	}
 	asnType, _ := asn["type"].(string)
+	asnType = strings.ToLower(strings.TrimSpace(asnType))
 	if !ok || asnNumber < 1 || strings.TrimSpace(organization) == "" || !broadcastOK || asnType == "" {
 		return nil, errors.New("IPPure 返回信息不完整")
 	}
@@ -616,10 +614,11 @@ func NormalizeIPPure(target string, basic, risk map[string]any, bot map[string]a
 		}
 	}
 	statistics := botStatistics(bot)
-	attributes := []string{asnType}
-	if mapped, ok := asnTypes[asnType]; ok {
-		attributes[0] = mapped
+	typeLabel := ipcheck.NetworkTypeLabel(asnType)
+	if typeLabel == "" {
+		typeLabel = "类型未知"
 	}
+	attributes := []string{typeLabel}
 	if asnType == "business" && statistics != nil && statistics.Human > 50 {
 		attributes = append(attributes, "商业用途")
 	}

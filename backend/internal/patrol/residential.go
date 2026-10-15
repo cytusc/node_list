@@ -23,7 +23,7 @@ var (
 	ErrResidentialHosting  = errors.New("IP-specific hosting evidence")
 )
 
-// NewResidentialVerifier uses the three-provider majority policy. The optional
+// NewResidentialVerifier uses the provider majority policy. The optional
 // IP-API Pro key selects HTTPS; otherwise the user-requested free API is used.
 func NewResidentialVerifier(token, origin string, proKey ...string) ResidentialVerifier {
 	host := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -40,9 +40,9 @@ func newResidentialVerifier(token, origin string, host *http.Client, proKey ...s
 
 type ResidentialAssessment func(context.Context, *http.Client) (string, ipcheck.Result, error)
 
-func NewResidentialAssessment(token, origin, proKey string) ResidentialAssessment {
+func NewResidentialAssessment(token, origin, proKey string, extraKeys ...string) ResidentialAssessment {
 	host := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return newResidentialAssessment(token, origin, host, proKey)
+	return newResidentialAssessment(token, origin, host, append([]string{proKey}, extraKeys...)...)
 }
 
 func newResidentialAssessment(token, origin string, host *http.Client, proKey ...string) ResidentialAssessment {
@@ -53,7 +53,11 @@ func newResidentialAssessment(token, origin string, host *http.Client, proKey ..
 	if len(proKey) > 0 {
 		key = proKey[0]
 	}
-	sources := ipcheck.NewClient(token, key)
+	extraKeys := []string{}
+	if len(proKey) > 1 {
+		extraKeys = append(extraKeys, proKey[1:]...)
+	}
+	sources := ipcheck.NewClient(token, key, extraKeys...)
 	sources.HTTP = host
 	return func(ctx context.Context, tunnel *http.Client) (string, ipcheck.Result, error) {
 		empty := ipcheck.Result{State: "unknown"}
@@ -66,7 +70,7 @@ func newResidentialAssessment(token, origin string, host *http.Client, proKey ..
 			return "", empty, fmt.Errorf("current exit cannot be distinguished from host egress")
 		}
 		evidence := sources.Lookup(ctx, ip)
-		// A failed IPPure request abstains; the other two may still form a majority.
+		// A failed IPPure request abstains; other sources may still form a majority.
 		verdict, err := collector.QueryIPPure(ctx, collector.NewIPPureClient(tunnel, origin, 10*time.Second), ip, nil)
 		if err == nil {
 			evidence = append(evidence, ipcheck.IPPureEvidence(ip, verdict.Attributes, time.Now().UTC().Format(time.RFC3339Nano)))

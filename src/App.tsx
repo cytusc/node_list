@@ -94,6 +94,55 @@ const ippureMetrics: {
   { key: "score", label: "IPPure 系数", column: "ippure" },
   { key: "ratio", label: "人机流量比", column: "trafficRatio" },
 ];
+const ipTypeProviders: Record<string, string> = {
+  ippure: "IPPure",
+  ipinfo: "IPinfo",
+  "ip-api": "IP-API",
+  ipregistry: "IPregistry",
+  abuseipdb: "AbuseIPDB",
+};
+
+function IPTypeDetails({ result }: { result?: IPPureResult }) {
+  const types = result?.classification?.types;
+  if (!types?.length) return null;
+  return (
+    <section aria-label="IP 类型数据来源">
+      <h3>IP 类型属性</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead className="text-muted-foreground">
+            <tr>
+              <th scope="col" className="py-2 pr-3 font-medium">
+                数据库
+              </th>
+              <th scope="col" className="py-2 pr-3 font-medium">
+                使用类型
+              </th>
+              <th scope="col" className="py-2 font-medium">
+                公司类型
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {types.map((type) => (
+              <tr key={type.provider} className="border-t border-border">
+                <th scope="row" className="py-2 pr-3 font-medium">
+                  {ipTypeProviders[type.provider] || type.provider}
+                </th>
+                <td className="py-2 pr-3">{type.usageType || "—"}</td>
+                <td className="py-2">{type.companyType || "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="detail-note">
+        各数据库独立判断使用类型和公司类型；来源不一致时保留各自结果。
+      </p>
+    </section>
+  );
+}
+
 function IPPureMetric({
   result,
   metric,
@@ -102,7 +151,17 @@ function IPPureMetric({
   metric: IPPureMetricName;
 }) {
   if (metric === "attributes" && result?.classification) {
-    return <span>{result.attributes?.join(" · ") || "性质未知"}</span>;
+    const sources = result.classification.types
+      ?.map(
+        (type) =>
+          `${ipTypeProviders[type.provider] || type.provider}：使用类型 ${type.usageType || "—"}；公司类型 ${type.companyType || "—"}`,
+      )
+      .join("\n");
+    return (
+      <span title={sources}>
+        {result.attributes?.join(" · ") || "类型未知"}
+      </span>
+    );
   }
   if (result?.status !== "success")
     return (
@@ -1276,6 +1335,7 @@ export default function App() {
                             : "尚无 IPPure 结果；检测服务会依次检测当前及历史节点，刷新页面可查看进度。同一连接复用最近的出口检测结果。")}
                   </p>
                 )}
+                <IPTypeDetails result={selected.ippure} />
                 <h3>服务解锁</h3>
                 {(selected.mediaCheck ?? snapshot?.mediaCheck) ? (
                   selected.media?.length ? (

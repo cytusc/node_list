@@ -38,7 +38,7 @@ func TestExitEvidenceDoesNotMistakeRotationOrDirectTrafficForOneProxyExit(t *tes
 func TestClassificationRequiresMatchingAddressAndExplicitNonHostingEvidence(t *testing.T) {
 	for _, tc := range []struct{ name, raw, want string }{
 		{"Scaleway conflict", `{"data":{"ip":"8.8.8.8","asn":{"type":"hosting"},"privacy":{"hosting":true}}}`, "provider-conflict"},
-		{"ISP with VPN remains residential", `{"data":{"ip":"8.8.8.8","asn":{"type":"isp"},"company":{"type":"isp"},"privacy":{"hosting":false,"vpn":true}}}`, "non-hosting"},
+		{"ISP with VPN remains residential", `{"data":{"ip":"8.8.8.8","asn":{"type":"isp"},"company":{"type":"isp"},"privacy":{"hosting":false,"vpn":true}}}`, "supports-residential"},
 		{"missing hosting evidence", `{"data":{"ip":"8.8.8.8","asn":{"type":"isp"}}}`, "supports-residential"},
 		{"wrong query response", `{"data":{"ip":"1.1.1.1","asn":{"type":"isp"},"privacy":{"hosting":false}}}`, "unknown"},
 		{"conflicting hosting flags", `{"data":{"ip":"8.8.8.8","asn":{"type":"isp"},"privacy":{"hosting":false},"is_hosting":true}}`, "provider-conflict"},

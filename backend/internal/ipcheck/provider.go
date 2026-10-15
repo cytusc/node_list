@@ -1,4 +1,5 @@
-// Package ipcheck classifies IP usage with three independent service votes.
+// Package ipcheck maps per-provider IP network types and checks residential
+// recovery eligibility using independent service evidence.
 package ipcheck
 
 type Evidence struct {
@@ -8,6 +9,7 @@ type Evidence struct {
 	ASN         string `json:"asn,omitempty"`
 	ASNType     string `json:"asnType,omitempty"`
 	CompanyType string `json:"companyType,omitempty"`
+	UsageType   string `json:"usageType,omitempty"`
 	Hosting     *bool  `json:"hosting,omitempty"`
 	VPN         bool   `json:"vpn"`
 	Proxy       bool   `json:"proxy"`

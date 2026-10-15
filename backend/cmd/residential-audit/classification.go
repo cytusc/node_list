@@ -13,7 +13,7 @@ type crossCheck = ipcheck.Evidence
 
 // External providers share a host-side cache and respect service quotas.
 func crossCheckReport(ctx context.Context, r *report) {
-	sources := ipcheck.NewClient(os.Getenv("IPINFO_TOKEN"), os.Getenv("IP_API_PRO_KEY"))
+	sources := ipcheck.NewClient(os.Getenv("IPINFO_TOKEN"), os.Getenv("IP_API_PRO_KEY"), os.Getenv("IPREGISTRY_API_KEY"), os.Getenv("ABUSEIPDB_API_KEY"))
 	for i := range r.Records {
 		v := &r.Records[i]
 		v.Residential = false
@@ -42,7 +42,7 @@ func hasAttribute(attributes []string, target string) bool {
 	return false
 }
 
-// Classification is the same three-provider policy used by the collector and recovery.
+// Classification is the same provider policy used by the collector and recovery.
 func classifyRecord(v *record, now time.Time) {
 	v.Residential = false
 	v.IPPureResidential = false

@@ -81,8 +81,8 @@ func TestVotesCannotBeMultipliedOrTransferred(t *testing.T) {
 	}
 }
 
-func TestAttributesAgreeWithMajority(t *testing.T) {
-	r := Result{State: "residential"}
+func TestAttributesReplaceStaleLabelsWithSourceTypes(t *testing.T) {
+	r := Result{State: "residential", Types: []TypeEvidence{{Provider: "ipinfo", UsageType: "住宅IP"}}}
 	a := r.Attributes([]string{"机房IP", "商业用途"})
 	if fmt.Sprint(a) != "[商业用途 住宅IP]" {
 		t.Fatalf("stale label retained: %v", a)

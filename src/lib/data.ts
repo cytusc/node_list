@@ -7,6 +7,11 @@ export type MediaTag = {
 export type IPClassification = {
   version: number;
   state: "residential" | "datacenter" | "disputed" | "unknown";
+  types?: {
+    provider: string;
+    usageType?: string;
+    companyType?: string;
+  }[];
 };
 export type IPPureResult = {
   classification?: IPClassification;

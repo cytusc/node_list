@@ -8,6 +8,8 @@ services:
     environment:
       IPINFO_TOKEN: ${IPINFO_TOKEN:-}
       IP_API_PRO_KEY: ${IP_API_PRO_KEY:-}
+      IPREGISTRY_API_KEY: ${IPREGISTRY_API_KEY:-}
+      ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
       IPPURE_API_ORIGIN: ${IPPURE_API_ORIGIN:-https://api.123169.xyz}
       DATABASE_PATH: /data/history/nodes.sqlite
       GITHUB_PATROL_CONTROLLER: http://github-patrol-proxy:9090

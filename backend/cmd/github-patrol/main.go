@@ -113,7 +113,7 @@ func run() error {
 
 	runner := patrol.NewPatrol(st, router, patrol.PatrolConfig{
 		Concurrency:           concurrency,
-		ResidentialAssessment: patrol.NewResidentialAssessment(os.Getenv("IPINFO_TOKEN"), os.Getenv("IPPURE_API_ORIGIN"), os.Getenv("IP_API_PRO_KEY")),
+		ResidentialAssessment: patrol.NewResidentialAssessment(os.Getenv("IPINFO_TOKEN"), os.Getenv("IPPURE_API_ORIGIN"), os.Getenv("IP_API_PRO_KEY"), os.Getenv("IPREGISTRY_API_KEY"), os.Getenv("ABUSEIPDB_API_KEY")),
 		Timeout:               timeout,
 		RetryDelay:            retryDelay,
 	})
