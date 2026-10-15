@@ -24,6 +24,11 @@ func readChanges(ctx context.Context, tx pgx.Tx, since int64) (store.Changes, er
 	if c.Revision == since {
 		return c, nil
 	}
+	var runtimeErr error
+	c.Runtime, runtimeErr = queryRuntime(ctx, tx)
+	if runtimeErr != nil {
+		return c, runtimeErr
+	}
 	// Older versions removed entries after publishing. A cursor behind that
 	// boundary must reload once, rather than silently missing those changes.
 	c.Full = c.Full || since < built

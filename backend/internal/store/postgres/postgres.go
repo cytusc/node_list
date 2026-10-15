@@ -94,13 +94,26 @@ type Adapter struct {
 
 // NewAdapter connects and ensures the schema exists.
 func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
+	a, err := Connect(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.initSchema(ctx); err != nil {
+		a.Close()
+		return nil, err
+	}
+	return a, nil
+}
+
+// Connect opens a pool without running migrations, for lightweight health checks.
+func Connect(ctx context.Context, cfg Config) (*Adapter, error) {
 	poolCfg, err := pgxpool.ParseConfig(cfg.connString())
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres config: %w", err)
 	}
 	maxConns := int32(cfg.PoolMax)
 	if maxConns <= 0 {
-		maxConns = 12
+		maxConns = 6
 	}
 	poolCfg.MaxConns = maxConns
 	poolCfg.MinConns = 1
@@ -115,15 +128,18 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect postgres: %w", err)
 	}
-	a := &Adapter{pool: pool}
-	if err := a.initSchema(ctx); err != nil {
-		pool.Close()
-		return nil, err
-	}
-	return a, nil
+	return &Adapter{pool: pool}, nil
 }
 
 func (a *Adapter) initSchema(ctx context.Context) error {
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-explorer-base-schema'))`); err != nil {
+		return err
+	}
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS ` + tableSnapshots + ` (
       id SERIAL PRIMARY KEY,
@@ -145,11 +161,17 @@ func (a *Adapter) initSchema(ctx context.Context) error {
     )`,
 	}
 	for _, stmt := range statements {
-		if _, err := a.pool.Exec(ctx, stmt); err != nil {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("create schema: %w", err)
 		}
 	}
-	return (&Projector{pool: a.pool}).initSchema(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if err := (&Projector{pool: a.pool}).initSchema(ctx); err != nil {
+		return err
+	}
+	return a.initServices(ctx)
 }
 
 // Pool exposes the connection pool to the projection, which needs transaction

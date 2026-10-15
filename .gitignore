@@ -14,6 +14,7 @@ playwright-report/
 
 # Go backend build output.
 backend/node-explorer
+backend/node-worker
 backend/github-patrol
 backend/idcheck
 backend/idscan
@@ -24,3 +25,4 @@ backend/tools/*.tsv
 .workbuddy/
 *.md
 !RESIDENTIAL_RECOVERY.md
+!MODULAR_SERVICES.md

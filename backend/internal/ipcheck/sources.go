@@ -23,6 +23,8 @@ type Client struct {
 	IPRegistryKey string
 	AbuseIPDBKey  string
 	// FreshSweep waits for quotas instead of skipping IPs during maintenance.
+	BeforeProvider    func(context.Context, string) error
+	AfterProvider     func(context.Context, string, time.Time) error
 	FreshSweep        bool
 	mu                sync.Mutex
 	cache             map[string]cachedEvidence
@@ -129,6 +131,16 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 		case <-timer.C:
 		}
 	}
+	if c.BeforeProvider != nil {
+		if err := c.BeforeProvider(ctx, provider); err != nil {
+			e.QueryStatus = "quota-cooldown"
+			return e
+		}
+	}
+	if c.AfterProvider != nil {
+		defer func() { _ = c.AfterProvider(ctx, provider, c.next[provider]) }()
+	}
+	e.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	url := "https://ipinfo.io/" + ip + "/json"
 	if provider == "ipinfo" && c.IPinfoToken == "" {
 		// IPQuality uses this public IPinfo endpoint, whose response includes

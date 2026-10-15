@@ -14,7 +14,6 @@ import (
 	"github.com/cytusc/node_list/backend/internal/domain"
 	"github.com/cytusc/node_list/backend/internal/store"
 	"github.com/cytusc/node_list/backend/internal/store/postgres"
-	"github.com/cytusc/node_list/backend/internal/store/sqlite"
 )
 
 // CollectorStatus is the enrichment collector health shown next to results.
@@ -134,6 +133,9 @@ func (s *Server) results(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "节点分页、筛选或排序参数无效。", "")
 		return
 	}
+	if aggregate && parsed != nil && parsed.Sort == "" {
+		parsed.Sort = "preferred"
+	}
 	databasePage := aggregate && parsed != nil && s.hasPostgres && s.projector != nil
 	if !databasePage {
 		// Non-aggregate views read the newest batch, so the request drives a
@@ -169,8 +171,9 @@ func (s *Server) results(w http.ResponseWriter, r *http.Request) {
 		page.Nodes = publicSnapshot(domain.Snapshot{Nodes: page.Nodes}).Nodes
 		writeJSON(w, http.StatusOK, struct {
 			postgres.Result
-			Collector CollectorStatus `json:"ippureCollector"`
-		}{*page, status})
+			Collector     CollectorStatus `json:"ippureCollector"`
+			SourceWarning *string         `json:"sourceWarning"`
+		}{*page, status, sourceWarningPtr(s.store.SourceWarning())})
 		return
 	}
 	// Without a SQL projection the aggregate view has to be folded in memory,
@@ -275,9 +278,7 @@ func sourceWarningPtr(warning string) *string {
 	return &warning
 }
 
-// paginate filters, sorts and pages a snapshot in memory. Used by the SQLite
-// deployment and by historical batch views, which the SQL projection does not
-// materialise.
+// paginate filters, sorts and pages historical batches in memory.
 func paginate(s domain.Snapshot, q *resultsQuery, status CollectorStatus) resultsResponse {
 	metadata := domain.ResultsMetadata(s)
 	matches := make([]domain.Node, 0, len(s.Nodes))
@@ -292,7 +293,7 @@ func paginate(s domain.Snapshot, q *resultsQuery, status CollectorStatus) result
 		MediaCheck: s.MediaCheck,
 		Nodes:      matches,
 	}
-	paged := sqlite.Paginate(ordered, &sqlite.Query{
+	paged := domain.Paginate(ordered, &domain.Query{
 		Page: q.Page, Limit: q.Limit, Sort: q.Sort, Direction: q.Direction,
 	})
 	page := q.Page
@@ -453,7 +454,7 @@ func parseResultsQuery(r *http.Request) (*resultsQuery, error) {
 		}
 	}
 	sortKey := values.Get("sort")
-	if sortKey != "" && !containsString(domain.ResultSortKeys, sortKey) {
+	if sortKey != "" && sortKey != "preferred" && !containsString(domain.ResultSortKeys, sortKey) {
 		return nil, errInvalidQuery
 	}
 	direction := values.Get("direction")

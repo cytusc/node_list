@@ -1,33 +1,152 @@
+# Six independently restartable services. PostgreSQL is an existing external service.
+x-environment: &environment
+  PGHOST: ${PGHOST:?Set PGHOST in .env}
+  PGPORT: ${PGPORT:-5432}
+  PGDATABASE: ${PGDATABASE:?Set PGDATABASE in .env}
+  PGUSER: ${PGUSER:?Set PGUSER in .env}
+  PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+  PGPOOL_MAX: ${PGPOOL_MAX:-6}
+  REDIS_URL: redis://task-redis:6379/0
+  REDIS_NAMESPACE: ${REDIS_NAMESPACE:-node-explorer}
+  RESIDENTIAL_INTERVAL_SECONDS: ${RESIDENTIAL_INTERVAL_SECONDS:-300}
+  NORMAL_INTERVAL_SECONDS: ${NORMAL_INTERVAL_SECONDS:-1800}
+x-app: &app
+  image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-latest}
+  restart: unless-stopped
+  init: true
+  environment: *environment
+  networks: [default, postgres]
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+x-worker: &worker
+  <<: *app
+  depends_on:
+    task-redis: { condition: service_healthy }
+x-proxy: &proxy
+  image: metacubex/mihomo:${IPPURE_MIHOMO_TAG:-v1.19.27}
+  restart: unless-stopped
+  volumes:
+    - ./deploy/ippure-mihomo.yaml:/root/.config/mihomo/config.yaml:ro
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
 services:
   node-explorer:
-    image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-v1.3.7}
-    restart: unless-stopped
-    init: true
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    <<: *app
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3001}:3001"
+  source-ingest:
+    <<: *app
+    command: [node-worker, -role, source]
     environment:
+      <<: *environment
       SUBS_CHECK_DIR: /data/sub
-      DATABASE_PATH: /data/history/nodes.sqlite
     volumes:
-      - node-history:/data/history
       - type: bind
         source: ${SUBS_CHECK_HOST_DIR:?Set SUBS_CHECK_HOST_DIR in .env}
         target: /data/sub
         read_only: true
-        bind:
-          create_host_path: false
-    read_only: true
-    tmpfs:
-      - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-
+        bind: { create_host_path: false }
+    healthcheck:
+      test: [CMD, node-worker, -role, source, -health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+  connectivity:
+    <<: *worker
+    command: [node-worker, -role, connectivity]
+    environment:
+      <<: *environment
+      CONNECTIVITY_HIGH_CONTROLLER: http://connectivity-high-proxy:9090
+      CONNECTIVITY_HIGH_PROXY_URL: http://connectivity-high-proxy:7890
+      CONNECTIVITY_NORMAL_CONTROLLER: http://connectivity-normal-proxy:9090
+      CONNECTIVITY_NORMAL_PROXY_URL: http://connectivity-normal-proxy:7890
+      PROBE_TIMEOUT_SECONDS: ${PROBE_TIMEOUT_SECONDS:-12}
+      PROBE_RETRY_SECONDS: ${PROBE_RETRY_SECONDS:-10}
+      RESIDENTIAL_CONCURRENCY: ${RESIDENTIAL_CONCURRENCY:-2}
+      NORMAL_CONCURRENCY: ${NORMAL_CONCURRENCY:-2}
+    depends_on:
+      task-redis: { condition: service_healthy }
+      connectivity-high-proxy: { condition: service_started }
+      connectivity-normal-proxy: { condition: service_started }
+    healthcheck:
+      test: [CMD, node-worker, -role, connectivity, -health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+  ip-service:
+    <<: *worker
+    command: [node-worker, -role, ip]
+    environment:
+      <<: *environment
+      IP_SERVICE_HIGH_CONTROLLER: http://ip-high-proxy:9090
+      IP_SERVICE_HIGH_PROXY_URL: http://ip-high-proxy:7890
+      IP_SERVICE_NORMAL_CONTROLLER: http://ip-normal-proxy:9090
+      IP_SERVICE_NORMAL_PROXY_URL: http://ip-normal-proxy:7890
+      IPPURE_API_ORIGIN: ${IPPURE_API_ORIGIN:-https://api.123169.xyz}
+      IPINFO_TOKEN: ${IPINFO_TOKEN:-}
+      IP_API_PRO_KEY: ${IP_API_PRO_KEY:-}
+      IPREGISTRY_API_KEY: ${IPREGISTRY_API_KEY:-}
+      ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
+      RESIDENTIAL_CONCURRENCY: ${RESIDENTIAL_CONCURRENCY:-2}
+      NORMAL_CONCURRENCY: ${NORMAL_CONCURRENCY:-2}
+    depends_on:
+      task-redis: { condition: service_healthy }
+      ip-high-proxy: { condition: service_started }
+      ip-normal-proxy: { condition: service_started }
+    healthcheck:
+      test: [CMD, node-worker, -role, ip, -health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+  residential-recovery:
+    <<: *worker
+    command: [node-worker, -role, residential]
+    healthcheck:
+      test: [CMD, node-worker, -role, residential, -health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+  node-lifecycle:
+    <<: *worker
+    command: [node-worker, -role, lifecycle]
+    environment:
+      <<: *environment
+      LIFECYCLE_DRY_RUN: ${LIFECYCLE_DRY_RUN:-false}
+    healthcheck:
+      test: [CMD, node-worker, -role, lifecycle, -health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+  task-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: [redis-server, --appendonly, "yes", --maxmemory-policy, noeviction]
+    volumes: [task-redis:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  connectivity-high-proxy:
+    <<: *proxy
+  connectivity-normal-proxy:
+    <<: *proxy
+  ip-high-proxy:
+    <<: *proxy
+  ip-normal-proxy:
+    <<: *proxy
+networks:
+  postgres:
+    external: true
+    name: ${POSTGRES_NETWORK:?Set POSTGRES_NETWORK in .env}
 volumes:
-  node-history:
+  task-redis:

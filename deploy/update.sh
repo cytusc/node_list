@@ -32,9 +32,13 @@ update_one() {
     echo "$service already running $old_tag"
     return 0
   fi
+  local targets=("$service")
+  if [[ "$service" == node-explorer ]]; then
+    targets=(node-explorer source-ingest connectivity ip-service residential-recovery node-lifecycle)
+  fi
   echo "Updating $service $old_tag -> $new_tag"
-  compose_tag "$variable" "$new_tag" pull "$service" || return 1
-  if compose_tag "$variable" "$new_tag" up -d --no-deps --wait --wait-timeout 120 "$service" && healthy "$service"; then
+  compose_tag "$variable" "$new_tag" pull "${targets[@]}" || return 1
+  if compose_tag "$variable" "$new_tag" up -d --no-deps --wait --wait-timeout 120 "${targets[@]}" && healthy "$service"; then
     sed "/^$variable=/d" release.env > release.env.tmp
     printf '%s=%s\n' "$variable" "$new_tag" >> release.env.tmp
     chmod 600 release.env.tmp
@@ -42,7 +46,7 @@ update_one() {
     echo "Updated $service to $new_tag"
   else
     echo "Update failed; rolling back $service to $old_tag" >&2
-    compose_tag "$variable" "$old_tag" up -d --no-deps --wait --wait-timeout 120 "$service" || return 1
+    compose_tag "$variable" "$old_tag" up -d --no-deps --wait --wait-timeout 120 "${targets[@]}" || return 1
     return 1
   fi
 }

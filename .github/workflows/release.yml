@@ -17,6 +17,12 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
       postgres:
         image: postgres:18-alpine
         env:
@@ -44,14 +50,13 @@ jobs:
         env:
           TEST_POSTGRES_URL: postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test
       - run: npm run build
-      - name: Check legacy patrol command compatibility
-        run: bash deploy/legacy-node-launcher.test.sh
       - uses: actions/setup-go@v5
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
       - name: Lint and test the Go backend
         env:
+          NODE_EXPLORER_TEST_REDIS: redis://127.0.0.1:6379/0
           NODE_EXPLORER_TEST_PG: postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test
         working-directory: backend
         run: |
@@ -91,7 +96,9 @@ jobs:
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          docker run -d --read-only --tmpfs /tmp --name node-explorer-smoke -p 127.0.0.1:3001:3001 "$IMAGE_NAME@$IMAGE_DIGEST"
+          docker run -d --read-only --tmpfs /tmp --network host \
+            -e PGHOST=127.0.0.1 -e PGPORT=5432 -e PGDATABASE=node_explorer_test \
+            -e PGUSER=postgres -e PGPASSWORD=test_password --name node-explorer-smoke "$IMAGE_NAME@$IMAGE_DIGEST"
           trap 'docker logs node-explorer-smoke; docker rm -f node-explorer-smoke' EXIT
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:3001/api/health; then break; fi
@@ -103,36 +110,28 @@ jobs:
           curl --fail http://127.0.0.1:3001/ -o /tmp/index.html
           grep -q 'id="root"' /tmp/index.html
           test "$(curl --silent -o /tmp/results.json -w '%{http_code}' http://127.0.0.1:3001/api/results)" = 404
-      - name: Smoke test legacy patrol Compose commands
+      - name: Smoke test independent lifecycle worker
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          # Reproduce the command and health check left by pre-Go deployments.
-          # Empty, temporary data keeps the smoke test off real nodes/databases.
-          docker run -d --read-only --tmpfs /tmp \
-            --tmpfs /data/history:uid=1000,gid=1000 \
-            --name github-patrol-legacy-smoke \
-            -e GITHUB_PATROL_CONTROLLER=http://127.0.0.1:1 \
-            -e GITHUB_PATROL_PROXY_URL=http://127.0.0.1:2 \
-            --health-cmd='node server/github-patrol-service.js --health' \
-            --health-interval=2s --health-start-period=5s --health-retries=10 \
-            "$IMAGE_NAME@$IMAGE_DIGEST" node server/github-patrol-service.js
-          trap 'docker logs github-patrol-legacy-smoke; docker rm -f github-patrol-legacy-smoke' EXIT
-          for attempt in $(seq 1 30); do
-            state=$(docker inspect --format '{{.State.Health.Status}}' github-patrol-legacy-smoke)
-            if [ "$state" = healthy ]; then break; fi
-            sleep 2
+          docker run -d --read-only --tmpfs /tmp --network host \
+            -e PGHOST=127.0.0.1 -e PGPORT=5432 -e PGDATABASE=node_explorer_test \
+            -e PGUSER=postgres -e PGPASSWORD=test_password -e REDIS_URL=redis://127.0.0.1:6379/0 \
+            --name lifecycle-smoke "$IMAGE_NAME@$IMAGE_DIGEST" node-worker -role lifecycle
+          trap 'docker logs lifecycle-smoke; docker rm -f lifecycle-smoke' EXIT
+          for attempt in $(seq 1 20); do
+            if docker exec lifecycle-smoke node-worker -role lifecycle -health; then break; fi
+            sleep 1
           done
-          test "$(docker inspect --format '{{.State.Health.Status}}' github-patrol-legacy-smoke)" = healthy
-          docker exec github-patrol-legacy-smoke /usr/local/bin/github-patrol --health
+          docker exec lifecycle-smoke node-worker -role lifecycle -health
       - name: Package production files
         if: startsWith(github.ref, 'refs/tags/')
-        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz dist backend legacy package.json package-lock.json Dockerfile compose.yaml compose.subs-check.yaml compose.pgsql.yaml compose.ippure.yaml compose.patrol.yaml compose.patrol.pgsql.yaml compose.qilan.yaml deploy README.md .env.example
+        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz dist backend legacy package.json package-lock.json Dockerfile compose.yaml compose.subs-check.yaml compose.pgsql.yaml compose.ippure.yaml compose.patrol.yaml compose.patrol.pgsql.yaml compose.qilan.yaml deploy README.md MODULAR_SERVICES.md RESIDENTIAL_RECOVERY.md .env.example
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n支持 linux/amd64 和 linux/arm64。IPPure 检测先获取目标节点的出口 IP，再通过可用节点轮换查询指定 IP，并将结果保存到原节点；查询和出口探测均不回退直连，此前旧方式失败的节点可在新模式下重新检测。保留 ASN 编号和组织名称提取、SQLite/PostgreSQL 持久化及当前批次补采。电脑列表以独立列显示 ASN 组织、IP 来源、IP 属性、IPPure 系数及人机流量比，支持单独显隐与排序；手机按字段展示。启用检测需在 COMPOSE_FILE 追加 compose.ippure.yaml。连接、网络和目录映射通过服务器 .env 配置。部署说明见 README.md；请保留数据库与 subs-check 数据目录。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
+          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n同一镜像运行 API、来源导入、测活、IP 属性、住宅恢复、生命周期六个独立服务。PostgreSQL 保存业务状态，Redis 分发任务；住宅节点每 5 分钟检查，一次完整验证通过即恢复。升级前阅读 MODULAR_SERVICES.md，并更新 Compose 文件。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
           gh release create "$GITHUB_REF_NAME" "node-explorer-$GITHUB_REF_NAME.tar.gz" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md --verify-tag

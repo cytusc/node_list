@@ -6,7 +6,15 @@ export type MediaTag = {
 };
 export type IPClassification = {
   version: number;
-  state: "residential" | "datacenter" | "disputed" | "unknown";
+  ip?: string;
+  checkedAt?: string;
+  state:
+    | "residential"
+    | "business"
+    | "hosting"
+    | "datacenter"
+    | "disputed"
+    | "unknown";
   types?: {
     provider: string;
     usageType?: string;
@@ -34,7 +42,26 @@ export type IPPureResult = {
   score?: number;
   label?: string;
 };
+export type ServiceStatus = {
+  service: string;
+  updatedAt: string;
+  healthy: boolean;
+  error?: string;
+  queued: number;
+  running: number;
+  oldestWaitSeconds: number;
+  restored: number;
+};
 export type NodeRecord = {
+  connectivity?: { checkedAt: string; reachable: boolean; error?: string };
+  exit?: {
+    ip?: string;
+    checkedAt: string;
+    version: number;
+    verified: boolean;
+    error?: string;
+  };
+  lifecycle?: { status: string; reason?: string; retiredAt?: string };
   ippure?: IPPureResult;
   checkedAt?: string;
   snapshotId?: number;

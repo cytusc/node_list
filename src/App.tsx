@@ -76,6 +76,7 @@ import {
   speedParts,
   timeLabel,
   type NodeRecord,
+  type ServiceStatus,
   type IPPureResult,
   type Snapshot,
 } from "@/lib/data";
@@ -136,7 +137,8 @@ function IPTypeDetails({ result }: { result?: IPPureResult }) {
                   {ipTypeProviders[type.provider] || type.provider}
                 </th>
                 <td className="py-2 pr-3">
-                  {type.usageType || (type.companyType ? "—" : "未取得有效类型")}
+                  {type.usageType ||
+                    (type.companyType ? "—" : "未取得有效类型")}
                 </td>
                 <td className="py-2">{type.companyType || "—"}</td>
               </tr>
@@ -328,6 +330,7 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [services, setServices] = useState<ServiceStatus[]>([]);
   const [errorCode, setErrorCode] = useState("");
   const [query, setQuery] = useState("");
   const [countries, setCountries] = useState<string[]>([]);
@@ -339,7 +342,7 @@ export default function App() {
   const [minSpeed, setMinSpeed] = useState("");
   const [selected, setSelected] = useState<NodeRecord | null>(null);
   const [sorting, setSorting] = useState<SortingState>([
-    { id: "speed", desc: true },
+    { id: "preferred", desc: true },
   ]);
   const [visibility, setVisibility] = useState<VisibilityState>({});
   const [dark, setDark] = useState(() => {
@@ -350,6 +353,7 @@ export default function App() {
     }
   });
   const activeRequest = useRef<AbortController | null>(null);
+  const requestPending = useRef(false);
   const nodes = snapshot?.nodes || emptyNodes;
   const criteria = JSON.stringify({
     query,
@@ -404,11 +408,13 @@ export default function App() {
   }, [dark]);
 
   const load = useCallback(
-    async (announce = false) => {
+    async (announce = false, background = false) => {
+      if (background && (document.hidden || requestPending.current)) return;
+      requestPending.current = true;
       activeRequest.current?.abort();
       const controller = new AbortController();
       activeRequest.current = controller;
-      setLoading(true);
+      if (!background) setLoading(true);
       try {
         const response = await fetch(resultsUrl, {
           signal: controller.signal,
@@ -427,7 +433,7 @@ export default function App() {
           pageSize: body.limit,
           criteria,
         });
-        setSelected(null);
+        if (!background) setSelected(null);
         setError("");
         setErrorCode("");
         if (!body.speedTest && sorting[0]?.id === "speed")
@@ -441,16 +447,45 @@ export default function App() {
             e instanceof Error ? e.message : "无法连接本地服务，请稍后重试",
           );
       } finally {
-        if (!controller.signal.aborted) setLoading(false);
+        if (activeRequest.current === controller) {
+          requestPending.current = false;
+          setLoading(false);
+        }
       }
     },
     [resultsUrl, criteria],
   );
   useEffect(() => {
     void load();
-    return () => activeRequest.current?.abort();
+    const timer = window.setInterval(() => void load(false, true), 5000);
+    return () => {
+      window.clearInterval(timer);
+      activeRequest.current?.abort();
+    };
   }, [load]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    const update = async () => {
+      try {
+        const response = await fetch("/api/services", {
+          signal: controller.signal,
+        });
+        if (response.ok) {
+          const body = await response.json();
+          if (Array.isArray(body.services)) setServices(body.services);
+        }
+      } catch {
+        /* retain last observed status */
+      }
+    };
+    void update();
+    const timer = window.setInterval(() => void update(), 15000);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, []);
   const maxSpeed = snapshot?.summary.maxSpeed || 0;
   const summary = snapshot?.summary || { countries: 0, median: 0 };
   const totalNodes = snapshot?.totalNodes || 0;
@@ -669,6 +704,37 @@ export default function App() {
         </div>
       </header>
       <main className="main-content">
+        {!!services.length && (
+          <details className="source-warning">
+            <summary>
+              服务状态 · {services.filter((s) => s.healthy).length}/
+              {services.length} 正常
+            </summary>
+            <ul>
+              {services.map((s) => (
+                <li key={s.service}>
+                  {(
+                    {
+                      api: "查询与投影",
+                      "source-ingest": "来源导入",
+                      "ip-service": "IP 属性",
+                      connectivity: "连通性检测",
+                      "residential-recovery": "住宅 IP 恢复",
+                      "node-lifecycle": "节点状态",
+                    } as Record<string, string>
+                  )[s.service] || s.service}
+                  ：{s.healthy ? "正常" : "异常"}，待处理 {s.queued}，执行中{" "}
+                  {s.running}
+                  {s.oldestWaitSeconds > 60
+                    ? `，最长等待 ${Math.floor(s.oldestWaitSeconds / 60)} 分钟`
+                    : ""}
+                  {s.restored > 0 ? `，已恢复 ${s.restored}` : ""}
+                  {s.error ? ` · ${s.error}` : ""}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         <section className="intro">
           <div className="intro-top">
             <div>
@@ -846,6 +912,7 @@ export default function App() {
                     setSorting([{ id, desc: direction === "desc" }]);
                   }}
                 >
+                  <option value="preferred-desc">住宅 IP 优先</option>
                   {snapshot?.speedTest && (
                     <>
                       <option value="speed-desc">速度最高</option>
@@ -1260,6 +1327,30 @@ export default function App() {
                     </dl>
                   </>
                 )}
+                <h3>节点检查</h3>
+                <dl>
+                  {[
+                    [
+                      "连通性",
+                      selected.connectivity
+                        ? selected.connectivity.reachable
+                          ? "可用"
+                          : selected.connectivity.error || "不可用"
+                        : "待检查",
+                    ],
+                    ["测活时间", timeLabel(selected.connectivity?.checkedAt)],
+                    ["出口检查时间", timeLabel(selected.exit?.checkedAt)],
+                    [
+                      "IP 属性时间",
+                      timeLabel(selected.ippure?.classification?.checkedAt),
+                    ],
+                  ].map(([label, value]) => (
+                    <div className="detail-field" key={label}>
+                      <dt>{label}</dt>
+                      <dd>{value}</dd>
+                    </div>
+                  ))}
+                </dl>
                 <h3>IPPure 检测</h3>
                 {selected.ippure?.ip && (
                   <dl>
@@ -1336,11 +1427,11 @@ export default function App() {
                     {selected.ippure?.status === "unsupported"
                       ? selected.ippure.error
                       : selected.ippure?.status === "error"
-                        ? `${selected.ippure.error}（已尝试 ${selected.ippure.attempts} 次，最多 3 次）`
+                        ? selected.ippure.error
                         : snapshot?.ippureCollector?.error ||
                           (snapshot?.ippureCollector?.enabled === false
                             ? "IPPure 检测服务未启用，请配置独立代理检测服务。"
-                            : "尚无 IPPure 结果；检测服务会依次检测当前及历史节点，刷新页面可查看进度。同一连接复用最近的出口检测结果。")}
+                            : "尚无 IPPure 结果；IP 属性服务会独立补充查询，页面会自动更新。同一出口 IP 共享属性结果。")}
                   </p>
                 )}
                 <IPTypeDetails result={selected.ippure} />

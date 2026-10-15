@@ -738,35 +738,12 @@ func isIPv6(s string) bool {
 	return s != "" && indexOf(s, ":") >= 0
 }
 
-// finish persists one result and retires the node when the evidence is
-// conclusive: four failed exit-IP attempts plus a healthy run, corroborated by
-// a GitHub probe over the node's own tunnel so a blocked echo service cannot
-// delete a reachable node.
+// finish stores enrichment only. Lifecycle decisions belong to node-lifecycle.
 func (s *Scheduler) finish(ctx context.Context, j job, outbound *transport.Outbound, result *domain.IPPureResult, healthy bool) error {
 	if result == nil {
 		return nil
 	}
-	if err := s.store.SaveIPPure(j.snapshotID, j.index, *result, j.identity); err != nil {
-		return err
-	}
-	if result.Status != "error" || result.FailureStage != "exit-ip" ||
-		result.Attempts < retireAttempts || !healthy {
-		return nil
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, githubProbeWait)
-	defer cancel()
-	alive, err := s.githubProbe(probeCtx, outbound.Client)
-	if err != nil {
-		return nil
-	}
-	if alive {
-		corroborated := *result
-		corroborated.GitHubReachable = true
-		return s.store.SaveIPPure(j.snapshotID, j.index, corroborated, j.identity)
-	}
-	_, err = s.store.RetireNodes([]domain.Node{j.node},
-		fmt.Sprintf("IPPure: exit-IP probe failed %d times", result.Attempts))
-	return err
+	return s.store.SaveIPPure(j.snapshotID, j.index, *result, j.identity)
 }
 
 // ProbeGitHub reports whether GitHub is reachable through a node's tunnel.
