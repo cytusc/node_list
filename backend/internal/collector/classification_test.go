@@ -28,6 +28,8 @@ func TestClassificationUsesMajorityEvenWhenIPPureFails(t *testing.T) {
 				body := `{"ip":"8.8.8.8","asn":{"type":"isp"}}`
 				if r.URL.Host == "ip-api.com" {
 					body = `{"status":"success","query":"8.8.8.8","hosting":false}`
+				} else if r.URL.Host == "ipinfo.check.place" {
+					body = `{}`
 				} else if r.URL.Host == "api.ipregistry.co" {
 					body = `{"ip":"8.8.8.8","connection":{"type":"isp","asn":15169}}`
 				}
@@ -36,7 +38,7 @@ func TestClassificationUsesMajorityEvenWhenIPPureFails(t *testing.T) {
 			s := &Scheduler{classification: c}
 			result := &domain.IPPureResult{IP: "8.8.8.8", Status: tc.status, Attributes: tc.attrs, CheckedAt: time.Now().UTC().Format(time.RFC3339)}
 			s.classify(context.Background(), result, tc.attrs)
-			if result.Classification == nil || result.Classification.State != "residential" || result.Classification.ResidentialVotes != 2 || result.Classification.UnknownVotes != tc.wantUnknown+2 {
+			if result.Classification == nil || result.Classification.State != "residential" || result.Classification.ResidentialVotes != 2 || result.Classification.UnknownVotes != tc.wantUnknown+4 {
 				t.Fatalf("unexpected classification: %+v", result.Classification)
 			}
 			wantAttrs := "住宅IP"
