@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
+	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/cytusc/node_list/backend/internal/store"
 	"github.com/cytusc/node_list/backend/internal/transport"
 )
@@ -31,11 +32,12 @@ const (
 
 // Scheduler drives IPPure collection across the registered engines.
 type Scheduler struct {
-	store       *store.Store
-	router      *transport.Router
-	apiOrigin   string
-	concurrency int
-	interval    time.Duration
+	classification *ipcheck.Client
+	store          *store.Store
+	router         *transport.Router
+	apiOrigin      string
+	concurrency    int
+	interval       time.Duration
 
 	// slowShare is the fraction of the pool reserved for nodes already known to
 	// fail. Without it a wave of dead nodes — each burning the full multi-provider
@@ -56,10 +58,11 @@ type Scheduler struct {
 
 // SchedulerConfig configures collection.
 type SchedulerConfig struct {
-	Concurrency int
-	Interval    time.Duration
-	APIOrigin   string
-	SlowShare   float64
+	Classification *ipcheck.Client
+	Concurrency    int
+	Interval       time.Duration
+	APIOrigin      string
+	SlowShare      float64
 }
 
 // NewScheduler builds a collector scheduler.
@@ -77,13 +80,14 @@ func NewScheduler(st *store.Store, router *transport.Router, cfg SchedulerConfig
 		cfg.SlowShare = 0.25
 	}
 	return &Scheduler{
-		store:       st,
-		router:      router,
-		apiOrigin:   cfg.APIOrigin,
-		concurrency: cfg.Concurrency,
-		interval:    cfg.Interval,
-		slowShare:   cfg.SlowShare,
-		githubProbe: ProbeGitHub,
+		store:          st,
+		classification: cfg.Classification,
+		router:         router,
+		apiOrigin:      cfg.APIOrigin,
+		concurrency:    cfg.Concurrency,
+		interval:       cfg.Interval,
+		slowShare:      cfg.SlowShare,
+		githubProbe:    ProbeGitHub,
 	}, nil
 }
 
@@ -282,9 +286,10 @@ func (s *Scheduler) buildQueue(ctx context.Context) ([]job, error) {
 			saved.QueryMode == "specified-exit" && saved.TransportMode == "http" &&
 			saved.SignatureVersion >= 2 && saved.ExitIPVersion == domain.ExitIPVersion &&
 			(saved.Status != "error" || saved.IP != "" || saved.ExitIPProbeVersion == domain.ExitIPProbeVersion)
-		backfill := saved != nil && saved.Status == "success" && currentExitIP && saved.Organization == ""
+		backfill := s.classification == nil && saved != nil && saved.Status == "success" && currentExitIP && saved.Organization == ""
 		needsCountry := saved != nil && saved.Status == "success" && currentExitIP && saved.Country == ""
-		if saved != nil && saved.Status == "success" && currentExitIP && !backfill && !needsCountry {
+		needsClassification := s.classification != nil && saved != nil && (saved.Classification == nil || saved.Classification.Version != ipcheck.VotingVersion || time.Since(parseTime(saved.Classification.CheckedAt)) >= 24*time.Hour)
+		if saved != nil && saved.Status == "success" && currentExitIP && !backfill && !needsCountry && !needsClassification {
 			continue
 		}
 		attempts := 0
@@ -319,7 +324,7 @@ func (s *Scheduler) buildQueue(ctx context.Context) ([]job, error) {
 				}
 			}
 		}
-		reuseExit := currentExitIP && saved != nil && saved.IP != "" && isIPv4(saved.IP)
+		reuseExit := s.classification == nil && currentExitIP && saved != nil && saved.IP != "" && isIPv4(saved.IP)
 		jobs = append(jobs, job{
 			snapshotID: e.snapshotID,
 			index:      e.index,
@@ -646,13 +651,16 @@ func (s *Scheduler) runJob(ctx context.Context, j job, outbound *transport.Outbo
 	stage = "ippure-query"
 	verdict, err := QueryIPPure(ctx, NewIPPureClient(client, s.apiOrigin, 10*time.Second), resolved.IP, asnCache)
 	if err != nil {
-		return s.failureResult(ctx, j, result, stage, err)
+		failed := s.failureResult(ctx, j, result, stage, err)
+		s.classify(ctx, failed, nil)
+		return failed
 	}
 	result.Status = "success"
 	result.ASN = verdict.ASN
 	result.Organization = verdict.Organization
 	result.Source = verdict.Source
 	result.Attributes = verdict.Attributes
+	s.classify(ctx, &result, verdict.Attributes)
 	result.HumanPercent = verdict.HumanPercent
 	result.BotPercent = verdict.BotPercent
 	result.Score = verdict.Score
@@ -777,4 +785,19 @@ func ProbeGitHub(ctx context.Context, client *http.Client) (bool, error) {
 		response.Body.Close()
 	}()
 	return response.StatusCode == 200, nil
+}
+
+func parseTime(raw string) time.Time { stamp, _ := time.Parse(time.RFC3339Nano, raw); return stamp }
+
+func (s *Scheduler) classify(ctx context.Context, result *domain.IPPureResult, attributes []string) {
+	if s.classification == nil || result.IP == "" {
+		return
+	}
+	evidence := s.classification.Lookup(ctx, result.IP)
+	if attributes != nil {
+		evidence = append(evidence, ipcheck.IPPureEvidence(result.IP, attributes, result.CheckedAt))
+	}
+	votes := ipcheck.Score(result.IP, evidence, time.Now())
+	result.Classification = &votes
+	result.Attributes = votes.Attributes(result.Attributes)
 }

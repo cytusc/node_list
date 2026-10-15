@@ -27,6 +27,8 @@ services:
       ippure-proxy:
         condition: service_started
     environment:
+      IPINFO_TOKEN: ${IPINFO_TOKEN:-}
+      IP_API_PRO_KEY: ${IP_API_PRO_KEY:-}
       IPPURE_CONTROLLER: http://ippure-proxy:9090
       IPPURE_PROXY_URL: http://ippure-proxy:7890
       IPPURE_CONCURRENCY: ${IPPURE_CONCURRENCY:-3}

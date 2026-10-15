@@ -18,6 +18,7 @@ import (
 
 	"github.com/cytusc/node_list/backend/internal/api"
 	"github.com/cytusc/node_list/backend/internal/collector"
+	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/cytusc/node_list/backend/internal/qilan"
 	"github.com/cytusc/node_list/backend/internal/source"
 	"github.com/cytusc/node_list/backend/internal/store"
@@ -203,9 +204,10 @@ func run() error {
 	}
 	if len(cfg.ippureInstances) > 0 {
 		scheduler, err = collector.NewScheduler(st, router, collector.SchedulerConfig{
-			Concurrency: cfg.concurrency,
-			Interval:    cfg.collectInterval,
-			APIOrigin:   cfg.ippureOrigin,
+			Concurrency:    cfg.concurrency,
+			Classification: ipcheck.NewClient(os.Getenv("IPINFO_TOKEN"), os.Getenv("IP_API_PRO_KEY")),
+			Interval:       cfg.collectInterval,
+			APIOrigin:      cfg.ippureOrigin,
 		})
 		if err != nil {
 			return err

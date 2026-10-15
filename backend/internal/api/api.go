@@ -365,7 +365,7 @@ func matchAll(node domain.Node, s domain.Snapshot, q *resultsQuery) bool {
 		}
 	}
 	if len(q.IPAttributes) > 0 {
-		if node.IPPure == nil || node.IPPure.Status != "success" {
+		if node.IPPure == nil || (node.IPPure.Status != "success" && node.IPPure.Classification == nil) {
 			return false
 		}
 		found := false

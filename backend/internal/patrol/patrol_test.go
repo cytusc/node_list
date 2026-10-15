@@ -140,21 +140,26 @@ func TestRecoverySynchronizesRetirementsAndRequiresTwoSuccesses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	runner := NewPatrol(st, transport.NewRouter(&testEngine{}), PatrolConfig{})
+	runner := NewPatrol(st, transport.NewRouter(&testEngine{}), PatrolConfig{ResidentialVerifier: func(_ context.Context, client *http.Client) (string, error) {
+		if string(client.Transport.(markedTransport)) == "home" {
+			return "8.8.8.8", nil
+		}
+		return "", nil
+	}})
 	runner.probe = func(context.Context, *http.Client) (bool, error) { return true, nil }
 	state := map[string]RecoveryState{}
 	first, err := runner.RecoverRetiredNodes(ctx, state, now, 30*time.Minute, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Checked != 1 || first.Restored != 0 {
+	if first.Checked != 2 || first.Restored != 0 {
 		t.Fatalf("first recovery=%+v", first)
 	}
 	second, err := runner.RecoverRetiredNodes(ctx, state, now.Add(31*time.Minute), 30*time.Minute, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Checked != 1 || second.Restored != 1 {
+	if second.Checked != 2 || second.Restored != 1 {
 		t.Fatalf("second recovery=%+v", second)
 	}
 	if len(st.RetiredRows()) != 2 {

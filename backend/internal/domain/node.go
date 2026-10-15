@@ -6,6 +6,7 @@ package domain
 
 import (
 	"encoding/json"
+	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"sort"
 	"strings"
 )
@@ -63,7 +64,8 @@ func (m Media) MarshalJSON() ([]byte, error) {
 
 // IPPureResult is the enrichment attached to a probed node.
 type IPPureResult struct {
-	shape jsonShape
+	Classification *ipcheck.Result `json:"classification,omitempty"`
+	shape          jsonShape
 
 	CheckedAt string `json:"checkedAt"`
 	Attempts  int    `json:"attempts"`
