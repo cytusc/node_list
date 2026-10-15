@@ -232,9 +232,7 @@ func (p *Projector) Refresh(ctx context.Context) error {
 	var nodes []domain.Node
 	var metadata domain.Metadata
 	if aggregate != nil {
-		aggregate.Nodes = p.model.FilterDepartedNodes(aggregate.Nodes)
 		nodes = aggregate.Nodes
-		aggregate.Nodes = nodes
 		metadata = domain.ResultsMetadata(*aggregate)
 	}
 	rows := projectionRows(nodes)
@@ -582,9 +580,9 @@ type Result struct {
 // recomputed even when the source revision is otherwise up to date.
 const rankingRevision = "icu-numeric-1"
 
-// nodePayloadRevision invalidates persisted node JSON when serialization
-// changes, even when no snapshot/enrichment has been updated since deployment.
-const nodePayloadRevision = "json-presence-1"
+// nodePayloadRevision invalidates persisted nodes when serialization or inclusion
+// rules change, even when no snapshot/enrichment has changed since deployment.
+const nodePayloadRevision = "all-active-history-2"
 
 // storedMetadata is the metadata column layout. The API must not see the
 // ranking marker, so it lives in a wrapper rather than on domain.Metadata,
