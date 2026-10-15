@@ -80,7 +80,11 @@ func ConfigFromEnv() (Config, error) {
 
 func (c Config) connString() string {
 	return fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s",
-		c.Host, c.Port, c.Database, c.User, c.Password)
+		quoteConnValue(c.Host), c.Port, quoteConnValue(c.Database), quoteConnValue(c.User), quoteConnValue(c.Password))
+}
+
+func quoteConnValue(value string) string {
+	return "'" + strings.NewReplacer("\\", "\\\\", "'", "\\'").Replace(value) + "'"
 }
 
 // Adapter persists snapshots and enrichment.
@@ -145,7 +149,7 @@ func (a *Adapter) initSchema(ctx context.Context) error {
 			return fmt.Errorf("create schema: %w", err)
 		}
 	}
-	return nil
+	return (&Projector{pool: a.pool}).initSchema(ctx)
 }
 
 // Pool exposes the connection pool to the projection, which needs transaction
@@ -524,6 +528,7 @@ func (p *Projector) initSchema(ctx context.Context) error {
       revision bigint NOT NULL
     )`,
 		`INSERT INTO ` + tableState + `(singleton) VALUES (true) ON CONFLICT DO NOTHING`,
+		`CREATE INDEX IF NOT EXISTS node_explorer_results_changes_revision ON ` + tableChanges + `(revision)`,
 		`CREATE TABLE IF NOT EXISTS ` + tableCurrent + ` (` + columnDefinitions() + `,
       PRIMARY KEY (position), UNIQUE (identity) DEFERRABLE INITIALLY DEFERRED)`,
 		`CREATE INDEX IF NOT EXISTS node_explorer_current_speed

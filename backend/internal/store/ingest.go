@@ -35,13 +35,13 @@ func NewIngestor(s *Store) *Ingestor {
 // changed. The signature covers every source file, so a rewritten subscription
 // without a new detection round is still picked up.
 func (i *Ingestor) ImportFile(ctx context.Context, resultsFile, clashFile, linksFile string) (IngestResult, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	signature, err := fileSignature(resultsFile, clashFile, linksFile)
 	if err != nil {
 		return IngestResult{}, err
 	}
-	i.mu.Lock()
 	unchanged := i.signature == signature
-	i.mu.Unlock()
 	if unchanged {
 		return IngestResult{Skipped: true}, nil
 	}
@@ -68,17 +68,21 @@ func (i *Ingestor) ImportFile(ctx context.Context, resultsFile, clashFile, links
 			return IngestResult{}, err
 		}
 	}
-	if err := i.Import(ctx, snap, sources); err != nil {
+	if err := i.importLocked(ctx, snap, sources); err != nil {
 		return IngestResult{}, err
 	}
-	i.mu.Lock()
 	i.signature = signature
-	i.mu.Unlock()
 	return IngestResult{Inserted: true}, nil
 }
 
 // Import validates, enriches with provenance and stores one snapshot.
 func (i *Ingestor) Import(ctx context.Context, snap domain.Snapshot, sources *domain.Sources) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.importLocked(ctx, snap, sources)
+}
+
+func (i *Ingestor) importLocked(ctx context.Context, snap domain.Snapshot, sources *domain.Sources) error {
 	if snap.Nodes == nil {
 		return errors.New("invalid snapshot: nodes missing")
 	}
@@ -106,9 +110,7 @@ func (i *Ingestor) Import(ctx context.Context, snap domain.Snapshot, sources *do
 		normalized.Nodes = append(normalized.Nodes, node)
 	}
 
-	i.mu.Lock()
 	needsBackfill := sources != nil && !i.backfilled
-	i.mu.Unlock()
 	if needsBackfill {
 		linked, err := i.buildBackfill(normalized, sources)
 		if err != nil {
@@ -117,13 +119,11 @@ func (i *Ingestor) Import(ctx context.Context, snap domain.Snapshot, sources *do
 		if err := i.store.ReconcileSources(linked, false); err != nil {
 			return err
 		}
-		i.mu.Lock()
-		i.backfilled = true
-		i.mu.Unlock()
 		// Reconciliation rewrote stored payloads; reload everything once.
 		if err := i.reload(ctx); err != nil {
 			return err
 		}
+		i.backfilled = true
 	}
 
 	fingerprint, err := domain.SnapshotFingerprint(normalized)
@@ -171,43 +171,7 @@ func (i *Ingestor) buildBackfill(snap domain.Snapshot, sources *domain.Sources) 
 
 // reload refreshes the in-memory batches from the database.
 func (i *Ingestor) reload(ctx context.Context) error {
-	rows, err := i.store.adapter.All(ctx)
-	if err != nil {
-		return err
-	}
-	batches := make(map[int]*batchedSnapshot, len(rows))
-	for _, row := range rows {
-		batch, err := i.store.loadBatch(row)
-		if err != nil {
-			continue
-		}
-		batches[batch.ID] = batch
-	}
-	enrichments, err := i.store.adapter.Enrichments(ctx, nil)
-	if err != nil {
-		return err
-	}
-	bySnapshot := make(map[int]map[int]json.RawMessage, 64)
-	for _, item := range enrichments {
-		if bySnapshot[item.SnapshotID] == nil {
-			bySnapshot[item.SnapshotID] = make(map[int]json.RawMessage, 64)
-		}
-		bySnapshot[item.SnapshotID][item.NodeIndex] = json.RawMessage(item.Payload)
-	}
-	retired, err := i.store.adapter.RetiredNodes(ctx)
-	if err != nil {
-		return err
-	}
-	i.store.mu.Lock()
-	i.store.batches = batches
-	i.store.enrich = bySnapshot
-	i.store.retired = make(map[string]RetiredRow, len(retired))
-	for _, row := range retired {
-		i.store.retired[row.Identity] = row
-	}
-	i.store.rebuildOrderLocked()
-	i.store.mu.Unlock()
-	return nil
+	return i.store.Sync(ctx)
 }
 
 func fileExists(path string) bool {
@@ -220,12 +184,11 @@ func fileExists(path string) bool {
 // it is what keeps the five-second import timer from doing real work.
 func fileSignature(files ...string) (string, error) {
 	type entry struct {
-		file string
-		ino  uint64
-		size int64
-		mtim int64
-		ctim int64
-		miss bool
+		File    string
+		Size    int64
+		ModTime int64
+		System  any
+		Missing bool
 	}
 	items := make([]entry, 0, len(files))
 	for _, file := range files {
@@ -235,15 +198,16 @@ func fileSignature(files ...string) (string, error) {
 		info, err := os.Stat(file)
 		if err != nil {
 			if os.IsNotExist(err) {
-				items = append(items, entry{file: file, miss: true})
+				items = append(items, entry{File: file, Missing: true})
 				continue
 			}
 			return "", err
 		}
 		items = append(items, entry{
-			file: file,
-			size: info.Size(),
-			mtim: info.ModTime().UnixNano(),
+			File:    file,
+			Size:    info.Size(),
+			ModTime: info.ModTime().UnixNano(),
+			System:  signatureStat(info.Sys()),
 		})
 	}
 	out, err := json.Marshal(items)

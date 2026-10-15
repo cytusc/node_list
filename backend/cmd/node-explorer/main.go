@@ -70,6 +70,15 @@ func loadConfig(root string) (config, error) {
 		feishuWebhook:   os.Getenv("FEISHU_WEBHOOK_URL"),
 		refreshInterval: time.Duration(envInt("PROJECTION_REFRESH_SECONDS", 10)) * time.Second,
 	}
+	if cfg.concurrency < 1 || cfg.concurrency > 64 {
+		return cfg, fmt.Errorf("IPPURE_CONCURRENCY must be between 1 and 64")
+	}
+	if cfg.collectInterval <= 0 || cfg.refreshInterval <= 0 {
+		return cfg, fmt.Errorf("collector and projection intervals must be positive")
+	}
+	if cfg.qilanInterval < time.Minute {
+		cfg.qilanInterval = time.Minute
+	}
 	cfg.resultsFile = os.Getenv("RESULTS_FILE")
 	if cfg.resultsFile == "" {
 		cfg.resultsFile = filepath.Join(cfg.subDir, "config", "cache", "config", "results.json")
@@ -172,14 +181,8 @@ func run() error {
 	linksFile := filepath.Join(cfg.subDir, "output", "base64.txt")
 	clashFile := filepath.Join(cfg.subDir, "output", "all.yaml")
 
-	router := transport.NewRouter(transport.NewNativeEngine())
-	if len(cfg.ippureInstances) > 0 {
-		router = transport.NewRouter(
-			transport.NewNativeEngine(),
-			transport.NewMihomoEngine(cfg.ippureInstances, 15*time.Second),
-		)
-	}
-	router.WithFallback(transport.NewMihomoEngine(cfg.ippureInstances, 15*time.Second))
+	mihomo := transport.NewMihomoEngine(cfg.ippureInstances, 15*time.Second)
+	router := transport.NewRouter(transport.NewNativeEngine(), mihomo).WithFallback(mihomo)
 
 	var scheduler *collector.Scheduler
 	collectorStatus := func() api.CollectorStatus {

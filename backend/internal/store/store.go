@@ -124,6 +124,7 @@ type batchedSnapshot struct {
 type Store struct {
 	adapter Adapter
 
+	ioMu     sync.Mutex // serializes database reads with local cache mutations
 	mu       sync.RWMutex
 	batches  map[int]*batchedSnapshot
 	order    []int // batch ids, newest first
@@ -143,6 +144,7 @@ type Store struct {
 func New(adapter Adapter, refresh func(context.Context) error) *Store {
 	return &Store{
 		adapter:       adapter,
+		revision:      -1,
 		batches:       make(map[int]*batchedSnapshot),
 		enrich:        make(map[int]map[int]json.RawMessage),
 		retired:       make(map[string]RetiredRow),
@@ -154,41 +156,36 @@ func New(adapter Adapter, refresh func(context.Context) error) *Store {
 
 // flight collapses concurrent callers onto one in-flight operation, so a burst
 // of requests and the background timer share a single database round.
-type flight struct {
-	mu   sync.Mutex
+type flightCall struct {
 	done chan struct{}
 	err  error
 }
+type flight struct {
+	mu   sync.Mutex
+	call *flightCall
+}
 
 func newFlight() *flight { return &flight{} }
-
 func (f *flight) run(ctx context.Context, fn func(context.Context) error) error {
 	f.mu.Lock()
-	if f.done != nil {
-		done := f.done
+	if c := f.call; c != nil {
 		f.mu.Unlock()
 		select {
-		case <-done:
-			f.mu.Lock()
-			err := f.err
-			f.mu.Unlock()
-			return err
+		case <-c.done:
+			return c.err
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
-	f.done = make(chan struct{})
-	f.err = nil
+	c := &flightCall{done: make(chan struct{})}
+	f.call = c
 	f.mu.Unlock()
-
-	err := fn(ctx)
-
+	c.err = fn(ctx)
 	f.mu.Lock()
-	f.err = err
-	close(f.done)
-	f.done = nil
+	close(c.done)
+	f.call = nil
 	f.mu.Unlock()
-	return err
+	return c.err
 }
 
 // Source warning codes. The JavaScript store distinguished a results file that
@@ -262,6 +259,19 @@ func (s *Store) SetRefresh(fn func(context.Context) error) {
 // Reload re-reads every batch, enrichment and retirement from the adapter. Used
 // after a full rebuild or a provenance reconciliation.
 func (s *Store) Reload(ctx context.Context) error {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+	if reader, ok := s.adapter.(ChangeReader); ok {
+		changes, err := reader.ReadChanges(ctx, -1)
+		if err != nil {
+			return err
+		}
+		return s.ApplyChanges(changes)
+	}
+	return s.reloadLegacy(ctx)
+}
+
+func (s *Store) reloadLegacy(ctx context.Context) error {
 	rows, err := s.adapter.All(ctx)
 	if err != nil {
 		return err
@@ -305,66 +315,6 @@ func (s *Store) Reload(ctx context.Context) error {
 	return nil
 }
 
-// ApplyBatches merges changed batches into the cache.
-func (s *Store) ApplyBatches(rows []SnapshotRow) {
-	if len(rows) == 0 {
-		return
-	}
-	decoded := make([]*batchedSnapshot, 0, len(rows))
-	for _, row := range rows {
-		batch, err := s.loadBatch(row)
-		if err != nil {
-			continue
-		}
-		decoded = append(decoded, batch)
-	}
-	s.mu.Lock()
-	for _, batch := range decoded {
-		s.batches[batch.ID] = batch
-	}
-	s.rebuildOrderLocked()
-	s.mu.Unlock()
-}
-
-// ReplaceEnrichmentSets replaces the cached enrichment rows for the batches the
-// last refresh reported as changed.
-func (s *Store) ReplaceEnrichmentSets(items []Enrichment) {
-	if len(items) == 0 {
-		return
-	}
-	grouped := make(map[int][]Enrichment, 16)
-	touched := make([]int, 0, 16)
-	for _, item := range items {
-		if _, ok := grouped[item.SnapshotID]; !ok {
-			touched = append(touched, item.SnapshotID)
-		}
-		grouped[item.SnapshotID] = append(grouped[item.SnapshotID], item)
-	}
-	s.mu.Lock()
-	for _, id := range touched {
-		byIndex := make(map[int]json.RawMessage, len(grouped[id]))
-		for _, item := range grouped[id] {
-			byIndex[item.NodeIndex] = json.RawMessage(item.Payload)
-		}
-		s.enrich[id] = byIndex
-	}
-	s.mu.Unlock()
-}
-
-// ApplySnapshot decodes and caches a batch that either this process or another
-// one inserted. Callers must hold no locks.
-func (s *Store) ApplySnapshot(row SnapshotRow) error {
-	batch, err := s.loadBatch(row)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.batches[batch.ID] = batch
-	s.rebuildOrderLocked()
-	s.mu.Unlock()
-	return nil
-}
-
 // RemoveBatch drops a batch from the cache after pruning.
 func (s *Store) RemoveBatch(ids []int) {
 	s.mu.Lock()
@@ -385,45 +335,14 @@ func (s *Store) rebuildOrderLocked() {
 	s.order = ids
 }
 
-// ReplaceEnrichments swaps the cached enrichment set for one batch.
-func (s *Store) ReplaceEnrichments(snapshotID int, items []Enrichment) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(items) == 0 {
-		delete(s.enrich, snapshotID)
-		return
-	}
-	byIndex := make(map[int]json.RawMessage, len(items))
-	for _, item := range items {
-		byIndex[item.NodeIndex] = json.RawMessage(item.Payload)
-	}
-	s.enrich[snapshotID] = byIndex
-}
-
-// SetRetired replaces the cached retirement set.
-func (s *Store) SetRetired(rows []RetiredRow) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.retired = make(map[string]RetiredRow, len(rows))
-	for _, row := range rows {
-		s.retired[row.Identity] = row
-	}
-}
-
-func (s *Store) retiredSet() map[string]RetiredRow {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make(map[string]RetiredRow, len(s.retired))
-	for k, v := range s.retired {
-		out[k] = v
-	}
-	return out
-}
-
 // RetiredNodeIdentities is the hot-path read used before every probe.
 func (s *Store) RetiredNodeIdentities() map[string]struct{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.retiredNodeIdentitiesLocked()
+}
+
+func (s *Store) retiredNodeIdentitiesLocked() map[string]struct{} {
 	out := make(map[string]struct{}, len(s.retired))
 	for k := range s.retired {
 		out[k] = struct{}{}
@@ -506,6 +425,10 @@ func (s *Store) hydrate(batch *batchedSnapshot, enrich map[int]json.RawMessage, 
 func (s *Store) Aggregate(includeRetired bool) *domain.Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.aggregateLocked(includeRetired)
+}
+
+func (s *Store) aggregateLocked(includeRetired bool) *domain.Snapshot {
 
 	batches := make([]*batchedSnapshot, 0, len(s.order))
 	for _, id := range s.order {
@@ -719,6 +642,10 @@ type Candidate struct {
 func (s *Store) IPPureCandidates() []Candidate {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.ippureCandidatesLocked()
+}
+
+func (s *Store) ippureCandidatesLocked() []Candidate {
 	candidates := make([]Candidate, 0, 1024)
 	for _, id := range s.order {
 		batch := s.batches[id]
@@ -741,7 +668,7 @@ func (s *Store) IPPureCandidates() []Candidate {
 				if err := json.Unmarshal(payload, &result); err == nil {
 					done = result.Status == "success" &&
 						domain.HasVerifiedExitIP(&result) &&
-						result.Organization != ""
+						result.Organization != "" && result.Country != ""
 				}
 			}
 			if done {
@@ -771,6 +698,10 @@ type CollectionSnapshot struct {
 func (s *Store) GetCollectionSnapshot() *CollectionSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.collectionSnapshotLocked()
+}
+
+func (s *Store) collectionSnapshotLocked() *CollectionSnapshot {
 	if len(s.order) == 0 {
 		return nil
 	}
@@ -806,10 +737,12 @@ type CollectionContext struct {
 }
 
 func (s *Store) GetCollectionContext() CollectionContext {
-	snap := s.GetCollectionSnapshot()
-	candidates := s.IPPureCandidates()
-	aggregate := s.Aggregate(false)
-	retired := s.RetiredNodeIdentities()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snap := s.collectionSnapshotLocked()
+	candidates := s.ippureCandidatesLocked()
+	aggregate := s.aggregateLocked(false)
+	retired := s.retiredNodeIdentitiesLocked()
 
 	visible := make(map[string]struct{}, 1024)
 	results := make(map[string]*domain.IPPureResult, 1024)
@@ -888,6 +821,8 @@ func (s *Store) History(ctx context.Context, limit, offset int) ([]HistoryItem, 
 
 // RetireNodes soft-deletes connections by identity.
 func (s *Store) RetireNodes(nodes []domain.Node, reason string) (int, error) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 	if len(nodes) == 0 {
 		return 0, nil
 	}
@@ -921,6 +856,8 @@ func (s *Store) RetireNodes(nodes []domain.Node, reason string) (int, error) {
 
 // RestoreNode undoes one retirement by exact match.
 func (s *Store) RestoreNode(identity, retiredAt, reason string) (int64, error) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 	n, err := s.adapter.RestoreNode(context.Background(), identity, retiredAt, reason)
 	if err == nil && n > 0 {
 		s.mu.Lock()
@@ -933,6 +870,8 @@ func (s *Store) RestoreNode(identity, retiredAt, reason string) (int64, error) {
 // SaveIPPure writes one probe result. The identity is supplied so the adapter
 // never has to re-read the snapshot payload.
 func (s *Store) SaveIPPure(snapshotID, index int, result domain.IPPureResult, identity string) error {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 	payload, err := json.Marshal(result)
 	if err != nil {
 		return err
@@ -951,15 +890,22 @@ func (s *Store) SaveIPPure(snapshotID, index int, result domain.IPPureResult, id
 
 // ReconcileSources attaches provenance to archived batches.
 func (s *Store) ReconcileSources(linked map[string]domain.Source, prune bool) error {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 	return s.adapter.Reconcile(context.Background(), linked, prune)
 }
 
 // Refresh rebuilds the persisted projection when another process changed data.
 func (s *Store) Refresh(ctx context.Context) error {
-	if s.refresh == nil {
+	return s.refreshFlight.run(ctx, func(ctx context.Context) error {
+		if err := s.Sync(ctx); err != nil {
+			return err
+		}
+		if s.refresh != nil {
+			return s.refresh(ctx)
+		}
 		return nil
-	}
-	return s.refreshFlight.run(ctx, s.refresh)
+	})
 }
 
 // Close releases the adapter.

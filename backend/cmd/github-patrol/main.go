@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -130,21 +131,21 @@ func run() error {
 			current.RecoveryState = previous.RecoveryState
 		}
 	}
-	persist := func() {
-		current.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		writeStatus(path, current)
-	}
+	writer := &statusWriter{path: path}
+	persist := func() { writer.update(current) }
 	persist()
 
+	heartbeatDone := make(chan struct{})
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
 	go func() {
+		defer close(heartbeatDone)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-heartbeat.C:
-				persist()
+				writer.heartbeat()
 			}
 		}
 	}()
@@ -191,6 +192,8 @@ func run() error {
 			break
 		}
 	}
+	stop()
+	<-heartbeatDone
 	current.Running = false
 	persist()
 	return nil
@@ -223,19 +226,65 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
-// writeStatus persists atomically so a crash never leaves a partial file.
+// statusWriter owns a detached copy. The heartbeat never reads the mutable
+// patrol state or its recovery map, and all atomic file replacements serialize.
+type statusWriter struct {
+	mu      sync.Mutex
+	path    string
+	current status
+}
+
+func (w *statusWriter) update(current status) {
+	raw, err := json.Marshal(current)
+	if err != nil {
+		log.Printf("github-patrol: marshal status failed: %v", err)
+		return
+	}
+	var detached status
+	if err := json.Unmarshal(raw, &detached); err != nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.current = detached
+	w.writeLocked()
+}
+
+func (w *statusWriter) heartbeat() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writeLocked()
+}
+
+func (w *statusWriter) writeLocked() {
+	w.current.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	writeStatus(w.path, w.current)
+}
+
+// writeStatus persists atomically; callers serialize writes through statusWriter.
 func writeStatus(path string, payload status) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("github-patrol: marshal status failed: %v", err)
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	file, err := os.CreateTemp(filepath.Dir(path), ".patrol-status-*")
+	if err != nil {
 		log.Printf("github-patrol: status write failed: %v", err)
 		return
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	tmp := file.Name()
+	defer os.Remove(tmp)
+	if _, err = file.Write(raw); err != nil {
+		file.Close()
+		log.Printf("github-patrol: status write failed: %v", err)
+		return
+	}
+	if err = file.Close(); err != nil {
+		log.Printf("github-patrol: status close failed: %v", err)
+		return
+	}
+	if err = os.Rename(tmp, path); err != nil {
 		log.Printf("github-patrol: status rename failed: %v", err)
 	}
 }

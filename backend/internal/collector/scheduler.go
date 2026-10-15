@@ -2,7 +2,6 @@ package collector
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -130,6 +129,10 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		s.mu.Unlock()
 	}()
 
+	if err := s.store.Sync(ctx); err != nil {
+		s.setError(err)
+		return err
+	}
 	jobs, err := s.buildQueue(ctx)
 	if err != nil {
 		s.setError(err)
@@ -241,12 +244,10 @@ func (s *Scheduler) buildQueue(ctx context.Context) ([]job, error) {
 	seen := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
 		shareOnly := len(e.node.RawConfig) == 0 && e.node.RawLink != ""
-		if shareOnly {
-			if _, ok := seen[e.identity]; ok {
-				continue
-			}
-			seen[e.identity] = struct{}{}
+		if _, ok := seen[e.identity]; ok {
+			continue
 		}
+		seen[e.identity] = struct{}{}
 		saved := contextData.AggregateIP[e.identity]
 		if saved == nil {
 			saved = e.node.IPPure
@@ -397,6 +398,9 @@ func (s *Scheduler) runJobs(ctx context.Context, jobs []job) error {
 	if slowSlots < 1 {
 		slowSlots = 1
 	}
+	if total == 1 {
+		slowSlots = 0
+	}
 	fastSlots := total - slowSlots
 	if fastSlots < 1 {
 		fastSlots = 1
@@ -462,13 +466,23 @@ func (s *Scheduler) runWave(ctx context.Context, engine transport.Engine, wave [
 		defer release()
 	}
 
-	fast := make(chan job, len(wave))
-	slow := make(chan job, len(wave))
-	for _, j := range wave {
+	type waveJob struct {
+		job
+		waveIndex int
+	}
+	fast := make(chan waveJob, len(wave))
+	slow := make(chan waveJob, len(wave))
+	for index, item := range wave {
+		j := waveJob{job: item, waveIndex: index}
 		if j.knownDead {
 			slow <- j
 		} else {
 			fast <- j
+		}
+	}
+	if slowSlots == 0 {
+		for len(slow) > 0 {
+			fast <- <-slow
 		}
 	}
 	close(fast)
@@ -478,6 +492,8 @@ func (s *Scheduler) runWave(ctx context.Context, engine transport.Engine, wave [
 	// A node that succeeds in this wave proves the probe infrastructure works,
 	// which is the control required before retiring anything.
 	var healthy atomic.Bool
+	var persistErr error
+	var persistOnce sync.Once
 
 	group, groupCtx := errgroup.WithContext(ctx)
 	for lane, slots := range map[string]int{"fast": fastSlots, "slow": slowSlots} {
@@ -492,17 +508,17 @@ func (s *Scheduler) runWave(ctx context.Context, engine transport.Engine, wave [
 					if groupCtx.Err() != nil {
 						return groupCtx.Err()
 					}
-					outbound := outbounds[j.index]
+					outbound := outbounds[j.waveIndex]
 					if outbound == nil {
 						continue
 					}
-					result := s.runJob(groupCtx, j, outbound, asnCache)
+					result := s.runJob(groupCtx, j.job, outbound, asnCache)
 					if result != nil && result.Status == "success" {
 						healthy.Store(true)
 					}
-					if err := s.finish(groupCtx, j, outbound, result, healthy.Load()); err != nil {
+					if err := s.finish(groupCtx, j.job, outbound, result, healthy.Load()); err != nil {
 						// A single node's persistence failure must not abort the wave.
-						fmt.Printf("collector: persist failed for %s: %v\n", j.identity, err)
+						persistOnce.Do(func() { persistErr = fmt.Errorf("persist probe result: %w", err) })
 					}
 					atomic.AddInt64(&s.probed, 1)
 				}
@@ -511,10 +527,10 @@ func (s *Scheduler) runWave(ctx context.Context, engine transport.Engine, wave [
 		}
 	}
 	err = group.Wait()
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	if err != nil {
 		return err
 	}
-	return nil
+	return persistErr
 }
 
 // runJob performs one probe and returns the result to persist.

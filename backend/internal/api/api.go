@@ -166,6 +166,7 @@ func (s *Server) results(w http.ResponseWriter, r *http.Request) {
 			writeUnavailable(w)
 			return
 		}
+		page.Nodes = publicSnapshot(domain.Snapshot{Nodes: page.Nodes}).Nodes
 		writeJSON(w, http.StatusOK, struct {
 			postgres.Result
 			Collector CollectorStatus `json:"ippureCollector"`

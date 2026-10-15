@@ -11,12 +11,12 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +89,9 @@ func (r *Router) EngineFor(node domain.Node) (Engine, bool) {
 		}
 	}
 	if e, ok := r.byProto[protocol]; ok {
+		if _, native := e.(*NativeEngine); native && !nativeCompatible(outboundConfig(node)) {
+			return r.fallback, r.fallback != nil
+		}
 		return e, true
 	}
 	if r.fallback != nil {
@@ -137,6 +140,9 @@ func (e *NativeEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[in
 	out := make(map[int]*Outbound, len(nodes))
 	for i, node := range nodes {
 		config := outboundConfig(node)
+		if !nativeCompatible(config) {
+			continue
+		}
 		client, err := nativeClient(config)
 		if err != nil {
 			continue
@@ -183,6 +189,31 @@ func atoi(s string) int {
 	return n
 }
 
+// Native transports support standard HTTP(S)/SOCKS handshakes. Mihomo handles
+// proxy-specific TLS settings and chaining without weakening destination TLS.
+func nativeCompatible(config domain.ProxyConfig) bool {
+	kind := strings.ToLower(fmt.Sprint(config["type"]))
+	for _, key := range []string{"dialer-proxy", "detour", "headers"} {
+		if config[key] != nil {
+			return false
+		}
+	}
+	if kind == "socks" || kind == "socks5" {
+		return !truthy(config["tls"])
+	}
+	if kind == "https" || truthy(config["tls"]) || truthy(config["https"]) {
+		if truthy(config["skip-cert-verify"]) {
+			return false
+		}
+		for _, key := range []string{"sni", "servername", "fingerprint", "alpn"} {
+			if value := config[key]; value != nil && fmt.Sprint(value) != "" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // nativeClient builds an HTTP client whose traffic goes through one node.
 func nativeClient(config domain.ProxyConfig) (*http.Client, error) {
 	proxyURL, err := outboundURL(config)
@@ -218,7 +249,7 @@ func nativeClient(config domain.ProxyConfig) (*http.Client, error) {
 		}
 		transport.Proxy = nil
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.Dial(network, addr)
+			return dialer.(proxy.ContextDialer).DialContext(ctx, network, addr)
 		}
 	}
 	return &http.Client{
@@ -249,7 +280,7 @@ func outboundURL(config domain.ProxyConfig) (*url.URL, error) {
 	scheme := "http"
 	if nodeType == "socks5" || nodeType == "socks" {
 		scheme = "socks5"
-	} else if truthy(config["tls"]) || truthy(config["https"]) {
+	} else if nodeType == "https" || truthy(config["tls"]) || truthy(config["https"]) {
 		scheme = "https"
 	}
 	u := &url.URL{Scheme: scheme, Host: net.JoinHostPort(host, fmt.Sprint(port))}
@@ -281,20 +312,18 @@ func truthy(v any) bool {
 
 // MihomoEngine loads batches into one or more Mihomo instances.
 //
-// Instances are used round-robin: when a second controller is configured the
-// next wave reloads the idle instance while the previous wave's probes are
-// still finishing, which removes the reload from the critical path entirely.
+// Available instances rotate through a lease queue. A lease covers both the
+// reload and all probes, so an occupied instance cannot be reconfigured.
 type MihomoEngine struct {
 	configs    []MihomoConfig
-	secret     string
 	apiTimeout time.Duration
 
-	mu       sync.Mutex
-	next     int
-	current  []domain.ProxyConfig
-	reloadAt time.Time
-	reloads  int64
-	skipped  int64
+	mu        sync.Mutex
+	current   [][]domain.ProxyConfig
+	available chan int
+	reloadAt  time.Time
+	reloads   int64
+	skipped   int64
 }
 
 // MihomoConfig is one Mihomo instance: its controller and its proxy entry.
@@ -309,7 +338,12 @@ func NewMihomoEngine(instances []MihomoConfig, timeout time.Duration) *MihomoEng
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	return &MihomoEngine{configs: instances, apiTimeout: timeout}
+	e := &MihomoEngine{configs: append([]MihomoConfig(nil), instances...), apiTimeout: timeout,
+		current: make([][]domain.ProxyConfig, len(instances)), available: make(chan int, len(instances))}
+	for i := range instances {
+		e.available <- i
+	}
+	return e
 }
 
 // Name implements Engine.
@@ -351,11 +385,21 @@ func (e *MihomoEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[in
 		return nil, nil, fmt.Errorf("mihomo engine cannot carry any node in this wave")
 	}
 
+	var slot int
+	select {
+	case slot = <-e.available:
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
+	reserved := false
+	defer func() {
+		if !reserved {
+			e.available <- slot
+		}
+	}()
 	e.mu.Lock()
-	slot := e.next % len(e.configs)
-	e.next++
 	instance := e.configs[slot]
-	same := sameProxySet(e.current, proxies)
+	same := sameProxySet(e.current[slot], proxies)
 	if same {
 		e.skipped++
 	}
@@ -365,12 +409,19 @@ func (e *MihomoEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[in
 	// Waves that only replace a few nodes still reload, because dropping a
 	// listener requires a configuration change.
 	if !same {
-		urls, err := ConfigureProxyBatch(ctx, instance, proxies)
+		reloadCtx, cancel := context.WithTimeout(ctx, e.apiTimeout)
+		urls, err := ConfigureProxyBatch(reloadCtx, instance, proxies)
+		cancel()
 		if err != nil {
+			e.mu.Lock()
+			e.current[slot] = nil
+			e.mu.Unlock()
 			return nil, nil, err
 		}
 		e.mu.Lock()
-		e.current = proxies
+		// Copy through JSON so later caller mutations cannot alter the cache.
+		raw, _ := json.Marshal(proxies)
+		_ = json.Unmarshal(raw, &e.current[slot])
 		e.reloadAt = time.Now()
 		e.reloads++
 		e.mu.Unlock()
@@ -386,10 +437,15 @@ func (e *MihomoEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[in
 		u := urls[slot]
 		out[indexes[slot]] = &Outbound{Client: listenerClient(u), Label: u}
 	}
+	reserved = true
+	var once sync.Once
 	return out, func() {
-		for _, o := range out {
-			o.Client.CloseIdleConnections()
-		}
+		once.Do(func() {
+			for _, o := range out {
+				o.Client.CloseIdleConnections()
+			}
+			e.available <- slot
+		})
 	}, nil
 }
 
@@ -418,40 +474,21 @@ func sameProxySet(current, next []domain.ProxyConfig) bool {
 	if len(current) != len(next) {
 		return false
 	}
-	left := make([]string, len(current))
-	right := make([]string, len(next))
-	for i, p := range current {
-		left[i] = proxyFingerprint(p)
-	}
-	for i, p := range next {
-		right[i] = proxyFingerprint(p)
-	}
-	sort.Strings(left)
-	sort.Strings(right)
-	for i := range left {
-		if left[i] != right[i] {
+	for i := range current {
+		if proxyFingerprint(current[i]) != proxyFingerprint(next[i]) {
 			return false
 		}
 	}
 	return true
 }
 
-// proxyFingerprint hashes a proxy definition. Credentials stay in-process: the
-// value is only used to decide whether a reload is needed.
+// JSON preserves nested fields and value types, and deterministically orders map keys.
 func proxyFingerprint(p domain.ProxyConfig) string {
-	keys := make([]string, 0, len(p))
-	for k := range p {
-		keys = append(keys, k)
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return ""
 	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		b.WriteString(k)
-		b.WriteString("=")
-		b.WriteString(fmt.Sprint(p[k]))
-		b.WriteString(";")
-	}
-	return b.String()
+	return string(raw)
 }
 
 // ProbeHTTP reports whether a node's tunnel can reach a plain HTTPS host.

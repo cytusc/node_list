@@ -32,6 +32,7 @@ type Watcher struct {
 	sweep  time.Duration
 	ingest func(context.Context) error
 
+	runMu   sync.Mutex
 	mu      sync.Mutex
 	timer   *time.Timer
 	lastRun time.Time
@@ -83,6 +84,13 @@ func (w *Watcher) Start(ctx context.Context) error {
 
 	go func() {
 		defer observer.Close()
+		defer func() {
+			w.mu.Lock()
+			if w.timer != nil {
+				w.timer.Stop()
+			}
+			w.mu.Unlock()
+		}()
 		sweep := time.NewTicker(w.sweep)
 		defer sweep.Stop()
 		// One immediate pass covers rounds published while the service was down.
@@ -128,9 +136,13 @@ func (w *Watcher) debounce(ctx context.Context) {
 	w.mu.Unlock()
 }
 
-// trigger runs ingestion. Concurrent triggers are allowed to overlap only if the
-// previous one finished; the ingest callback is expected to be idempotent.
+// trigger serializes callbacks from the timer, sweep and polling fallback.
 func (w *Watcher) trigger(ctx context.Context) {
+	w.runMu.Lock()
+	defer w.runMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
 	if w.ingest == nil {
 		return
 	}

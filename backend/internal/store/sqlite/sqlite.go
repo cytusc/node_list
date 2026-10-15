@@ -45,6 +45,11 @@ func New(path string) (*Adapter, error) {
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(10 * time.Minute)
+	if path == ":memory:" {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxLifetime(0)
+	}
 	a := &Adapter{db: db}
 	if err := a.initSchema(); err != nil {
 		db.Close()
@@ -79,7 +84,7 @@ func (a *Adapter) initSchema() error {
 			return fmt.Errorf("create schema: %w", err)
 		}
 	}
-	return nil
+	return a.initChanges()
 }
 
 // Insert stores a detection batch, ignoring duplicates by fingerprint.

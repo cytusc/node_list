@@ -100,6 +100,8 @@ func (r projectionRow) MarshalJSON() ([]byte, error) {
 type Projector struct {
 	pool  *pgxpool.Pool
 	store *store.Store
+	model *store.Store
+	runMu sync.Mutex
 
 	mu         sync.Mutex
 	revision   int64
@@ -122,6 +124,8 @@ func NewProjector(ctx context.Context, pool *pgxpool.Pool, st *store.Store, cfg 
 	p := &Projector{
 		pool:          pool,
 		store:         st,
+		model:         store.New(nil, nil),
+		revision:      -1,
 		projection:    make(map[int]string, 2048),
 		retentionDays: cfg.RetentionDays,
 		analyzeEvery:  cfg.AnalyzeEvery,
@@ -159,117 +163,76 @@ type RefreshStats struct {
 // dirty for the next pass, which is safe because the trigger bumps the revision
 // for every writer, including other services.
 func (p *Projector) Refresh(ctx context.Context) error {
+	p.runMu.Lock()
+	defer p.runMu.Unlock()
 	started := time.Now()
-	tx, err := p.pool.Begin(ctx)
+	conn, err := p.pool.Acquire(ctx)
 	if err != nil {
 		return err
 	}
 	var locked bool
-	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_lock(`+lockKey+`)`).Scan(&locked); err != nil {
-		tx.Rollback(ctx)
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(`+lockKey+`)`).Scan(&locked); err != nil {
+		// The query may have reached the server even if its response was cancelled.
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Conn().Close(cleanup)
+		conn.Release()
 		return err
 	}
 	if !locked {
-		tx.Rollback(ctx)
+		conn.Release()
 		return nil
 	}
-	defer func() {
-		_, _ = p.pool.Exec(context.Background(), `SELECT pg_advisory_unlock(`+lockKey+`)`)
-	}()
-
-	if _, err := tx.Exec(ctx, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); err != nil {
-		tx.Rollback(ctx)
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var unlocked bool
+			if err := conn.QueryRow(cleanup, `SELECT pg_advisory_unlock(`+lockKey+`)`).Scan(&unlocked); err != nil || !unlocked {
+				_ = conn.Conn().Close(cleanup)
+			}
+			conn.Release()
+		})
+	}
+	defer release()
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
 		return err
 	}
-	var source, built, retiredRev int64
-	if err := tx.QueryRow(ctx,
-		`SELECT source_revision, built_revision, retired_revision FROM `+tableState).
-		Scan(&source, &built, &retiredRev); err != nil {
-		tx.Rollback(ctx)
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}()
+	var source, built int64
+	if err := tx.QueryRow(ctx, `SELECT source_revision, built_revision FROM `+tableState).Scan(&source, &built); err != nil {
 		return err
 	}
 	p.mu.Lock()
 	cached := p.revision
 	p.mu.Unlock()
-
 	if source == built {
-		// Another process may have published newer data while this worker was
-		// idle; never reuse decoded batches from an older generation.
-		if cached != built {
-			p.mu.Lock()
-			p.revision = 0
-			p.projection = make(map[int]string, 2048)
-			p.mu.Unlock()
-		}
-		tx.Rollback(ctx)
 		return nil
 	}
-
-	incremental := cached >= built
-	var changedIDs []int
-	if incremental {
-		rows, err := tx.Query(ctx,
-			`SELECT snapshot_id FROM `+tableChanges+` WHERE revision > $1`, cached)
-		if err != nil {
-			tx.Rollback(ctx)
-			return err
-		}
-		for rows.Next() {
-			var id int
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				tx.Rollback(ctx)
-				return err
-			}
-			changedIDs = append(changedIDs, id)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			tx.Rollback(ctx)
-			return err
-		}
-	}
-
-	batchRows, err := queryBatches(ctx, tx, changedIDs)
+	changes, err := readChanges(ctx, tx, cached)
 	if err != nil {
-		tx.Rollback(ctx)
 		return err
-	}
-	enrichRows, err := queryEnrichments(ctx, tx, changedIDs)
-	if err != nil {
-		tx.Rollback(ctx)
-		return err
-	}
-	var retired []store.RetiredRow
-	if !incremental || retiredRev > cached {
-		retired, err = queryRetired(ctx, tx)
-		if err != nil {
-			tx.Rollback(ctx)
-			return err
-		}
 	}
 	if err := tx.Rollback(ctx); err != nil {
 		return err
 	}
-
-	// Merge the generation into the shared in-memory model.
-	if !incremental {
-		if err := p.store.Reload(ctx); err != nil {
-			return err
-		}
-	} else {
-		p.store.ApplyBatches(batchRows)
-		p.store.ReplaceEnrichmentSets(enrichRows)
-		if retired != nil {
-			p.store.SetRetired(retired)
-		}
+	if err := p.model.ApplyChanges(changes); err != nil {
+		return err
 	}
+	incremental := !changes.Full
+	batchRows := changes.Batches
 
-	aggregate := p.store.Aggregate(false)
+	aggregate := p.model.Aggregate(false)
 	var nodes []domain.Node
 	var metadata domain.Metadata
 	if aggregate != nil {
-		aggregate.Nodes = p.store.FilterDepartedNodes(aggregate.Nodes)
+		aggregate.Nodes = p.model.FilterDepartedNodes(aggregate.Nodes)
 		nodes = aggregate.Nodes
 		aggregate.Nodes = nodes
 		metadata = domain.ResultsMetadata(*aggregate)
@@ -307,7 +270,7 @@ func (p *Projector) Refresh(ctx context.Context) error {
 	previous := p.projection
 	p.mu.Unlock()
 
-	if err := p.write(ctx, rows, changed, canPatch, previous, source, metadata); err != nil {
+	if err := p.write(ctx, conn, rows, changed, canPatch, previous, source, metadata); err != nil {
 		return err
 	}
 
@@ -328,6 +291,7 @@ func (p *Projector) Refresh(ctx context.Context) error {
 		Incremental:  incremental,
 		Ms:           time.Since(started).Milliseconds(),
 	}
+	release()
 	if pruned, err := p.prune(ctx); err == nil {
 		stats.Pruned = pruned
 	}
@@ -432,8 +396,8 @@ func queryRetired(ctx context.Context, db interface {
 }
 
 // write publishes the projection and advances the built revision atomically.
-func (p *Projector) write(ctx context.Context, all, changed []projectionRow, patch bool, previous map[int]string, revision int64, metadata domain.Metadata) error {
-	tx, err := p.pool.Begin(ctx)
+func (p *Projector) write(ctx context.Context, conn *pgxpool.Conn, all, changed []projectionRow, patch bool, previous map[int]string, revision int64, metadata domain.Metadata) error {
+	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -496,10 +460,6 @@ func (p *Projector) write(ctx context.Context, all, changed []projectionRow, pat
 	if _, err := tx.Exec(ctx,
 		`UPDATE `+tableState+` SET built_revision = $1, metadata = $2::jsonb`,
 		revision, string(meta)); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM `+tableChanges+` WHERE revision <= $1`, revision); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -581,7 +541,7 @@ func (p *Projector) prune(ctx context.Context) (int, error) {
 	}
 	p.store.RemoveBatch(ids)
 	p.mu.Lock()
-	p.revision = 0
+	p.revision = -1
 	p.projection = make(map[int]string, 2048)
 	p.mu.Unlock()
 	return len(ids), nil

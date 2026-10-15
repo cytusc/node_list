@@ -89,6 +89,9 @@ func NewPatrol(st *store.Store, router *transport.Router, cfg PatrolConfig) *Pat
 // RunOnce walks every visible node in waves.
 func (p *Patrol) RunOnce(ctx context.Context, onProgress func(Summary)) (Summary, error) {
 	var summary Summary
+	if err := p.store.Sync(ctx); err != nil {
+		return summary, err
+	}
 	nodes := []domain.Node{}
 	if aggregate := p.store.Aggregate(false); aggregate != nil {
 		nodes = aggregate.Nodes
@@ -326,6 +329,9 @@ func (p *Patrol) isRetired(node domain.Node) bool {
 // the retirement guards just cleaned up.
 func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]RecoveryState, now time.Time, interval time.Duration, onProgress func(RecoverySummary)) (RecoverySummary, error) {
 	var summary RecoverySummary
+	if err := p.store.Sync(ctx); err != nil {
+		return summary, err
+	}
 	if interval <= 0 {
 		interval = 30 * time.Minute
 	}

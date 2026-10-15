@@ -49,6 +49,8 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
       - name: Lint and test the Go backend
+        env:
+          NODE_EXPLORER_TEST_PG: postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test
         working-directory: backend
         run: |
           gofmt -l . | tee /tmp/gofmt.out
