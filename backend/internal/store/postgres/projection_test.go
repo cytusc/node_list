@@ -69,8 +69,8 @@ func TestStoredMetadataIsAdditiveOverTheAPIKeys(t *testing.T) {
 	if err := json.Unmarshal(domainMetadataJSON(t, original), &apiShape); err != nil {
 		t.Fatalf("unmarshal api shape: %v", err)
 	}
-	if len(stored) != len(apiShape)+1 {
-		t.Fatalf("stored keys %v should be the API keys plus ranking, got %v", keys(apiShape), keys(stored))
+	if len(stored) != len(apiShape)+2 {
+		t.Fatalf("stored keys %v should be the API keys plus ranking and payloadVersion, got %v", keys(apiShape), keys(stored))
 	}
 	for key, want := range apiShape {
 		got, ok := stored[key]
