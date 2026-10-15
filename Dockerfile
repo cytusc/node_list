@@ -36,6 +36,9 @@ ENV HOST=0.0.0.0 API_PORT=3001 SUBS_CHECK_DIR=/data/sub DATABASE_PATH=/data/hist
 COPY --from=frontend --chown=node:node /app/dist ./dist
 COPY --from=backend --chown=node:node /out/node-explorer /usr/local/bin/node-explorer
 COPY --from=backend --chown=node:node /out/github-patrol /usr/local/bin/github-patrol
+# Preserve old Compose patrol commands and health checks during image-only
+# upgrades. This is a narrow dispatcher, not a Node runtime.
+COPY --chmod=0755 deploy/legacy-node-launcher.sh /usr/local/bin/node
 VOLUME ["/data/history"]
 USER node
 EXPOSE 3001

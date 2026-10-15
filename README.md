@@ -126,6 +126,8 @@ docker compose up -d
 
 更新时设置新 `IMAGE_TAG` 后再次执行 `docker compose pull` 和 `docker compose up -d`；回滚时设置之前的版本标签并执行相同命令。镜像不包含用户结果和订阅文件。
 
+从 Node 版本升级到 Go 版本时，更新服务器的 `compose.patrol.yaml`，将巡检启动命令改为 `["/usr/local/bin/github-patrol"]`，健康检查改为 `["CMD", "/usr/local/bin/github-patrol", "--health"]`。保留 `.env`、`release.env`、数据库卷和订阅目录，然后运行 `bash deploy/compose.sh up -d --no-deps node-explorer github-patrol`。镜像也兼容旧配置中的 `node server/github-patrol-service.js` 及其 `--health` 调用，会直接执行 Go 巡检程序；兼容入口不支持执行其他 JavaScript。
+
 ### Linux 开机启动与定时更新
 
 服务器完整部署使用两个独立容器：官方 `ghcr.io/beck-8/subs-check:1.6.5` 检测数据，页面镜像只读展示；检测服务没有宿主机端口映射。上游项目、源码与 GPL-3.0 许可证见 https://github.com/beck-8/subs-check 。通过文件共享集成，不将上游源码复制进页面镜像。
