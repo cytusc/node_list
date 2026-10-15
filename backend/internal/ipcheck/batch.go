@@ -76,7 +76,9 @@ func (c *Client) PrimeIPAPIBatch(ctx context.Context, ips []string) error {
 			if json.Unmarshal(item, &v) != nil || !requested[v.IP] || v.Status != "success" {
 				continue
 			}
-			c.cache["ip-api:"+v.IP] = cachedEvidence{ParseIPAPI(item, v.IP, stamp), time.Now().Add(10 * time.Minute)}
+			e := ParseIPAPI(item, v.IP, stamp)
+			e.QueryStatus, e.HTTPStatus = "success", 200
+			c.cache["ip-api:"+v.IP] = cachedEvidence{e, time.Now().Add(10 * time.Minute)}
 		}
 		c.mu.Unlock()
 	}

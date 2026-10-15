@@ -17,11 +17,13 @@ import (
 // IPPure evidence comes from the tunnel. IPregistry and AbuseIPDB use IPQuality's
 // public lookup paths unless personal API keys are configured.
 type Client struct {
-	HTTP              *http.Client
-	IPinfoToken       string
-	IPAPIKey          string
-	IPRegistryKey     string
-	AbuseIPDBKey      string
+	HTTP          *http.Client
+	IPinfoToken   string
+	IPAPIKey      string
+	IPRegistryKey string
+	AbuseIPDBKey  string
+	// FreshSweep waits for quotas instead of skipping IPs during maintenance.
+	FreshSweep        bool
 	mu                sync.Mutex
 	cache             map[string]cachedEvidence
 	next              map[string]time.Time
@@ -112,10 +114,11 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 	if old, ok := c.cache[key]; ok && now.Before(old.until) {
 		return old.evidence
 	}
-	e := Evidence{Provider: provider, IP: ip, CheckedAt: now.UTC().Format(time.RFC3339Nano), Outcome: "unknown"}
+	e := Evidence{Provider: provider, IP: ip, CheckedAt: now.UTC().Format(time.RFC3339Nano), Outcome: "unknown", QueryStatus: "request-failed"}
 	if wait := time.Until(c.next[provider]); wait > 0 {
 		// Quota blocks should not stall a recovery wave. Short pacing is bounded.
-		if wait > 2*time.Second {
+		if wait > 2*time.Second && !c.FreshSweep {
+			e.QueryStatus = "quota-cooldown"
 			return e
 		}
 		timer := time.NewTimer(wait)
@@ -177,6 +180,8 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 		return e
 	}
 	defer resp.Body.Close()
+	e.HTTPStatus = resp.StatusCode
+	e.QueryStatus = "http-error"
 	if resp.StatusCode == 429 {
 		c.next[provider] = retryTime(resp.Header)
 		return e
@@ -191,11 +196,15 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 	if resp.StatusCode != 200 {
 		// Public demo endpoints may reject an entire egress address. Avoid
 		// repeating that rejection for every IP in a maintenance sweep.
-		c.next[provider] = time.Now().Add(time.Minute)
+		if !c.FreshSweep {
+			c.next[provider] = time.Now().Add(time.Minute)
+		}
 		if provider == "ipregistry" && c.IPRegistryKey == "" && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 			// Refresh rejected demo keys on the next lookup, with bounded pacing.
 			c.registryDemoUntil = time.Time{}
-			c.next[provider] = time.Now().Add(time.Minute)
+			if !c.FreshSweep {
+				c.next[provider] = time.Now().Add(time.Minute)
+			}
 		}
 		return e
 	}
@@ -216,6 +225,8 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 	} else {
 		e = ParseAbuseIPDB(raw, ip, e.CheckedAt)
 	}
+	e.QueryStatus = "success"
+	e.HTTPStatus = resp.StatusCode
 	ttl := 10 * time.Minute
 	types := e.networkTypes()
 	if e.Outcome == "unknown" && types.UsageType == "" && types.CompanyType == "" {

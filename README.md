@@ -291,14 +291,12 @@ IP 类型属性按 [xykt/IPQuality](https://github.com/xykt/IPQuality/blob/main/
 
 ### 全库出口 IP 属性清洗
 
-`ip-type-clean` 覆盖 `node_explorer_ippure_results` 中所有有效出口 IP，包括历史批次和已退役节点；按 IP 去重，不使用节点服务器地址替代出口。它不探测节点当前出口，也不刷新 IPPure 风险分数。它使用六家外部查询来源和已保存的 IPPure 类型；公共接口失败时只复用同一 IP 在 24 小时内的来源证据，保留各来源时间，过期数据不算新结果。
+`ip-type-clean` 覆盖 `node_explorer_ippure_results` 中所有有效出口 IP，包括历史批次和已退役节点；按 IP 去重，不使用节点服务器地址替代出口。它不探测节点当前出口，也不覆盖 IPPure 风险分数。默认实时请求 IPPure 和六家外部类型来源；通过 `--query-proxy` 指定独立检测代理。每次刷新仅使用本轮结果投票，失败、限流或缺少有效类型的来源弃权，备份只用于回滚。`--refresh=false` 仅用于显式重算现有证据，不属于实时清洗。
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go -C backend build -o ip-type-clean ./cmd/ip-type-clean
-bash deploy/ip-type-clean.sh --ip 51.158.105.199        # 单 IP 预览
-bash deploy/ip-type-clean.sh --refresh=false           # 全库已有证据预览
-bash deploy/ip-type-clean.sh --refresh=false --apply   # 全库已有证据清洗
-bash deploy/ip-type-clean.sh --apply                   # 全库联网补查并清洗
+bash deploy/ip-type-clean.sh --query-proxy http://audit-proxy:7890 --ip 51.158.105.199        # 单 IP 预览
+bash deploy/ip-type-clean.sh --query-proxy http://audit-proxy:7890 --apply # 全库逐 IP 实时查询全部七家并清洗
 ```
 
 在部署主机执行包装脚本；它从应用容器安全读取数据库配置，通过临时容器运行，报告写入宿主机 `ip-type-clean-reports/`。可通过 `IP_TYPE_CLEAN_CONTAINER`、`IP_TYPE_CLEAN_BINARY`、`IP_TYPE_CLEAN_REPORT_DIR` 覆盖默认值。二进制也可直接使用 PostgreSQL 标准环境变量运行。
