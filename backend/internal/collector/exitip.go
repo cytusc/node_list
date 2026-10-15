@@ -398,6 +398,8 @@ func (c *IPPureClient) get(ctx context.Context, path string) (map[string]any, er
 			return nil, err
 		}
 		req.Header.Set("Referer", "https://ippure.com/")
+		req.Header.Set("Origin", "https://ippure.com")
+		req.Header.Set("User-Agent", "Mozilla/5.0")
 		c.mu.Lock()
 		key, offset := c.key, c.timeOffset
 		c.mu.Unlock()
@@ -470,12 +472,27 @@ func (c *IPPureClient) get(ctx context.Context, path string) (map[string]any, er
 
 func (c *IPPureClient) fetch(ctx context.Context, req *http.Request) (*http.Response, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
 	response, err := c.client.Do(req.WithContext(reqCtx))
 	if err != nil {
+		cancel()
 		return nil, sanitizeError(err)
 	}
+	// Keep the request alive until its body is consumed. Cancelling after
+	// headers discards the reusable connection and can invalidate the API's
+	// signing challenge before the next request.
+	response.Body = &cancelOnCloseBody{ReadCloser: response.Body, cancel: cancel}
 	return response, nil
+}
+
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 func drainAndClose(r *http.Response) {

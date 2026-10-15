@@ -13,7 +13,7 @@ import (
 // ShareLinkVersion bumps whenever the converter changes. Persisted failures
 // tagged with an older version re-enter the queue so a fixed parser retries
 // nodes that previously looked unsupported.
-const ShareLinkVersion = 2
+const ShareLinkVersion = 3
 
 // ErrShareLink is returned for any link this converter cannot express as a
 // usable outbound. The message never includes the link itself: share links
@@ -94,13 +94,21 @@ func ShareLinkProxy(link, name string) (ProxyConfig, error) {
 	case strings.HasPrefix(link, "ssr://"):
 		return ssrProxy(link, name)
 	case strings.HasPrefix(link, "ss://"):
-		if u, err := url.Parse(link); err == nil && !strings.Contains(u.Host, "@") {
+		if u, err := url.Parse(link); err == nil && u.User == nil {
 			// SIP002 allows a base64 userinfo or a base64 whole endpoint.
-			decoded, err := decodeBase64(strings.TrimPrefix(link, "ss://"))
+			encoded, _, _ := strings.Cut(strings.TrimPrefix(link, "ss://"), "#")
+			encoded, _, _ = strings.Cut(encoded, "?")
+			decoded, err := decodeBase64(encoded)
 			if err != nil {
 				return nil, ErrShareLink
 			}
 			link = "ss://" + decoded
+			if u.RawQuery != "" {
+				link += "?" + u.RawQuery
+			}
+			if u.Fragment != "" {
+				link += "#" + u.EscapedFragment()
+			}
 		}
 		return urlProxy(link, name)
 	default:
@@ -392,6 +400,12 @@ func parsePlugin(v string) (pluginResult, error) {
 			"host": values["obfs-host"],
 		}}, nil
 	case "v2ray-plugin":
+		if values["mode"] == nil {
+			values["mode"] = "websocket"
+		}
+		if values["mode"] != "websocket" {
+			return pluginResult{}, ErrShareLink
+		}
 		return pluginResult{"v2ray-plugin", values}, nil
 	}
 	return pluginResult{}, ErrShareLink

@@ -21,11 +21,12 @@ import (
 // quickly keeps a backlog of dead nodes from consuming probe windows that fresh
 // nodes need.
 const (
-	backoffBase     = 30 * time.Minute
-	backoffSixHour  = 6 * time.Hour
-	backoffOneDay   = 24 * time.Hour
-	retireAttempts  = 4
-	githubProbeWait = 12 * time.Second
+	ippureSignatureVersion = 3
+	backoffBase            = 30 * time.Minute
+	backoffSixHour         = 6 * time.Hour
+	backoffOneDay          = 24 * time.Hour
+	retireAttempts         = 4
+	githubProbeWait        = 12 * time.Second
 )
 
 // Scheduler drives IPPure collection across the registered engines.
@@ -243,6 +244,9 @@ func (s *Scheduler) buildQueue(ctx context.Context) ([]job, error) {
 	jobs := make([]job, 0, len(entries))
 	seen := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
+		if len(e.node.RawConfig) == 0 && e.node.RawLink == "" {
+			continue
+		}
 		shareOnly := len(e.node.RawConfig) == 0 && e.node.RawLink != ""
 		if _, ok := seen[e.identity]; ok {
 			continue
@@ -276,7 +280,7 @@ func (s *Scheduler) buildQueue(ctx context.Context) ([]job, error) {
 		currentExitIP := domain.HasVerifiedExitIP(saved)
 		currentRetry := saved != nil && saved.ExitIPMode == "proxy-echo" &&
 			saved.QueryMode == "specified-exit" && saved.TransportMode == "http" &&
-			saved.SignatureVersion == 2 && saved.ExitIPVersion == domain.ExitIPVersion &&
+			saved.SignatureVersion >= 2 && saved.ExitIPVersion == domain.ExitIPVersion &&
 			(saved.Status != "error" || saved.IP != "" || saved.ExitIPProbeVersion == domain.ExitIPProbeVersion)
 		backfill := saved != nil && saved.Status == "success" && currentExitIP && saved.Organization == ""
 		needsCountry := saved != nil && saved.Status == "success" && currentExitIP && saved.Country == ""
@@ -289,7 +293,10 @@ func (s *Scheduler) buildQueue(ctx context.Context) ([]job, error) {
 		}
 		lastAttempt := ""
 		switch {
-		case backfill && saved != nil && saved.SignatureVersion == 2:
+		case saved != nil && saved.Status == "error" && saved.FailureStage == "ippure-query" && saved.SignatureVersion < ippureSignatureVersion:
+			// Retry API failures once after correcting request headers and the
+			// signing connection lifetime, without resetting exit-probe backoff.
+		case backfill && saved != nil && saved.SignatureVersion >= 2:
 			lastAttempt = saved.OrganizationCheckedAt
 		case currentRetry && saved != nil:
 			lastAttempt = saved.CheckedAt
@@ -454,6 +461,34 @@ func (s *Scheduler) dropRetired(wave []job) []job {
 // runWave reserves one engine configuration and drains the wave through two
 // lanes with independent budgets.
 func (s *Scheduler) runWave(ctx context.Context, engine transport.Engine, wave []job, fastSlots, slowSlots int) error {
+	// Never submit a summary-only fallback when a share link cannot be
+	// converted: one missing cipher/password would reject the entire wave.
+	ready := make([]job, 0, len(wave))
+	for _, j := range wave {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(j.node.RawConfig) == 0 && j.node.RawLink != "" {
+			if _, err := domain.ShareLinkProxy(j.node.RawLink, j.node.Name); err != nil {
+				result := domain.IPPureResult{
+					Status: "unsupported", FailureStage: "share-link",
+					ShareLinkVersion: domain.ShareLinkVersion,
+					CheckedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+					Attempts:         j.attempts + 1, Error: domain.ErrShareLink.Error(),
+				}
+				if err := s.store.SaveIPPure(j.snapshotID, j.index, result, j.identity); err != nil {
+					return fmt.Errorf("persist unsupported share link: %w", err)
+				}
+				atomic.AddInt64(&s.probed, 1)
+				continue
+			}
+		}
+		ready = append(ready, j)
+	}
+	wave = ready
+	if len(wave) == 0 {
+		return nil
+	}
 	nodes := make([]domain.Node, len(wave))
 	for i, j := range wave {
 		nodes[i] = j.node
@@ -541,11 +576,14 @@ func (s *Scheduler) runJob(ctx context.Context, j job, outbound *transport.Outbo
 		QueryMode:          "specified-exit",
 		ExitIPMode:         "proxy-echo",
 		TransportMode:      "http",
-		SignatureVersion:   2,
+		SignatureVersion:   ippureSignatureVersion,
 		ExitIPVersion:      domain.ExitIPVersion,
 		ExitIPProbeVersion: domain.ExitIPProbeVersion,
 	}
 	stage := "exit-ip"
+	if outbound.Error != nil {
+		return s.failureResult(ctx, j, result, "proxy-config", outbound.Error)
+	}
 	client := outbound.Client
 	timeout := 5 * time.Second
 
@@ -638,8 +676,8 @@ func (s *Scheduler) failureResult(ctx context.Context, j job, result domain.IPPu
 	if j.backfill && j.old != nil {
 		// Keep previously collected metrics when only the organization refresh fails.
 		preserved := *j.old
-		preserved.SignatureVersion = 2
-		if j.old.SignatureVersion == 2 {
+		preserved.SignatureVersion = ippureSignatureVersion
+		if j.old.SignatureVersion >= 2 {
 			preserved.OrganizationAttempts = j.old.OrganizationAttempts + 1
 		} else {
 			preserved.OrganizationAttempts = 1

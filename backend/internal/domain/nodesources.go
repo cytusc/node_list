@@ -38,8 +38,10 @@ var detailPaths = []struct {
 	{"version", []string{"version"}},
 }
 
-func dig(value any, path []string) any {
-	current := value
+func dig(value ProxyConfig, path []string) any {
+	// ProxyConfig is a named map type; it does not satisfy a map[string]any
+	// type assertion until converted. Nested YAML maps already use that type.
+	current := any(map[string]any(value))
 	for _, key := range path {
 		m, ok := current.(map[string]any)
 		if !ok {

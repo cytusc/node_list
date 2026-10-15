@@ -22,11 +22,15 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }
 
-type waveEngine struct{ released atomic.Int32 }
+type waveEngine struct {
+	released atomic.Int32
+	received atomic.Int32
+}
 
 func (*waveEngine) Name() string         { return "test" }
 func (*waveEngine) Supports(string) bool { return true }
 func (e *waveEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[int]*transport.Outbound, func(), error) {
+	e.received.Store(int32(len(nodes)))
 	out := make(map[int]*transport.Outbound)
 	for i := range nodes {
 		ip := fmt.Sprintf("2001:db8::%d", i+1)
@@ -38,6 +42,67 @@ func (e *waveEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[int]
 		})}}
 	}
 	return out, func() { e.released.Add(1) }, nil
+}
+
+func TestUnsupportedShareLinkDoesNotRejectOtherNodes(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := sqlite.New(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	nodes := []domain.Node{
+		{Name: "unsupported", Type: "ss", RawLink: "ss://invalid"},
+		{Name: "valid", Type: "ss", RawConfig: domain.ProxyConfig{"type": "ss", "server": "192.0.2.1", "port": 443, "cipher": "aes-128-gcm", "password": "secret"}},
+	}
+	raw, _ := json.Marshal(domain.Snapshot{Nodes: nodes})
+	if err := adapter.Insert(ctx, "one", raw, "", len(nodes)); err != nil {
+		t.Fatal(err)
+	}
+	st := store.New(adapter, nil)
+	if err := st.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine := &waveEngine{}
+	scheduler, err := NewScheduler(st, transport.NewRouter(engine), SchedulerConfig{Concurrency: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := scheduler.buildQueue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.runJobs(ctx, jobs); err != nil {
+		t.Fatal(err)
+	}
+	if engine.received.Load() != 1 {
+		t.Fatal("unsupported share link reached the engine")
+	}
+	rows, err := adapter.Enrichments(ctx, nil)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("enrichments=%d err=%v", len(rows), err)
+	}
+	for _, row := range rows {
+		var result domain.IPPureResult
+		if err := json.Unmarshal(row.Payload, &result); err != nil {
+			t.Fatal(err)
+		}
+		if row.NodeIndex == 0 && (result.FailureStage != "share-link" || result.ShareLinkVersion != domain.ShareLinkVersion) {
+			t.Fatalf("unsupported result=%+v", result)
+		}
+		if row.NodeIndex == 1 && result.IP != "2001:db8::1" {
+			t.Fatalf("valid node did not get its own probe result: %+v", result)
+		}
+	}
+	jobs, err = scheduler.buildQueue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range jobs {
+		if j.index == 0 {
+			t.Fatal("unchanged unsupported share link was queued again")
+		}
+	}
 }
 
 type failingSaveAdapter struct{ store.Adapter }

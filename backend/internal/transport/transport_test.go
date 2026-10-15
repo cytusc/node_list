@@ -2,16 +2,61 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/cytusc/node_list/backend/internal/domain"
 )
+
+func TestMihomoJSONIntegerTransportOptions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Payload string `json:"payload"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		var config struct {
+			Proxies []struct {
+				Options map[string]any `yaml:"xhttp-opts"`
+			} `yaml:"proxies"`
+		}
+		if err := yaml.Unmarshal([]byte(body.Payload), &config); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		// Mihomo weakly decodes integer options using strconv.Atoi. The
+		// scalar's text must survive that conversion without exponent notation.
+		n, err := strconv.Atoi(fmt.Sprint(config.Proxies[0].Options["sc-max-each-post-bytes"]))
+		if err != nil || n != 1000000 {
+			t.Errorf("integer option rejected: %v (%v)", config.Proxies[0].Options, err)
+			w.WriteHeader(400)
+			return
+		}
+		w.WriteHeader(204)
+	}))
+	defer server.Close()
+	var proxy domain.ProxyConfig
+	if err := json.Unmarshal([]byte(`{"type":"vless","server":"example.com","port":443,"xhttp-opts":{"sc-max-each-post-bytes":1000000}}`), &proxy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConfigureProxyBatch(context.Background(), MihomoConfig{Controller: server.URL, ProxyURL: "http://127.0.0.1:17890"}, []domain.ProxyConfig{proxy}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestMihomoPerInstanceCacheOrderAndLease(t *testing.T) {
 	var counts [2]atomic.Int32

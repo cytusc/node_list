@@ -128,6 +128,24 @@ func (p *Patrol) RunOnce(ctx context.Context, onProgress func(Summary)) (Summary
 		if err != nil {
 			return summary, err
 		}
+		prepared := make([]domain.Node, 0, len(wave))
+		for _, node := range wave {
+			if outbounds[identityOf(node)] == nil {
+				summary.Skipped++
+				continue
+			}
+			prepared = append(prepared, node)
+		}
+		wave = prepared
+		if len(wave) == 0 {
+			if release != nil {
+				release()
+			}
+			if onProgress != nil {
+				onProgress(summary)
+			}
+			continue
+		}
 		first := p.probeAll(ctx, wave, outbounds)
 		mu.Lock()
 		summary.Checked += len(wave)
@@ -262,7 +280,7 @@ func (p *Patrol) reserve(ctx context.Context, targets []domain.Node) (map[string
 		}
 		// Reserve keys by position inside this engine's node slice.
 		for slot, i := range indexes {
-			if outbound, ok := reserved[slot]; ok {
+			if outbound, ok := reserved[slot]; ok && outbound != nil && outbound.Error == nil {
 				outbounds[identityOf(targets[i])] = outbound
 			}
 		}
@@ -403,10 +421,16 @@ func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]Recov
 			continue
 		}
 		var success bool
-		if outbound := outbounds[0]; outbound != nil {
+		if outbound := outbounds[0]; outbound != nil && outbound.Error == nil {
 			probeCtx, cancel := context.WithTimeout(ctx, p.timeout)
 			success, _ = p.probe(probeCtx, outbound.Client)
 			cancel()
+		} else {
+			if release != nil {
+				release()
+			}
+			summary.Skipped++
+			continue
 		}
 		if release != nil {
 			release()

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +19,16 @@ import (
 
 	"github.com/cytusc/node_list/backend/internal/domain"
 )
+
+// ProxyConfigError identifies the one outbound Mihomo rejected. Controller
+// error text may contain credentials, so only its index is retained.
+type ProxyConfigError struct{ Index int }
+
+func (e *ProxyConfigError) Error() string {
+	return "代理配置参数不受当前 Mihomo 支持 (HTTP 400)"
+}
+
+var proxyErrorIndex = regexp.MustCompile(`^proxy ([0-9]+):`)
 
 // mihomoConfig is the document sent to PUT /configs.
 type mihomoConfig struct {
@@ -103,7 +115,7 @@ func ConfigureProxyBatch(ctx context.Context, instance MihomoConfig, proxies []d
 		listenURL.Host = fmt.Sprintf("%s:%d", base.Hostname(), listenPort)
 		urls[i] = listenURL.String()
 	}
-	payload, err := yaml.Marshal(config)
+	payload, err := marshalMihomoConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("render mihomo config: %w", err)
 	}
@@ -125,13 +137,51 @@ func ConfigureProxyBatch(ctx context.Context, instance MihomoConfig, proxies []d
 		return nil, fmt.Errorf("mihomo reload: %w", err)
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		// The response body can echo the submitted configuration, which holds
-		// proxy credentials, so only the status is surfaced.
+		if response.StatusCode == http.StatusBadRequest {
+			var detail struct {
+				Message string `json:"message"`
+			}
+			if json.Unmarshal(responseBody, &detail) == nil {
+				if match := proxyErrorIndex.FindStringSubmatch(detail.Message); len(match) == 2 {
+					index, err := strconv.Atoi(match[1])
+					if err == nil && index >= 0 && index < len(proxies) {
+						return nil, &ProxyConfigError{Index: index}
+					}
+				}
+			}
+		}
+		// Never surface the controller response or submitted configuration.
 		return nil, fmt.Errorf("代理配置失败 (HTTP %d)", response.StatusCode)
 	}
 	return urls, nil
+}
+
+// JSON-backed proxy options contain float64 values. yaml.v3 renders large
+// integral floats as 1e+06; Mihomo's weak integer decoder cannot parse that
+// notation for options such as sc-max-each-post-bytes. Encode integral values
+// as YAML integers, including options nested inside transport maps and lists.
+func marshalMihomoConfig(config mihomoConfig) ([]byte, error) {
+	var document yaml.Node
+	if err := document.Encode(config); err != nil {
+		return nil, err
+	}
+	var normalize func(*yaml.Node)
+	normalize = func(node *yaml.Node) {
+		if node.Kind == yaml.ScalarNode && node.Tag == "!!float" {
+			value, err := strconv.ParseFloat(node.Value, 64)
+			if err == nil && !math.IsInf(value, 0) && !math.IsNaN(value) && math.Trunc(value) == value {
+				node.Tag = "!!int"
+				node.Value = strconv.FormatFloat(value, 'f', -1, 64)
+			}
+		}
+		for _, child := range node.Content {
+			normalize(child)
+		}
+	}
+	normalize(&document)
+	return yaml.Marshal(&document)
 }
 
 // listenerURLs reproduces the port mapping for an already loaded configuration.

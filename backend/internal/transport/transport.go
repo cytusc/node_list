@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -28,6 +29,8 @@ import (
 
 // Outbound is one node's isolated traffic path.
 type Outbound struct {
+	// Error is a node-specific preparation failure. No traffic is sent.
+	Error error
 	// Client issues HTTP requests through the node.
 	Client *http.Client
 	// Label identifies the path in diagnostics without leaking credentials.
@@ -169,6 +172,7 @@ func outboundConfig(node domain.Node) domain.ProxyConfig {
 		if config, err := domain.ShareLinkProxy(node.RawLink, node.Name); err == nil {
 			return config
 		}
+		return nil
 	}
 	return domain.ProxyConfig{
 		"name":   node.Name,
@@ -408,30 +412,44 @@ func (e *MihomoEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[in
 	// An unchanged configuration needs no reload: Mihomo already serves it.
 	// Waves that only replace a few nodes still reload, because dropping a
 	// listener requires a configuration change.
+	rejected := make(map[int]*Outbound)
 	if !same {
-		reloadCtx, cancel := context.WithTimeout(ctx, e.apiTimeout)
-		urls, err := ConfigureProxyBatch(reloadCtx, instance, proxies)
-		cancel()
-		if err != nil {
+		for len(proxies) > 0 {
+			reloadCtx, cancel := context.WithTimeout(ctx, e.apiTimeout)
+			urls, err := ConfigureProxyBatch(reloadCtx, instance, proxies)
+			cancel()
+			if err != nil {
+				e.mu.Lock()
+				e.current[slot] = nil
+				e.mu.Unlock()
+				var invalid *ProxyConfigError
+				if errors.As(err, &invalid) {
+					rejected[indexes[invalid.Index]] = &Outbound{Error: invalid}
+					proxies = append(proxies[:invalid.Index], proxies[invalid.Index+1:]...)
+					indexes = append(indexes[:invalid.Index], indexes[invalid.Index+1:]...)
+					continue
+				}
+				return nil, nil, err
+			}
 			e.mu.Lock()
-			e.current[slot] = nil
+			// Copy through JSON so later caller mutations cannot alter the cache.
+			raw, _ := json.Marshal(proxies)
+			_ = json.Unmarshal(raw, &e.current[slot])
+			e.reloadAt = time.Now()
+			e.reloads++
 			e.mu.Unlock()
-			return nil, nil, err
+			_ = urls
+			break
 		}
-		e.mu.Lock()
-		// Copy through JSON so later caller mutations cannot alter the cache.
-		raw, _ := json.Marshal(proxies)
-		_ = json.Unmarshal(raw, &e.current[slot])
-		e.reloadAt = time.Now()
-		e.reloads++
-		e.mu.Unlock()
-		_ = urls
 	}
 	urls, err := listenerURLs(instance.ProxyURL, len(proxies))
 	if err != nil {
 		return nil, nil, err
 	}
 	out := make(map[int]*Outbound, len(proxies))
+	for index, outbound := range rejected {
+		out[index] = outbound
+	}
 	for slot, proxy := range proxies {
 		_ = proxy
 		u := urls[slot]
@@ -442,7 +460,9 @@ func (e *MihomoEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[in
 	return out, func() {
 		once.Do(func() {
 			for _, o := range out {
-				o.Client.CloseIdleConnections()
+				if o.Client != nil {
+					o.Client.CloseIdleConnections()
+				}
 			}
 			e.available <- slot
 		})
