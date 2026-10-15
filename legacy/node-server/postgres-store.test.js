@@ -66,6 +66,10 @@ test(
     await new Promise((resolve) => server.once("listening", resolve));
     const get = (url) =>
       fetch(`http://127.0.0.1:${server.address().port}${url}`);
+    // createApp starts an initial background import. Join it before replacing
+    // the file, otherwise sync() may correctly coalesce the request with the
+    // still-running import and the API will observe the previous snapshot.
+    await reopened.sync(file);
     await writeFile(
       file,
       JSON.stringify({
