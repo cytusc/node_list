@@ -241,6 +241,10 @@ func (r *IPPureResult) UnmarshalJSON(data []byte) error {
 	}
 	*r = IPPureResult(decoded)
 	r.shape = shape
+	if r.Classification != nil && r.Classification.IP == r.IP && len(r.Classification.Types) > 0 {
+		r.Classification.Reclassify()
+		r.Attributes = r.Classification.Attributes(r.Attributes)
+	}
 	return nil
 }
 

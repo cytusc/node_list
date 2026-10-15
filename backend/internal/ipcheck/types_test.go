@@ -64,11 +64,43 @@ func TestSourceDisagreementKeepsEachUsageType(t *testing.T) {
 		ParseAbuseIPDB([]byte(`{"data":{"ipAddress":"8.8.8.8","usageType":"Mobile ISP"}}`), "8.8.8.8", stamp),
 	}
 	r := Score("8.8.8.8", evidence, now)
-	if got := r.Attributes([]string{"性质争议", "住宅IP"}); !reflect.DeepEqual(got, []string{"住宅IP"}) {
+	if got := r.Attributes([]string{"性质争议", "住宅IP"}); !reflect.DeepEqual(got, []string{"商业宽带"}) {
 		t.Fatalf("unresolved summary: %v", got)
 	}
 	if len(r.Types) != 3 || r.Types[1].CompanyType != "商业宽带" {
 		t.Fatalf("missing database comparison: %+v", r.Types)
+	}
+}
+
+func TestTiedLeaderPriority(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"live Cloudflare business hosting tie", []string{"商业宽带", "机房IP"}, "商业宽带"},
+		{"CDN business tie", []string{"CDN", "商业宽带"}, "商业宽带"},
+		{"residential hosting tie", []string{"住宅IP", "机房IP"}, "住宅IP"},
+		{"three way residential tie", []string{"住宅IP", "商业宽带", "机房IP"}, "住宅IP"},
+		{"residential below tied leaders", []string{"住宅IP", "商业宽带", "商业宽带", "机房IP", "机房IP"}, "商业宽带"},
+		{"remaining CDN mobile tie", []string{"CDN", "移动网络"}, "机房IP"},
+		{"business below tied leaders", []string{"商业宽带", "CDN", "CDN", "移动网络", "移动网络"}, "机房IP"},
+		{"hosting majority", []string{"住宅IP", "机房IP", "机房IP"}, "机房IP"},
+		{"residential majority", []string{"住宅IP", "住宅IP", "机房IP"}, "住宅IP"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Result{}
+			for i, label := range tc.labels {
+				r.Types = append(r.Types, TypeEvidence{Provider: string(rune('a' + i)), UsageType: label})
+			}
+			if got := r.summaryType(); got != tc.want {
+				t.Fatalf("summary = %q, want %q", got, tc.want)
+			}
+			// Old persisted residential labels must also disappear on normalization.
+			if got := r.Attributes([]string{"住宅IP"}); !reflect.DeepEqual(got, []string{tc.want}) {
+				t.Fatalf("attributes = %v", got)
+			}
+		})
 	}
 }
 
