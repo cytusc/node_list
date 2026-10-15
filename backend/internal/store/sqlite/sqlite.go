@@ -525,7 +525,7 @@ func matchNode(n domain.Node, q *Query, snapshot domain.Snapshot) bool {
 		}
 	}
 	if len(q.IPAttributes) > 0 {
-		if n.IPPure == nil || n.IPPure.Status != "success" {
+		if n.IPPure == nil || (n.IPPure.Status != "success" && n.IPPure.Classification == nil) {
 			return false
 		}
 		found := false

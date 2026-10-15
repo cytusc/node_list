@@ -110,10 +110,12 @@ func run() error {
 	}
 	router := transport.NewRouter(transport.NewNativeEngine()).
 		WithFallback(transport.NewMihomoEngine(instances, 15*time.Second))
+
 	runner := patrol.NewPatrol(st, router, patrol.PatrolConfig{
-		Concurrency: concurrency,
-		Timeout:     timeout,
-		RetryDelay:  retryDelay,
+		Concurrency:           concurrency,
+		ResidentialAssessment: patrol.NewResidentialAssessment(os.Getenv("IPINFO_TOKEN"), os.Getenv("IPPURE_API_ORIGIN"), os.Getenv("IP_API_PRO_KEY")),
+		Timeout:               timeout,
+		RetryDelay:            retryDelay,
 	})
 
 	path := statusPath()

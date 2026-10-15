@@ -74,6 +74,12 @@ func SortValue(n Node, key string) any {
 	case "speed":
 		return n.Speed
 	}
+	if key == "ipAttributes" && n.IPPure != nil && n.IPPure.Classification != nil {
+		if len(n.IPPure.Attributes) == 0 {
+			return nil
+		}
+		return strings.Join(n.IPPure.Attributes, " · ")
+	}
 	if n.IPPure == nil || n.IPPure.Status != "success" {
 		return nil
 	}
@@ -199,7 +205,7 @@ func ResultsMetadata(s Snapshot) Metadata {
 		values := make(map[string]int, 16)
 		order := make([]string, 0, 16)
 		for _, n := range nodes {
-			if n.IPPure == nil || n.IPPure.Status != "success" {
+			if n.IPPure == nil || (n.IPPure.Status != "success" && (key != "attributes" || n.IPPure.Classification == nil)) {
 				continue
 			}
 			items := n.IPPure.Attributes

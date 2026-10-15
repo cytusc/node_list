@@ -668,7 +668,11 @@ func (p *Projector) QueryPage(ctx context.Context, q *Query) (*Result, error) {
 		}
 	}
 	if len(q.IPSources) > 0 || len(q.IPAttributes) > 0 {
-		conditions = append(conditions, "payload::jsonb->'ippure'->>'status' = 'success'")
+		if len(q.IPSources) > 0 {
+			conditions = append(conditions, "payload::jsonb->'ippure'->>'status' = 'success'")
+		} else {
+			conditions = append(conditions, "(payload::jsonb->'ippure'->>'status' = 'success' OR jsonb_typeof(payload::jsonb->'ippure'->'classification') = 'object')")
+		}
 		if len(q.IPSources) > 0 {
 			conditions = append(conditions,
 				fmt.Sprintf(`payload::jsonb->'ippure'->>'source' = ANY(%s::text[])`, param(q.IPSources)))

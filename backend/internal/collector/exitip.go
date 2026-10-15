@@ -542,7 +542,7 @@ var scoreBands = []struct {
 }
 
 var asnTypes = map[string]string{
-	"isp": "住宅IP", "hosting": "机房IP", "business": "机房IP",
+	"isp": "住宅IP", "hosting": "机房IP", "business": "商业宽带",
 	"enterprise": "商业宽带", "education": "教育IP", "government": "政府IP",
 }
 

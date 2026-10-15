@@ -101,6 +101,23 @@ function IPPureMetric({
   result?: IPPureResult;
   metric: IPPureMetricName;
 }) {
+  if (metric === "attributes" && result?.classification) {
+    const voting = result.classification;
+    const title = voting.votes
+      .map(
+        (v) =>
+          `${v.provider}: ${v.points > 0 ? "+" : ""}${v.points} (${v.reason})`,
+      )
+      .join("\n");
+    return (
+      <span title={title}>
+        {result.attributes?.join(" · ") || "性质未知"} · 住宅{" "}
+        {voting.residentialVotes} / 机房 {voting.datacenterVotes} / 未知{" "}
+        {voting.unknownVotes}
+        {voting.hasDisagreement ? "（来源有分歧）" : ""}
+      </span>
+    );
+  }
   if (result?.status !== "success")
     return (
       <span className="text-muted-foreground" title={result?.error}>
@@ -468,6 +485,8 @@ export default function App() {
       ...ippureMetrics.map(({ key, label, column }): ColumnDef<NodeRecord> => ({
         id: column,
         accessorFn: (node) => {
+          if (key === "attributes" && node.ippure?.classification)
+            return node.ippure.attributes?.join(" · ");
           if (node.ippure?.status !== "success") return undefined;
           return key === "ratio"
             ? (node.ippure.humanPercent ?? undefined)

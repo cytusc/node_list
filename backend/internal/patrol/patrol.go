@@ -10,6 +10,7 @@ package patrol
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
+	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/cytusc/node_list/backend/internal/store"
 	"github.com/cytusc/node_list/backend/internal/transport"
 )
@@ -37,9 +39,10 @@ type Summary struct {
 
 // RecoverySummary is the outcome of one revival round.
 type RecoverySummary struct {
-	Checked  int `json:"checked"`
-	Restored int `json:"restored"`
-	Skipped  int `json:"skipped"`
+	ClassificationEnabled bool `json:"classificationEnabled"`
+	Checked               int  `json:"checked"`
+	Restored              int  `json:"restored"`
+	Skipped               int  `json:"skipped"`
 }
 
 // Patrol rechecks nodes through the available engines.
@@ -52,18 +55,27 @@ type Patrol struct {
 	// concurrency is the number of nodes probed per wave. The JavaScript
 	// service used two and slept ten seconds between waves, which made a round
 	// last hours; Go can keep far more tunnels open without extra cost.
-	concurrency int
+	concurrency           int
+	residentialAssessment ResidentialAssessment
+	residentialVerifier   ResidentialVerifier
+	recoveryLimit         int
 }
 
 // PatrolConfig configures a patrol.
 type PatrolConfig struct {
-	Concurrency int
-	Timeout     time.Duration
-	RetryDelay  time.Duration
+	ResidentialAssessment ResidentialAssessment
+	ResidentialVerifier   ResidentialVerifier
+	RecoveryLimit         int
+	Concurrency           int
+	Timeout               time.Duration
+	RetryDelay            time.Duration
 }
 
 // NewPatrol builds a patrol runner.
 func NewPatrol(st *store.Store, router *transport.Router, cfg PatrolConfig) *Patrol {
+	if cfg.RecoveryLimit <= 0 {
+		cfg.RecoveryLimit = 20
+	}
 	if cfg.Concurrency < 1 {
 		cfg.Concurrency = 8
 	}
@@ -77,12 +89,15 @@ func NewPatrol(st *store.Store, router *transport.Router, cfg PatrolConfig) *Pat
 		cfg.RetryDelay = 10 * time.Second
 	}
 	return &Patrol{
-		store:       st,
-		router:      router,
-		probe:       transport.ProbeHTTP,
-		timeout:     cfg.Timeout,
-		retryGap:    cfg.RetryDelay,
-		concurrency: cfg.Concurrency,
+		store:                 st,
+		residentialVerifier:   cfg.ResidentialVerifier,
+		residentialAssessment: cfg.ResidentialAssessment,
+		recoveryLimit:         cfg.RecoveryLimit,
+		router:                router,
+		probe:                 transport.ProbeHTTP,
+		timeout:               cfg.Timeout,
+		retryGap:              cfg.RetryDelay,
+		concurrency:           cfg.Concurrency,
 	}
 }
 
@@ -340,18 +355,20 @@ func (p *Patrol) isRetired(node domain.Node) bool {
 	return ok
 }
 
-// RecoverRetiredNodes revives connections that answer the GitHub probe twice.
-//
-// Recovery probes are the scarcest budget in the fleet: only residential exits
-// are worth reviving, because datacenter nodes that come back invite the churn
-// the retirement guards just cleaned up.
+// RecoverRetiredNodes requires two fresh connectivity and residential checks,
+// at least 30 minutes apart, on the same current exit and retirement row.
 func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]RecoveryState, now time.Time, interval time.Duration, onProgress func(RecoverySummary)) (RecoverySummary, error) {
 	var summary RecoverySummary
+	roundStarted := time.Now()
+	summary.ClassificationEnabled = (p.residentialVerifier != nil || p.residentialAssessment != nil)
 	if err := p.store.Sync(ctx); err != nil {
 		return summary, err
 	}
-	if interval <= 0 {
+	if interval < 30*time.Minute {
 		interval = 30 * time.Minute
+	}
+	if p.residentialVerifier == nil && p.residentialAssessment == nil {
+		return summary, nil
 	}
 	retired := p.store.RetiredRows()
 	identities := make(map[string]struct{}, len(retired))
@@ -390,22 +407,39 @@ func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]Recov
 			nodes[domain.AggregateIdentity(node)] = node
 		}
 	}
+	sort.Slice(candidates, func(i, j int) bool {
+		a, b := state[candidates[i].Identity], state[candidates[j].Identity]
+		left, right := candidates[i].RetiredAt, candidates[j].RetiredAt
+		if a.RetiredAt == candidates[i].RetiredAt && a.CheckedAt != "" {
+			left = a.CheckedAt
+		}
+		if b.RetiredAt == candidates[j].RetiredAt && b.CheckedAt != "" {
+			right = b.CheckedAt
+		}
+		leftTime, _ := time.Parse(time.RFC3339Nano, left)
+		rightTime, _ := time.Parse(time.RFC3339Nano, right)
+		if leftTime.Equal(rightTime) {
+			return candidates[i].Identity < candidates[j].Identity
+		}
+		return leftTime.Before(rightTime)
+	})
+	attempted := 0
 	for _, row := range candidates {
 		if err := ctx.Err(); err != nil {
-			return summary, ctx.Err()
+			return summary, err
 		}
+		if attempted >= p.recoveryLimit {
+			break
+		}
+		attempted++
+		// Recording skipped attempts keeps an unusable configuration from
+		// permanently occupying the front of this bounded recovery queue.
+		previous := state[row.Identity]
+		state[row.Identity] = RecoveryState{RetiredAt: row.RetiredAt, CheckedAt: now.UTC().Format(time.RFC3339Nano), Classification: "unknown"}
+
 		node, ok := nodes[row.Identity]
-		residential := false
-		if ok && node.IPPure != nil {
-			for _, attribute := range node.IPPure.Attributes {
-				if attribute == "住宅IP" {
-					residential = true
-					break
-				}
-			}
-		}
 		config, err := outboundFor(node)
-		if !residential || err != nil || !ok {
+		if err != nil || !ok {
 			summary.Skipped++
 			continue
 		}
@@ -421,10 +455,33 @@ func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]Recov
 			continue
 		}
 		var success bool
+		var currentIP string
+		classification := "unknown"
+		var voting *ipcheck.Result
 		if outbound := outbounds[0]; outbound != nil && outbound.Error == nil {
 			probeCtx, cancel := context.WithTimeout(ctx, p.timeout)
 			success, _ = p.probe(probeCtx, outbound.Client)
 			cancel()
+			if success {
+				verifyCtx, verifyCancel := context.WithTimeout(ctx, 60*time.Second)
+				if p.residentialAssessment != nil {
+					var votes ipcheck.Result
+					currentIP, votes, err = p.residentialAssessment(verifyCtx, outbound.Client)
+					voting = &votes
+				} else {
+					currentIP, err = p.residentialVerifier(verifyCtx, outbound.Client)
+				}
+				verifyCancel()
+				ip := net.ParseIP(currentIP)
+				success = err == nil && ip != nil && ip.To4() != nil && ip.IsGlobalUnicast() && !ip.IsPrivate()
+				if success {
+					classification = "residential"
+				} else if errors.Is(err, ErrResidentialDisputed) {
+					classification = "disputed"
+				} else if errors.Is(err, ErrResidentialHosting) {
+					classification = "datacenter"
+				}
+			}
 		} else {
 			if release != nil {
 				release()
@@ -435,20 +492,24 @@ func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]Recov
 		if release != nil {
 			release()
 		}
-		previous := state[row.Identity]
 		successes := 0
 		if success {
-			if previous.RetiredAt == row.RetiredAt {
+			lastCheck, parseErr := time.Parse(time.RFC3339Nano, previous.CheckedAt)
+			if previous.RetiredAt == row.RetiredAt && previous.VerifiedIP == currentIP && previous.ClassificationVersion == ipcheck.VotingVersion && parseErr == nil && now.Sub(lastCheck) <= 24*time.Hour {
 				successes = previous.Successes + 1
 			} else {
 				successes = 1
 			}
 		}
 		state[row.Identity] = RecoveryState{
-			RetiredAt: row.RetiredAt,
-			CheckedAt: now.UTC().Format(time.RFC3339Nano),
-			Successes: successes,
-			Success:   success,
+			RetiredAt:             row.RetiredAt,
+			CheckedAt:             now.Add(time.Since(roundStarted)).UTC().Format(time.RFC3339Nano),
+			Successes:             successes,
+			Success:               success,
+			VerifiedIP:            currentIP,
+			ClassificationVersion: ipcheck.VotingVersion,
+			Voting:                voting,
+			Classification:        classification,
 		}
 		summary.Checked++
 		if successes >= 2 {
@@ -468,10 +529,14 @@ func (p *Patrol) RecoverRetiredNodes(ctx context.Context, state map[string]Recov
 
 // RecoveryState tracks consecutive revival successes across restarts.
 type RecoveryState struct {
-	RetiredAt string `json:"retiredAt"`
-	CheckedAt string `json:"checkedAt"`
-	Successes int    `json:"successes"`
-	Success   bool   `json:"success"`
+	Voting                *ipcheck.Result `json:"voting,omitempty"`
+	Classification        string          `json:"classification,omitempty"`
+	VerifiedIP            string          `json:"verifiedIP,omitempty"`
+	ClassificationVersion int             `json:"classificationVersion,omitempty"`
+	RetiredAt             string          `json:"retiredAt"`
+	CheckedAt             string          `json:"checkedAt"`
+	Successes             int             `json:"successes"`
+	Success               bool            `json:"success"`
 }
 
 func rankSuccess(node domain.Node) int {
