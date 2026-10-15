@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
+	"sync"
 	"time"
 
+	"github.com/cytusc/node_list/backend/internal/collector"
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/jackc/pgx/v5"
 )
@@ -41,9 +45,23 @@ func main() {
 func run() error {
 	apply := flag.Bool("apply", false, "update records; default is read-only")
 	refresh := flag.Bool("refresh", true, "query providers; false only normalizes stored source evidence")
+	queryProxy := flag.String("query-proxy", "", "dedicated HTTP proxy used for fresh IPPure and provider queries")
+	concurrency := flag.Int("concurrency", 4, "concurrent fresh IPPure lookups (1..16)")
 	only := flag.String("ip", "", "limit to one exit IP")
 	output := flag.String("output", "ip-type-clean.jsonl", "append-only evidence and progress report (0600)")
 	flag.Parse()
+	if *concurrency < 1 || *concurrency > 16 {
+		return fmt.Errorf("concurrency must be 1..16")
+	}
+	var queryHTTP *http.Client
+	if *refresh {
+		proxyURL, err := url.Parse(*queryProxy)
+		if err != nil || proxyURL.Host == "" || (proxyURL.Scheme != "http" && proxyURL.Scheme != "https") {
+			return fmt.Errorf("fresh queries require --query-proxy pointing to a dedicated working proxy")
+		}
+		queryHTTP = &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL), MaxIdleConns: 64, MaxIdleConnsPerHost: 16}, Timeout: 15 * time.Second}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	db, err := pgx.Connect(ctx, "")
@@ -125,9 +143,45 @@ func run() error {
 	runID := time.Now().UTC().Format("20060102T150405.000000000Z")
 	fmt.Printf("run=%s apply=%t records=%d uniqueIPs=%d invalidIPs=%d\n", runID, *apply, records, len(ips), invalid)
 	client := ipcheck.NewClient(os.Getenv("IPINFO_TOKEN"), os.Getenv("IP_API_PRO_KEY"), os.Getenv("IPREGISTRY_API_KEY"), os.Getenv("ABUSEIPDB_API_KEY"))
+	client.FreshSweep = true
 	if *refresh {
+		client.HTTP = queryHTTP
 		fmt.Printf("Priming IP-API batches (%d IPs, <=100 IPs/request, <=15 requests/minute)\n", len(ips))
 		if err := client.PrimeIPAPIBatch(ctx, ips); err != nil {
+			fmt.Printf("IP-API batch unavailable; continuing with individual requests\n")
+		}
+	}
+	type pureLookup struct{ evidence ipcheck.Evidence }
+	pureResults := make(map[string]pureLookup)
+	var pureMu sync.Mutex
+	var pureWG sync.WaitGroup
+	pureSlots := make(chan struct{}, *concurrency)
+	if *refresh {
+		pureClient := collector.NewIPPureClient(queryHTTP, os.Getenv("IPPURE_API_ORIGIN"), 10*time.Second)
+		for _, target := range ips {
+			pureWG.Add(1)
+			go func(ip string) {
+				defer pureWG.Done()
+				select {
+				case pureSlots <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-pureSlots }()
+				queryCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+				defer cancel()
+				pure, _ := collector.QueryIPPureType(queryCtx, pureClient, ip)
+				pureMu.Lock()
+				pureResults[ip] = pureLookup{pure}
+				count := len(pureResults)
+				pureMu.Unlock()
+				if count%25 == 0 || count == len(ips) {
+					fmt.Printf("IPPure fresh=%d/%d\n", count, len(ips))
+				}
+			}(target)
+		}
+		pureWG.Wait()
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 	}
@@ -142,28 +196,10 @@ func run() error {
 		if *refresh {
 			ev = client.Lookup(ctx, ip)
 		}
-		// Preserve unexpired source evidence when the public API is unavailable.
-		// Never reinterpret merged attributes as the IPPure source.
-		prior := ipcheck.Score(ip, history[ip], now).Evidence
-		// Current explicit evidence replaces the same provider. Failed requests
-		// do not erase a still-valid successful result.
-		for _, old := range prior {
-			current := ipcheck.Score(ip, ev, now)
-			usable := false
-			for _, t := range current.Types {
-				if t.Provider == old.Provider {
-					usable = true
-					break
-				}
-			}
-			if !usable {
-				for j := len(ev) - 1; j >= 0; j-- {
-					if ev[j].Provider == old.Provider {
-						ev = append(ev[:j], ev[j+1:]...)
-					}
-				}
-				ev = append(ev, old)
-			}
+		if *refresh {
+			ev = append(ev, pureResults[ip].evidence)
+		} else {
+			ev = ipcheck.Score(ip, history[ip], now).Evidence
 		}
 		result := ipcheck.Score(ip, ev, now)
 		e := entry{IP: ip, Evidence: ev, Classification: result, Attributes: result.Attributes(nil)}

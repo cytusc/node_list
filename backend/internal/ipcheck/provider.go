@@ -3,6 +3,8 @@
 package ipcheck
 
 type Evidence struct {
+	QueryStatus string `json:"queryStatus,omitempty"`
+	HTTPStatus  int    `json:"httpStatus,omitempty"`
 	Provider    string `json:"provider"`
 	CheckedAt   string `json:"checkedAt"`
 	IP          string `json:"ip"`

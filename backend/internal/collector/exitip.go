@@ -543,6 +543,28 @@ var scoreBands = []struct {
 	{50, "轻度风险"}, {70, "中度风险"}, {100, "极度风险"},
 }
 
+// QueryIPPureType requests only current ASN type data for an exact exit IP.
+// Type cleaning does not need risk scores or bot statistics.
+func QueryIPPureType(ctx context.Context, c *IPPureClient, target string) (ipcheck.Evidence, error) {
+	e := ipcheck.Evidence{Provider: "ippure", IP: target, CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Outcome: "unknown", QueryStatus: "request-failed"}
+	if net.ParseIP(target) == nil || net.ParseIP(target).To4() == nil {
+		return e, errors.New("IPPure 类型查询需要 IPv4 出口")
+	}
+	basic, err := c.get(ctx, "/api/info/ip-basic/"+target)
+	if err != nil {
+		return e, err
+	}
+	ip, _ := basic["ip"].(string)
+	if net.ParseIP(ip) == nil || normalizeIP(ip) != normalizeIP(target) {
+		return e, errors.New("IPPure 返回 IP 与查询出口 IP 不一致")
+	}
+	asn, _ := basic["asn"].(map[string]any)
+	kind, _ := asn["type"].(string)
+	e = ipcheck.IPPureEvidence(target, []string{ipcheck.NetworkTypeLabel(kind)}, e.CheckedAt)
+	e.QueryStatus = "success"
+	return e, nil
+}
+
 // QueryIPPure resolves the risk verdict for one exit IP.
 func QueryIPPure(ctx context.Context, c *IPPureClient, target string, asnCache *ASNCache) (*IPPureResult, error) {
 	if net.ParseIP(target) == nil {

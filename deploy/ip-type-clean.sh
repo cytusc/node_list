@@ -21,7 +21,7 @@ chmod 600 "$clean_env"
 python3 - "$container" "$clean_env" <<'PYENV'
 import json, subprocess, sys
 allowed = {"PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGSSLMODE",
-           "IPINFO_TOKEN", "IP_API_PRO_KEY", "IPREGISTRY_API_KEY", "ABUSEIPDB_API_KEY"}
+           "IPINFO_TOKEN", "IP_API_PRO_KEY", "IPREGISTRY_API_KEY", "ABUSEIPDB_API_KEY", "IPPURE_API_ORIGIN"}
 data = json.loads(subprocess.check_output(["docker", "inspect", sys.argv[1]]))[0]
 with open(sys.argv[2], "w") as f:
     for value in data["Config"]["Env"]:
