@@ -1,19 +1,19 @@
 # Node Explorer
 
-使用 React、TypeScript、shadcn/ui 和 TanStack Table 展示 subs-check 检测结果及历史批次。参考 Qilan 的节点浏览布局，支持地区／协议／传输／特性筛选、搜索、速度排序、列设置、分页、详情、深浅主题和订阅下载。
+使用 React、TypeScript、shadcn/ui 和 TanStack Table 展示 subs-check 检测结果及历史批次。参考 Qilan 的节点浏览布局，支持地区／协议／传输／特性筛选、搜索、速度排序、列设置、分页、详情和深浅主题。
 
 ## 开发
 
-需要 Node.js 22.13 或更新版本（使用内置 SQLite）。
+前端与构建需要 Node.js 22.13 或更新版本；后端是 Go，需要 Go 1.26 或更新版本。运行时的 SQLite 由后端自带（`modernc.org/sqlite`，纯 Go），不依赖 Node。
 
 ```bash
 npm install
 npm run dev
 ```
 
-打开 http://localhost:5173 。开发服务会代理 `/api` 到本地 3001 端口。
+`npm run dev` 并行启动 Vite 和 `go -C backend run ./cmd/node-explorer`，打开 http://localhost:5173 。开发服务会代理 `/api` 到本地 3001 端口。
 
-默认读取项目下的 `data/sub`，可在 `.env` 中设置 `SUBS_CHECK_DIR`。结果文件默认是该目录下的 `config/cache/config/results.json`，后端启动时及每 5 秒检查一次新结果，也会在刷新时检查；按检测时间和内容去重后写入 SQLite，页面从数据库读取。即使无人打开页面也会积累历史。下载来自 `output/all.yaml`、`output/mihomo.yaml`、`output/base64.txt`，包含完整订阅，不随页面筛选变化。
+默认读取项目下的 `data/sub`，可在 `.env` 中设置 `SUBS_CHECK_DIR`。结果文件默认是该目录下的 `config/cache/config/results.json`。后端启动时立刻导入一轮，之后由文件监听（`fsnotify`）在结果文件变化后防抖导入，并每 2 分钟兜底扫描一次；监听不可用时（例如部分 bind mount 不上报事件）自动降级为每 30 秒轮询。按检测时间和内容去重后写入 SQLite，页面从数据库读取。即使无人打开页面也会积累历史。订阅文件用于匹配和归档节点来源；下载接口与归档 Node 版本保持一致，当前返回 404。
 
 ### Qilan 节点来源
 
@@ -36,7 +36,7 @@ QILAN_USER_AGENT=Mozilla/5.0
 
 只有分享链接的 Qilan 节点也参与出口 IP 和 IPPure 检测，包括已归档的历史节点。检测器在本地将链接转换为 Mihomo 配置，无需节点存在于 subs-check 的 `all.yaml` 中。同一连接的新批次复用最近的出口检测结果，未检测节点优先补采；无法转换的链接会明确显示“连接配置不支持”。
 
-历史清理通过 `server/reconcile-sources.js` 显式执行，默认仅打印预演计数。先备份数据库并停止页面服务（避免采集器在节点重新排序时写入旧位置），用同一数据库环境运行 `node server/reconcile-sources.js --clash /data/sub/output/all.yaml --links /data/sub/output/base64.txt --prune`；可重复添加 `--clash` 提供历史源文件，或用 `--archive 发布时刻=文件.yaml` 提供有发布时间的历史版本以消除配置歧义。核对计数后加 `--apply`，只删除既没有可匹配链接也没有完整源配置的节点，保留批次 ID 和剩余节点的 IP 检测数据。维护脚本需要已有数据库配置：PostgreSQL 使用 `PGHOST` 等变量，SQLite 使用 `DATABASE_PATH`。
+历史清理通过 `node legacy/node-server/reconcile-sources.js` 显式执行（该脚本属于归档的 Node 实现，见下文“后端实现”），默认仅打印预演计数。先备份数据库并停止页面服务（避免采集器在节点重新排序时写入旧位置），用同一数据库环境运行 `node legacy/node-server/reconcile-sources.js --clash /data/sub/output/all.yaml --links /data/sub/output/base64.txt --prune`；可重复添加 `--clash` 提供历史源文件，或用 `--archive 发布时刻=文件.yaml` 提供有发布时间的历史版本以消除配置歧义。核对计数后加 `--apply`，只删除既没有可匹配链接也没有完整源配置的节点，保留批次 ID 和剩余节点的 IP 检测数据。维护脚本需要已有数据库配置：PostgreSQL 使用 `PGHOST` 等变量，SQLite 使用 `DATABASE_PATH`。
 
 人工确认失效的连接可通过 `store.retireNodes(nodes, reason)` 软删除。软删除记录以连接配置摘要为键，隐藏节点的首页/聚合结果并跳过出口 IP 补采；历史批次仍可查阅。人工退役节点恢复时由维护人员删除对应的 retired identity 记录；定时 GitHub 巡检退役的连接支持下述自动复检恢复。生产使用 PostgreSQL 的 `node_explorer_retired_nodes` 表，SQLite 使用 `retired_nodes` 表。
 
@@ -46,7 +46,7 @@ QILAN_USER_AGENT=Mozilla/5.0
 
 启动后立即扫描；每轮结束后默认等待 30 分钟，再扫描更新后的节点列表。`GITHUB_PATROL_INTERVAL_SECONDS=1800`、`GITHUB_PATROL_CONCURRENCY=2`、`GITHUB_PATROL_TIMEOUT_SECONDS=12`、`GITHUB_PATROL_RETRY_SECONDS=10` 可在 `.env` 中调整。巡检优先使用完整配置 `rawConfig`，只有 `rawLink` 的节点（包括 Qilan 节点）在本地转换为 Mihomo 配置后参与检测；转换不会改变节点身份。无法转换或被 Mihomo 明确拒绝的配置单独跳过，不影响其他节点。两个节点并发，每次通过各自隔离代理访问 `https://github.com/`，HTTP 200 算成功；失败时等待 10 秒，用新代理连接再次确认。两次失败且服务器直连 GitHub、正常节点的代理对照均成功，才调用软删除。对照失败、没有正常代理、缺少可用连接配置或代理控制器异常时，不对未确认的节点做删除。所有请求结束后才重载代理配置，巡检不占用 IPPure 代理实例。
 
-巡检每轮结束后还会复检自动退役的连接：距退役或上次复检至少 2 小时才再次检查，连续两轮经该连接访问 GitHub 返回 HTTP 200 后解除退役标记，恢复首页展示和 IPPure 补采；失败清零连续成功次数。只恢复原因为定时 GitHub 巡检的记录，人工禁用记录保持禁用。复检时间、结果和成功次数保存在现有状态文件中，容器重启后继续使用；复检复用专用巡检代理，在正常巡检完成后执行。
+巡检每轮结束后还会复检自动退役的连接：距退役或上次复检至少 30 分钟才再次检查，连续两轮经该连接访问 GitHub 返回 HTTP 200 后解除退役标记，恢复首页展示和 IPPure 补采；失败清零连续成功次数。仅复检曾确认是住宅 IP、且因定时 GitHub 巡检或 IPPure 自动退役的连接；人工禁用记录保持禁用。复检时间、结果和成功次数保存在现有状态文件中，容器重启后继续使用；复检复用专用巡检代理，在正常巡检完成后执行。
 
 巡检摘要保存到共享历史卷的 `github-patrol-status.json`，包含心跳时间、当前进度、完成时间、下次运行时间和成功/退役/暂缓/跳过计数；不包含完整连接配置。使用 `bash deploy/compose.sh logs --tail 20 github-patrol` 查看每轮汇总；容器健康检查读取心跳，巡检过程中每 30 秒更新。容器重启会立即重新巡检，已软删除的记录仍保留在数据库。控制器尚未启动或数据库暂时不可用时，本轮中止并在 60 秒后重试。
 
@@ -68,15 +68,39 @@ npm run dev
 ## 生产运行
 
 ```bash
-npm run build
+npm run build          # 构建前端到 dist/
+npm run build:backend  # 编译 backend/node-explorer 与 backend/github-patrol
 npm start
 ```
 
-打开 http://localhost:3001 。服务默认仅监听本机。`API_PORT` 可修改后端端口；开发时需同步修改 Vite 代理地址。结果和节点凭据不复制到前端仓库，也不进入构建产物。
+`npm start` 直接执行 `./backend/node-explorer`（静态二进制，无运行时依赖）。服务会自行定位仓库根目录以读取 `dist/` 和 `.env`，因此从仓库根目录或 `backend/` 目录启动都可以。打开 http://localhost:3001 。服务默认仅监听本机。`API_PORT` 可修改后端端口；开发时需同步修改 Vite 代理地址。结果和节点凭据不复制到前端仓库，也不进入构建产物。
+
+## 后端实现
+
+后端为 Go 模块 `github.com/cytusc/node_list/backend`，承担全部服务与调度：HTTP API、结果文件导入、SQLite/PostgreSQL 持久化与 SQL 投影、IPPure 逐节点采集、Qilan 采集、GitHub 巡检，以及连接退役与恢复。
+
+原先的 Node.js 后端已归档到 `legacy/node-server/`，不再参与构建、运行或调度，仅保留两点用途：作为行为基准（`backend/tools/api-parity.py` 用它做逐接口比对）和运维脚本（`retire-nodes.js`、`reconcile-sources.js`）。归档目录中的 `*.test.js` 仍可用 `npm test` 运行，用于核对 Go 实现是否与既有语义一致。归档代码自带 `ARCHIVED` 标记，不要再向其中添加功能。
+
+模块划分：
+
+| 目录 | 职责 |
+| --- | --- |
+| `cmd/node-explorer` | 主进程：HTTP 服务、文件监听、采集与巡检调度 |
+| `cmd/github-patrol` | 独立巡检容器 |
+| `internal/api` | HTTP 接口与请求校验 |
+| `internal/domain` | 节点模型、连接身份、排序与地区名 |
+| `internal/store` | 快照聚合、导入、退役状态 |
+| `internal/store/sqlite` | 本地数据库适配器与内存分页 |
+| `internal/store/postgres` | PostgreSQL 适配器与增量 SQL 投影 |
+| `internal/transport` | 按协议分流的探测引擎路由 |
+| `internal/collector` `internal/qilan` `internal/patrol` | 各采集与巡检任务 |
+| `internal/source` | 结果文件监听 |
+
+`cmd/` 下另有四个只在核对时使用的开发命令，不进入镜像、不参与发布：`idcheck`、`idscan` 与 `linkdiff` 比对连接身份与来源匹配，`sortchk` 比对排序结果。用 `go -C backend run ./cmd/<名字>` 执行。
 
 ## 容器部署与发布
 
-GitHub Actions 在推送 `v*.*.*` 标签后构建并发布 `ghcr.io/cytusc/node_list`，支持 `linux/amd64` 和 `linux/arm64`。流程执行后端测试、生产构建和已发布镜像的启动检查，再创建 GitHub Release 与生产文件压缩包。生产文件包解压后需执行 `npm ci --omit=dev` 才能使用 `npm start`。
+GitHub Actions 在推送 `v*.*.*` 标签后构建并发布 `ghcr.io/cytusc/node_list`，支持 `linux/amd64` 和 `linux/arm64`。流程执行 Go 与归档 Node 测试、生产构建和已发布镜像的启动检查，再创建 GitHub Release 与生产文件压缩包。镜像只包含 Go 静态二进制和前端 `dist/`，不包含 Node 运行时，生产文件包解压后无需 `npm ci`。
 
 在安装 Docker Compose 的机器上运行：
 
@@ -98,9 +122,11 @@ docker compose up -d
 
 打开 http://localhost:3001 。目录必须已存在，容器只读挂载整个目录，以便读取 subs-check 后续替换的结果文件。独立的 `node-history` Docker 卷保存 SQLite 数据库，更新或重启容器会保留历史；请勿使用 `docker compose down -v`，这会删除历史卷。健康检查仅表示 Web 服务正常，检测结果尚未生成时页面仍会显示空状态。Linux 挂载文件须允许容器内非 root 用户读取。
 
-默认只绑定 `127.0.0.1`。需要局域网访问时设置 `BIND_ADDRESS=0.0.0.0`；`WEB_PORT` 修改宿主机端口。页面可下载含连接凭据的完整订阅，公网部署应通过带鉴权的 HTTPS 反向代理访问。
+默认只绑定 `127.0.0.1`。需要局域网访问时设置 `BIND_ADDRESS=0.0.0.0`；`WEB_PORT` 修改宿主机端口。公网部署应通过带鉴权的 HTTPS 反向代理访问。
 
 更新时设置新 `IMAGE_TAG` 后再次执行 `docker compose pull` 和 `docker compose up -d`；回滚时设置之前的版本标签并执行相同命令。镜像不包含用户结果和订阅文件。
+
+从 Node 版本升级到 Go 版本时，更新服务器的 `compose.patrol.yaml`，将巡检启动命令改为 `["/usr/local/bin/github-patrol"]`，健康检查改为 `["CMD", "/usr/local/bin/github-patrol", "--health"]`。保留 `.env`、`release.env`、数据库卷和订阅目录，然后运行 `bash deploy/compose.sh up -d --no-deps node-explorer github-patrol`。镜像也兼容旧配置中的 `node server/github-patrol-service.js` 及其 `--health` 调用，会直接执行 Go 巡检程序；兼容入口不支持执行其他 JavaScript。
 
 ### Linux 开机启动与定时更新
 
@@ -177,7 +203,7 @@ docker compose -f compose.yaml -f compose.pgsql.yaml --env-file .env up -d
 
 ## 历史存储
 
-页面聚合展示所有已保存批次的节点，按协议、服务器、端口及连接参数去重，同一节点保留检测时间最近的一次结果（缺少检测时间时使用入库时间）。仅在历史批次出现的节点也会保留，详情显示该节点的检测时间；历史记录不代表节点当前仍可用。历史不自动删除，请定期备份所选数据库并关注磁盘空间。运行中备份 SQLite 时应使用 SQLite backup 工具，或停服务后备份整个数据库目录（包含 WAL 文件）。
+页面聚合展示所有已保存批次的节点，按协议、服务器、端口及连接参数去重，同一节点保留检测时间最近的一次结果（缺少检测时间时使用入库时间）。仅在历史批次出现的节点也会保留，详情显示该节点的检测时间；历史记录不代表节点当前仍可用。SQLite 历史不自动删除；PostgreSQL 默认保留 7 天，可用 `SNAPSHOT_RETENTION_DAYS` 调整，负值禁用自动清理。请定期备份所选数据库并关注磁盘空间。运行中备份 SQLite 时应使用 SQLite backup 工具，或停服务后备份整个数据库目录（包含 WAL 文件）。
 
 Qilan 采集在入库前按分享链接的连接内容去重，跨分页重复时保留检测时间最新的记录。历史聚合也使用此规则，忽略链接中的显示名称、查询参数顺序，以及来源 ID、延迟、状态等检测信息；不同凭据或连接参数仍保留为独立节点。已有历史批次无需删除，更新服务后聚合展示会按新规则合并。
 
@@ -190,17 +216,36 @@ Qilan 采集在入库前按分享链接的连接内容去重，跨分页重复�
 - TLS、UDP、Reality 是配置特性，不代表独立验证结果。
 - 服务检测关闭时不显示解锁筛选；启用后保留原始平台标签，空标签表示未返回解锁标签，不推断具体失败原因。
 - 未生成结果、零节点、无筛选匹配与读取错误分别展示；刷新失败保留上次已加载结果。
-- 订阅文件独立生成，可能落后于结果快照；下载菜单展示文件更新时间。聚合展示时下载仍为当前输出文件，不提供聚合订阅。
+- 订阅文件独立生成，可能落后于结果快照；当前 API 不提供订阅下载。
 
 ## 验证
 
 ```bash
-npm test
+npm run test:backend   # go vet + go test -race，含接口契约与排序回归
+npm test               # 归档 Node 实现的语义基准测试
 npm run build
 npm run test:e2e
-# 使用独立测试数据库验证 PostgreSQL（会创建并删除专用测试 schema）
-TEST_POSTGRES_URL=postgresql://user:password@localhost/test_db npm test
 ```
+
+SQLite 与 PostgreSQL 都通过数据库变更版本同步独立采集、巡检进程的写入。无变化时只读取版本；有变化时读取受影响批次及其完整 IPPure 结果集，同时同步退役与恢复。文件导入、缓存刷新与本进程写入分别串行化，避免旧数据覆盖新结果。
+
+Go 回归覆盖文件重写／替换、并发导入、跨进程同步、采集索引、Mihomo 实例配置与占用、巡检状态并发写入。PostgreSQL 集成测试默认跳过；显式设置 `NODE_EXPLORER_TEST_PG` 指向测试数据库后，`npm run test:backend` 会同时验证真实投影、凭据过滤与锁释放。测试为各用例创建独立 schema，测试账号需具备建 schema 权限；发布流程已启用该检查。
+
+接口契约测试（`backend/internal/api`）断言 `/api/results`、`/api/history`、`/api/health` 的完整 JSON 键集合——多出一个键（泄漏的投影标记、内部 ID）和少一个键同样是回归。
+
+需要逐接口核对 Go 与归档 Node 实现的输出时，用自带夹具起两个服务再比对：
+
+```bash
+python backend/tools/make-parity-fixture.py /tmp/parity/nodes.sqlite
+cp /tmp/parity/nodes.sqlite /tmp/parity/node.sqlite
+DATABASE_PATH=/tmp/parity/node.sqlite  API_PORT=3011 node legacy/node-server/index.js &
+DATABASE_PATH=/tmp/parity/nodes.sqlite API_PORT=3012 ./backend/node-explorer &
+python backend/tools/api-parity.py
+```
+
+两侧必须读取内容相同的数据库。脚本覆盖 27 种查询形态（分页、排序、各筛选、两种视图、各错误码），全部一致才算通过。
+
+> 节点及 IPPure 数据在 Go 中保留源 JSON 的字段存在性：缺失字段保持缺失，显式空字符串、空数组、空对象、`false`、`0` 和 `null` 在存储及 API 输出时保留，后续更新以当前字段值为准。公开 API 仍完全移除 `rawLink` 和 `rawConfig`，快照指纹也排除这两个凭据字段。此前已经被省略且写入数据库的零值无法从现有记录推断恢复，需要从仍保留这些字段的原始源数据重新导入。
 
 浏览器测试使用 Playwright。若本机没有 Chromium，可执行 `npx playwright install chromium`；也可通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定现有浏览器路径。测试覆盖真实结果读取、筛选、分页、下载、异常状态、服务解锁和移动布局。
 
@@ -208,7 +253,7 @@ shadcn/ui 组件源码位于 `src/components/ui`，来源于官方 `new-york-v4`
 
 首页通过 `GET /api/results?view=aggregate&page=1&limit=50` 按页获取节点，翻页、更改每页数量、筛选和排序会重新请求接口。PostgreSQL 模式直接查询持久化的 `node_explorer_current_nodes` 节点表，在 SQL 中执行筛选、排序、计数和 `LIMIT/OFFSET`，仅读取当前页的节点内容，不在请求中扫描历史快照或等待文件同步。`total` 为筛选后的数量，`totalNodes` 为聚合总数，`page`、`limit` 为实际页码及每页数量，`summary` 和 `facets` 为全量统计和筛选选项。页码从 1 开始，`limit` 范围为 1–200，超出最后一页会回到最后一页。SQLite 模式仍使用原有聚合及分页逻辑。
 
-PostgreSQL 启动时自动创建查询表、索引及变更触发器，首次构建从现有历史数据回填，不删除快照、完整源配置或 IPPure 记录。后台工作线程每 5 秒检查来源文件和数据库变更；文件未变化时跳过解析和导入，新批次、IPPure 更新、节点退役或恢复会触发查询表刷新，包括其他采集或巡检进程写入的数据。工作线程缓存已解析批次及连接身份，后续仅重读发生变更的批次，并仅写入变化的查询表记录；排序位置和全量统计随刷新一起原子提交。刷新期间继续提供上一份完整结果，数据库故障时保留上一份结果并重试，因此页面数据相对数据库有一个后台刷新周期及计算时间的延迟。中文自然排序和缺失值末尾排序在构建时生成排序序号，避免数据库排序规则改变分页结果。完整聚合及历史候选扫描也在工作线程中执行，避免后台采集阻塞 HTTP 线程。
+PostgreSQL 启动时自动创建查询表、索引及变更触发器，首次构建从现有历史数据回填，不删除快照、完整源配置或 IPPure 记录。后端在进程内维护已解码批次缓存，来源文件变化或数据库出现新批次、IPPure 更新、节点退役或恢复时才刷新查询表，包括其他采集或巡检进程写入的数据。后续仅重读发生变更的批次，并仅写入变化的查询表记录；排序位置和全量统计随刷新一起原子提交。刷新期间继续提供上一份完整结果，数据库故障时保留上一份结果并重试，因此页面数据相对数据库有一个刷新周期及计算时间的延迟。中文自然排序（ICU 等价的数字感知排序）和缺失值末尾排序在构建时生成排序序号，避免数据库排序规则改变分页结果。排序规则变化时通过投影内的 `ranking` 版本标记自动触发一次性重建。完整聚合及历史候选扫描同样在进程内执行，不阻塞 HTTP 请求。
 
 筛选参数包括 `q`（名称、服务器、SNI、国家及中文地区名）、`country`、`type`、`network`、`features`、`media`（多选值用逗号分隔）及 `minSpeed`（MB/s）；排序使用 `sort` 和 `direction=asc|desc`。返回的 `batchCount` 为聚合批次数，每个节点带有 `checkedAt`、`snapshotId` 及检测功能状态。不传分页参数的 `/api/results?view=aggregate` 保留原有完整结果格式。原有 `/api/results`（最新批次）、`/api/results?snapshot=<id>` 和 `/api/history` 接口仍可使用。
 

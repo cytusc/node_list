@@ -8,5 +8,7 @@
 !src/**
 !public/
 !public/**
-!server/
-!server/**
+!backend/
+!backend/**
+!deploy/
+!deploy/legacy-node-launcher.sh
