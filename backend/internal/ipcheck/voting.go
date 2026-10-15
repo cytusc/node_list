@@ -2,7 +2,7 @@ package ipcheck
 
 import "time"
 
-const VotingVersion = 5
+const VotingVersion = 6
 
 type Vote struct {
 	Provider string   `json:"provider"`
@@ -32,7 +32,7 @@ type Result struct {
 func Score(ip string, evidence []Evidence, now time.Time) Result {
 	r := Result{Version: VotingVersion, IP: ip, CheckedAt: now.UTC().Format(time.RFC3339), State: "unknown"}
 	providers := []string{"ippure", "ipinfo", "ip-api"}
-	for _, optional := range []string{"ipregistry", "abuseipdb"} {
+	for _, optional := range []string{"ipregistry", "abuseipdb", "ipapi", "ip2location"} {
 		for _, e := range evidence {
 			if e.Provider == optional {
 				providers = append(providers, optional)

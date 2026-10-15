@@ -275,7 +275,7 @@ IP 类型属性按 [xykt/IPQuality](https://github.com/xykt/IPQuality/blob/main/
 
 每家来源的使用类型和公司类型分别保存在 `classification.types`，节点详情按数据库逐项展示，列表优先显示各来源的使用类型，缺少时使用公司类型，相同标签去重。不同来源的判断会同时保留；已识别的商业、教育等用途不再附加“性质未知/性质争议”。所有来源均无类型信息时显示“类型未知”。住宅恢复使用的多数判定与页面属性分别处理，至少两家明确支持 ISP 且住宅票多于机房票才允许继续恢复流程。
 
-默认查询 IPPure、IPinfo、IP-API、IPregistry 和 AbuseIPDB，无需额外配置这两家来源的密钥。IPinfo 使用脚本同款公开 widget 接口；IPregistry 按脚本从 `https://ipregistry.co` 提取公开演示 Key，无法提取时使用脚本的演示默认值，并带官网 Origin/Referer 查询 `api.ipregistry.co`；AbuseIPDB 使用脚本的 `https://ipinfo.check.place/{IP}?db=abuseipdb` 转发入口。演示 Key 获取结果会缓存，避免每个 IP 重复抓取官网。设置 `IPINFO_TOKEN`、`IPREGISTRY_API_KEY`、`ABUSEIPDB_API_KEY` 时优先使用对应个人凭据和官方接口，Compose 采集和巡检容器均会接收这些配置。公开入口限流、失败或缺少字段时按未知处理。
+默认查询 7 家来源：IPPure、IPinfo、IP-API（ip-api.com）、IPregistry、AbuseIPDB、ipapi.is 和 IP2Location。脚本“IP 类型属性”的 5 家来源均已接入；IP-API 与 ipapi.is 是独立服务。ipapi.is 和 IP2Location 分别复用脚本的 `https://ipinfo.check.place/{IP}?db=ipapi` 与 `?db=ip2location`，按 `asn.type`/`company.type` 和 `usage_type`/`as_info.as_usage_type` 分别保存使用类型与公司类型，无需额外密钥。IPinfo 使用脚本同款公开 widget 接口；IPregistry 按脚本从 `https://ipregistry.co` 提取公开演示 Key，无法提取时使用脚本的演示默认值，并带官网 Origin/Referer 查询 `api.ipregistry.co`；AbuseIPDB 使用脚本的 `https://ipinfo.check.place/{IP}?db=abuseipdb` 转发入口。演示 Key 获取结果会缓存，避免每个 IP 重复抓取官网。设置 `IPINFO_TOKEN`、`IPREGISTRY_API_KEY`、`ABUSEIPDB_API_KEY` 时优先使用对应个人凭据和官方接口，Compose 采集和巡检容器均会接收这些配置。公开入口限流、失败或缺少字段时按未知处理。
 
 查询结果保持原有展示格式：ASN 编号和组织、IP 来源、IP 属性、IPPure 系数及文字等级、人机流量比。没有 ASN 流量统计时显示“统计数据不足”，系数越低越纯净。出口探测额外支持 Cloudflare `/cdn-cgi/trace`，记录实际返回地址的查询服务，备用服务的结果不会标为 IP.SB。所有 IPv4 探测失败但取得 IPv6 时，保留该 IPv6 并显示“仅 IPv6，暂无评分”；已获取出口但风险接口失败时显示“风险查询失败”，没有地址时显示“出口探测失败”。IPv6 不会发送到仅支持 IPv4 的风险评分接口，也不会因此被判定为失效节点。
 

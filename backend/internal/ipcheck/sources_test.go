@@ -108,15 +108,17 @@ func TestNetworkTypeSourcesUseConfiguredCredentialsAndPublicDefaults(t *testing.
 		case "ipregistry.co":
 			body = `<script apiKey="publicfixture"></script>`
 		case "ipinfo.check.place":
-			if r.URL.Path != "/8.8.8.8" || r.URL.Query().Get("db") != "abuseipdb" || r.Header.Get("Key") != "" {
+			if r.URL.Path != "/8.8.8.8" || (r.URL.Query().Get("db") != "abuseipdb" && r.URL.Query().Get("db") != "ipapi" && r.URL.Query().Get("db") != "ip2location") || r.Header.Get("Key") != "" {
 				t.Fatal("public AbuseIPDB should use the script's endpoint without personal credentials")
 			}
-			body = `{"data":{"ipAddress":"8.8.8.8","usageType":"Commercial"}}`
+			if r.URL.Query().Get("db") == "abuseipdb" {
+				body = `{"data":{"ipAddress":"8.8.8.8","usageType":"Commercial"}}`
+			}
 		}
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
 	evidence := c.Lookup(context.Background(), "8.8.8.8")
-	if len(evidence) != 4 || evidence[2].ASN != "15169" {
+	if len(evidence) != 6 || evidence[2].ASN != "15169" {
 		t.Fatalf("optional sources not decoded: %+v", evidence)
 	}
 	r := Score("8.8.8.8", evidence, time.Now())
@@ -127,7 +129,7 @@ func TestNetworkTypeSourcesUseConfiguredCredentialsAndPublicDefaults(t *testing.
 	public.HTTP = c.HTTP
 	publicEvidence := public.Lookup(context.Background(), "8.8.8.8")
 	public.Lookup(context.Background(), "8.8.8.8")
-	if calls["ipregistry.co"] != 1 || calls["api.ipregistry.co"] != 2 || calls["ipinfo.check.place"] != 1 || calls["api.abuseipdb.com"] != 1 {
+	if calls["ipregistry.co"] != 1 || calls["api.ipregistry.co"] != 2 || calls["ipinfo.check.place"] != 5 || calls["api.abuseipdb.com"] != 1 {
 		t.Fatalf("public lookups should use the script's endpoints and cache results: %v", calls)
 	}
 	if got := strings.Join(Score("8.8.8.8", publicEvidence, time.Now()).Attributes(nil), ","); got != "类型待确认" {

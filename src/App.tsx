@@ -100,11 +100,17 @@ const ipTypeProviders: Record<string, string> = {
   "ip-api": "IP-API",
   ipregistry: "IPregistry",
   abuseipdb: "AbuseIPDB",
+  ipapi: "ipapi.is",
+  ip2location: "IP2Location",
 };
 
 function IPTypeDetails({ result }: { result?: IPPureResult }) {
-  const types = result?.classification?.types;
-  if (!types?.length) return null;
+  const classification = result?.classification;
+  if (!classification) return null;
+  const types = Object.keys(ipTypeProviders).map((provider) => ({
+    provider,
+    ...classification.types?.find((type) => type.provider === provider),
+  }));
   return (
     <section aria-label="IP 类型数据来源">
       <h3>IP 类型属性</h3>
@@ -129,7 +135,9 @@ function IPTypeDetails({ result }: { result?: IPPureResult }) {
                 <th scope="row" className="py-2 pr-3 font-medium">
                   {ipTypeProviders[type.provider] || type.provider}
                 </th>
-                <td className="py-2 pr-3">{type.usageType || "—"}</td>
+                <td className="py-2 pr-3">
+                  {type.usageType || (type.companyType ? "—" : "未取得有效类型")}
+                </td>
                 <td className="py-2">{type.companyType || "—"}</td>
               </tr>
             ))}
@@ -137,7 +145,7 @@ function IPTypeDetails({ result }: { result?: IPPureResult }) {
         </table>
       </div>
       <p className="detail-note">
-        各数据库独立判断使用类型和公司类型；来源不一致时保留各自结果。
+        各数据库独立判断使用类型和公司类型；来源不一致时保留各自结果。未取得有效类型表示尚未采集、请求失败或未返回类型，不参与汇总判断。
       </p>
     </section>
   );
@@ -154,7 +162,7 @@ function IPPureMetric({
     const sources = result.classification.types
       ?.map(
         (type) =>
-          `${ipTypeProviders[type.provider] || type.provider}：使用类型 ${type.usageType || "—"}；公司类型 ${type.companyType || "—"}`,
+          `${ipTypeProviders[type.provider] || type.provider}：使用类型 ${type.usageType || (type.companyType ? "—" : "未取得有效类型")}；公司类型 ${type.companyType || "—"}`,
       )
       .join("\n");
     return (
