@@ -26,15 +26,6 @@ import (
 // handled explicitly, so the wording must match at both retire call sites.
 const RetireRestoreReason = "Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed"
 
-// Departure thresholds: a node absent from every snapshot for longer than its
-// source cadence tolerates has left its panel and must not occupy the results
-// view or the probe queue forever. Qilan imports every 15 minutes, subs-check
-// roughly every two hours.
-const (
-	DepartedQilan = 45 * time.Minute
-	DepartedSubs  = 4 * time.Hour
-)
-
 // SnapshotRow is one persisted detection batch.
 type SnapshotRow struct {
 	ID         int
@@ -116,8 +107,6 @@ type batchedSnapshot struct {
 	MediaCheck bool
 	Nodes      []domain.Node
 	Identities []string
-	// Provenance indicates a Qilan round; cadence decides the departure window.
-	Qilan bool
 }
 
 // Store is the read model shared by the API and the collectors.
@@ -243,7 +232,6 @@ func (s *Store) loadBatch(row SnapshotRow) (*batchedSnapshot, error) {
 		MediaCheck: snap.MediaCheck,
 		Nodes:      snap.Nodes,
 		Identities: identities,
-		Qilan:      len(snap.Nodes) > 0 && snap.Nodes[0].SubTag == "Qilan",
 	}, nil
 }
 
@@ -571,61 +559,6 @@ func batchTime(b *batchedSnapshot) int64 {
 		return t.UnixMilli()
 	}
 	return 0
-}
-
-// FilterDepartedNodes hides identities absent from every snapshot for longer
-// than their source cadence tolerates. A returning node reappears on its next
-// import, so this is a display and queue filter, never a retirement.
-func (s *Store) FilterDepartedNodes(nodes []domain.Node) []domain.Node {
-	s.mu.RLock()
-	batches := make([]*batchedSnapshot, 0, len(s.order))
-	for _, id := range s.order {
-		batches = append(batches, s.batches[id])
-	}
-	s.mu.RUnlock()
-	if len(batches) == 0 {
-		return nodes
-	}
-	lastSeen := make(map[string]int64, 4096)
-	qilan := make(map[string]bool, 4096)
-	var reference int64 = -1
-	for _, batch := range batches {
-		at, err := time.Parse(time.RFC3339, batch.ImportedAt)
-		if err != nil {
-			continue
-		}
-		ms := at.UnixMilli()
-		if ms > reference {
-			reference = ms
-		}
-		for _, identity := range batch.Identities {
-			if prev, ok := lastSeen[identity]; ok && prev >= ms {
-				continue
-			}
-			lastSeen[identity] = ms
-			qilan[identity] = batch.Qilan
-		}
-	}
-	if reference < 0 {
-		return nodes
-	}
-	out := nodes[:0:0]
-	for _, node := range nodes {
-		identity := domain.AggregateIdentity(node)
-		seen, ok := lastSeen[identity]
-		if !ok {
-			out = append(out, node)
-			continue
-		}
-		limit := DepartedSubs
-		if qilan[identity] {
-			limit = DepartedQilan
-		}
-		if reference-seen <= int64(limit/time.Millisecond) {
-			out = append(out, node)
-		}
-	}
-	return out
 }
 
 // Candidate is one node still worth probing.
