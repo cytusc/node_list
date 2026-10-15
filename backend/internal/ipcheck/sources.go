@@ -165,7 +165,11 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 	if provider == "ipinfo" && c.IPinfoToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.IPinfoToken)
 	}
-	req.Header.Set("User-Agent", browserUserAgent)
+	// Match IPQuality: lookup APIs use curl; IPregistry's demo uses a browser.
+	req.Header.Set("User-Agent", "curl/8.10.1")
+	if provider == "ipregistry" {
+		req.Header.Set("User-Agent", browserUserAgent)
+	}
 	if provider == "ipregistry" && c.IPRegistryKey == "" {
 		req.Header.Set("Origin", "https://ipregistry.co")
 		req.Header.Set("Referer", "https://ipregistry.co/")
