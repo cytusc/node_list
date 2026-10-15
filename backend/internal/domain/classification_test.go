@@ -16,7 +16,7 @@ func TestClassificationSurvivesRiskFailureAndJSON(t *testing.T) {
 	if err = json.Unmarshal(raw, &restored); err != nil {
 		t.Fatal(err)
 	}
-	if restored.IPPure.Classification == nil || restored.IPPure.Classification.ResidentialVotes != 2 {
+	if restored.IPPure.Classification == nil || restored.IPPure.Classification.State != "residential" {
 		t.Fatalf("classification lost: %s", raw)
 	}
 	if SortValue(restored, "ipAttributes") != "住宅IP" {

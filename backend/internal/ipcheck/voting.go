@@ -11,17 +11,18 @@ type Vote struct {
 	Evidence Evidence `json:"evidence"`
 }
 
+// Result keeps voting details in memory only; JSON stores the final classification.
 type Result struct {
 	Version          int    `json:"version"`
 	IP               string `json:"ip"`
 	CheckedAt        string `json:"checkedAt"`
 	State            string `json:"state"`
-	Score            int    `json:"score"`
-	ResidentialVotes int    `json:"residentialVotes"`
-	DatacenterVotes  int    `json:"datacenterVotes"`
-	UnknownVotes     int    `json:"unknownVotes"`
-	HasDisagreement  bool   `json:"hasDisagreement"`
-	Votes            []Vote `json:"votes"`
+	Score            int    `json:"-"`
+	ResidentialVotes int    `json:"-"`
+	DatacenterVotes  int    `json:"-"`
+	UnknownVotes     int    `json:"-"`
+	HasDisagreement  bool   `json:"-"`
+	Votes            []Vote `json:"-"`
 }
 
 // Score gives each named service at most one vote for this exact IP. Unknown

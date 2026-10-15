@@ -3,7 +3,6 @@ package ipcheck
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	neturl "net/url"
@@ -208,8 +207,4 @@ func ParseIPinfo(raw []byte, ip, checkedAt string) Evidence {
 		e.Outcome = "supports-residential"
 	}
 	return e
-}
-
-func (r Result) String() string {
-	return fmt.Sprintf("%s score=%d residential=%d datacenter=%d unknown=%d", r.State, r.Score, r.ResidentialVotes, r.DatacenterVotes, r.UnknownVotes)
 }

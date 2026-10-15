@@ -20,7 +20,6 @@ import (
 
 	"github.com/cytusc/node_list/backend/internal/collector"
 	"github.com/cytusc/node_list/backend/internal/domain"
-	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/cytusc/node_list/backend/internal/transport"
 	"github.com/jackc/pgx/v5"
 )
@@ -41,7 +40,6 @@ type check struct {
 }
 
 type record struct {
-	Voting               *ipcheck.Result         `json:"voting,omitempty"`
 	RecoveryEligible     bool                    `json:"recoveryEligible"`
 	ID                   string                  `json:"id"`
 	SourceSnapshotID     int                     `json:"sourceSnapshotId"`
