@@ -171,7 +171,7 @@ func run() error {
 		for _, t := range result.Types {
 			available[t.Provider] = true
 		}
-		for _, provider := range []string{"ippure", "ipinfo", "ip-api", "ipregistry", "abuseipdb"} {
+		for _, provider := range []string{"ippure", "ipinfo", "ip-api", "ipregistry", "abuseipdb", "ipapi", "ip2location"} {
 			if !available[provider] {
 				e.Unavailable = append(e.Unavailable, provider)
 			}

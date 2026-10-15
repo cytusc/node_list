@@ -50,6 +50,8 @@ func (c *Client) Lookup(ctx context.Context, ip string) []Evidence {
 		c.lookup(ctx, "ip-api", ip),
 		c.lookup(ctx, "ipregistry", ip),
 		c.lookup(ctx, "abuseipdb", ip),
+		c.lookup(ctx, "ipapi", ip),
+		c.lookup(ctx, "ip2location", ip),
 	}
 }
 
@@ -144,6 +146,9 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 			url = "https://api.abuseipdb.com/api/v2/check?ipAddress=" + neturl.QueryEscape(ip) + "&maxAgeInDays=90"
 		}
 	}
+	if provider == "ipapi" || provider == "ip2location" {
+		url = "https://ipinfo.check.place/" + ip + "?db=" + provider
+	}
 	if provider == "ip-api" {
 		url = "http://ip-api.com/json/" + ip + "?fields=status,message,query,as,hosting,proxy,mobile"
 		if c.IPAPIKey != "" {
@@ -204,6 +209,10 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 		e = ParseIPAPI(raw, ip, e.CheckedAt)
 	} else if provider == "ipregistry" {
 		e = ParseIPRegistry(raw, ip, e.CheckedAt)
+	} else if provider == "ipapi" {
+		e = ParseIPAPIIs(raw, ip, e.CheckedAt)
+	} else if provider == "ip2location" {
+		e = ParseIP2Location(raw, ip, e.CheckedAt)
 	} else {
 		e = ParseAbuseIPDB(raw, ip, e.CheckedAt)
 	}
@@ -359,6 +368,55 @@ func ParseIPinfo(raw []byte, ip, checkedAt string) Evidence {
 	if d.Hosting != nil && *d.Hosting {
 		e.Hosting = d.Hosting
 	}
+	e.classifyUsage()
+	return e
+}
+
+// ParseIPAPIIs uses IPQuality's db_ipapi fields, independently of ip-api.com.
+func ParseIPAPIIs(raw []byte, ip, checkedAt string) Evidence {
+	e := Evidence{Provider: "ipapi", IP: ip, CheckedAt: checkedAt, Outcome: "unknown"}
+	var d struct {
+		IP  string `json:"ip"`
+		ASN struct {
+			Type string `json:"type"`
+		} `json:"asn"`
+		Company struct {
+			Type string `json:"type"`
+		} `json:"company"`
+		Hosting *bool `json:"is_datacenter"`
+		Proxy   bool  `json:"is_proxy"`
+		VPN     bool  `json:"is_vpn"`
+	}
+	if json.Unmarshal(raw, &d) != nil || d.IP != ip {
+		return e
+	}
+	e.UsageType, e.CompanyType = d.ASN.Type, d.Company.Type
+	e.Hosting, e.Proxy, e.VPN = d.Hosting, d.Proxy, d.VPN
+	e.classifyUsage()
+	return e
+}
+
+// ParseIP2Location follows db_ip2location's usage_type/as_info.as_usage_type.
+// networkType handles the first code of compound values such as ISP/MOB.
+func ParseIP2Location(raw []byte, ip, checkedAt string) Evidence {
+	e := Evidence{Provider: "ip2location", IP: ip, CheckedAt: checkedAt, Outcome: "unknown"}
+	var d struct {
+		IP        string `json:"ip"`
+		UsageType string `json:"usage_type"`
+		ASInfo    struct {
+			UsageType string `json:"as_usage_type"`
+		} `json:"as_info"`
+		Proxy struct {
+			Hosting *bool `json:"is_data_center"`
+			VPN     bool  `json:"is_vpn"`
+		} `json:"proxy"`
+		IsProxy bool `json:"is_proxy"`
+	}
+	if json.Unmarshal(raw, &d) != nil || d.IP != ip {
+		return e
+	}
+	e.UsageType, e.CompanyType = d.UsageType, d.ASInfo.UsageType
+	e.Hosting, e.Proxy, e.VPN = d.Proxy.Hosting, d.IsProxy, d.Proxy.VPN
 	e.classifyUsage()
 	return e
 }
