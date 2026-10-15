@@ -582,16 +582,21 @@ type Result struct {
 // recomputed even when the source revision is otherwise up to date.
 const rankingRevision = "icu-numeric-1"
 
+// nodePayloadRevision invalidates persisted node JSON when serialization
+// changes, even when no snapshot/enrichment has been updated since deployment.
+const nodePayloadRevision = "json-presence-1"
+
 // storedMetadata is the metadata column layout. The API must not see the
 // ranking marker, so it lives in a wrapper rather than on domain.Metadata,
 // which is embedded directly in the JSON response.
 type storedMetadata struct {
 	domain.Metadata
-	Ranking string `json:"ranking,omitempty"`
+	Ranking        string `json:"ranking,omitempty"`
+	PayloadVersion string `json:"payloadVersion,omitempty"`
 }
 
 func marshalStoredMetadata(m domain.Metadata) ([]byte, error) {
-	return json.Marshal(storedMetadata{Metadata: m, Ranking: rankingRevision})
+	return json.Marshal(storedMetadata{Metadata: m, Ranking: rankingRevision, PayloadVersion: nodePayloadRevision})
 }
 
 func unmarshalStoredMetadata(raw []byte) (domain.Metadata, error) {

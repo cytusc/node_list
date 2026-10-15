@@ -582,11 +582,11 @@ func (p *Projector) initSchema(ctx context.Context) error {
       AND metadata->'facets' ? 'ipAttributes')`); err != nil {
 		return err
 	}
-	// Rebuild once when the persisted rank_* columns were produced with a
-	// different collation. A NULL metadata column means the projection has
-	// never been built by this implementation either.
+	// Rebuild when either the collation or node JSON representation changes.
+	// Source revisions alone cannot detect a binary serialization upgrade.
 	if _, err := tx.Exec(ctx, `UPDATE `+tableState+` SET built_revision = -1
-    WHERE coalesce(metadata->>'ranking', '') <> $1`, rankingRevision); err != nil {
+    WHERE coalesce(metadata->>'ranking', '') <> $1
+      OR coalesce(metadata->>'payloadVersion', '') <> $2`, rankingRevision, nodePayloadRevision); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
