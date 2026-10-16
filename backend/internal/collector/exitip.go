@@ -376,6 +376,14 @@ type IPPureClient struct {
 	timeOffset int64
 }
 
+type ippureHTTPError struct {
+	status int
+}
+
+func (e *ippureHTTPError) Error() string {
+	return fmt.Sprintf("IPPure 接口访问失败 (HTTP %d)", e.status)
+}
+
 // NewIPPureClient builds a signing client bound to one node transport.
 func NewIPPureClient(client *http.Client, origin string, timeout time.Duration) *IPPureClient {
 	if origin == "" {
@@ -451,7 +459,7 @@ func (c *IPPureClient) get(ctx context.Context, path string) (map[string]any, er
 		}
 		if status < 200 || status >= 300 {
 			drainAndClose(response)
-			return nil, fmt.Errorf("IPPure 接口访问失败 (HTTP %d)", status)
+			return nil, &ippureHTTPError{status: status}
 		}
 		var payload struct {
 			OK   bool           `json:"ok"`
@@ -589,7 +597,14 @@ func QueryIPPure(ctx context.Context, c *IPPureClient, target string, asnCache *
 	var bot map[string]any
 	var botErr error
 	loadBot := func(ctx context.Context) (map[string]any, error) {
-		return c.get(ctx, fmt.Sprintf("/api/info/asn/botclass/%d", int64(asnNumber)))
+		statistics, err := c.get(ctx, fmt.Sprintf("/api/info/asn/botclass/%d", int64(asnNumber)))
+		var httpErr *ippureHTTPError
+		if errors.As(err, &httpErr) && httpErr.status == http.StatusNotFound {
+			// A missing ASN entry is a valid no-statistics result. Cache it so
+			// every IP on that ASN does not repeat the same 404 lookup.
+			return map[string]any{}, nil
+		}
+		return statistics, err
 	}
 	if asnCache != nil {
 		bot, botErr = asnCache.Load(ctx, int64(asnNumber), loadBot)
@@ -606,7 +621,12 @@ func QueryIPPure(ctx context.Context, c *IPPureClient, target string, asnCache *
 	}
 	switch {
 	case botErr != nil:
-		result.TrafficRatioStatus = "query-failed"
+		var httpErr *ippureHTTPError
+		if errors.As(botErr, &httpErr) && httpErr.status == http.StatusNotFound {
+			result.TrafficRatioStatus = "no-data"
+		} else {
+			result.TrafficRatioStatus = "query-failed"
+		}
 	case result.HumanPercent != nil && result.BotPercent != nil:
 		result.TrafficRatioStatus = "available"
 	default:
