@@ -35,7 +35,7 @@ func TestRuntimeSchemaDoesNotCreateLegacyProjection(t *testing.T) {
 	var current *string
 	var applied bool
 	if err := a.pool.QueryRow(ctx, `SELECT to_regclass('node_explorer_current_nodes')::text,
-	 EXISTS(SELECT 1 FROM node_explorer_service_migrations WHERE version=2)`).Scan(&current, &applied); err != nil {
+	 EXISTS(SELECT 1 FROM node_explorer_service_migrations WHERE version=3)`).Scan(&current, &applied); err != nil {
 		t.Fatal(err)
 	}
 	if current != nil || !applied {
