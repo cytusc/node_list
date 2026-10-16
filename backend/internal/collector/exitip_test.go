@@ -55,13 +55,15 @@ func TestQueryIPPureFetchesStatisticsWithoutCache(t *testing.T) {
 		name       string
 		cache      *ASNCache
 		botPayload string
+		botStatus  int
 		wantStatus string
 		wantCalls  int
 	}{
-		{"without cache", nil, `{"ok":true,"data":{"human":74.0479,"bot":25.9521}}`, "available", 2},
-		{"shared cache", NewASNCache(), `{"ok":true,"data":{"human":74.0479,"bot":25.9521}}`, "available", 1},
-		{"request failed", nil, "", "query-failed", 2},
-		{"statistics absent", nil, `{"ok":true,"data":{}}`, "no-data", 2},
+		{"without cache", nil, `{"ok":true,"data":{"human":74.0479,"bot":25.9521}}`, 0, "available", 2},
+		{"shared cache", NewASNCache(), `{"ok":true,"data":{"human":74.0479,"bot":25.9521}}`, 0, "available", 1},
+		{"not found means no statistics", NewASNCache(), "", http.StatusNotFound, "no-data", 1},
+		{"other http error", nil, "", http.StatusUnauthorized, "query-failed", 2},
+		{"empty successful response", nil, `{"ok":true,"data":{}}`, 0, "no-data", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			botCalls := 0
@@ -75,7 +77,7 @@ func TestQueryIPPureFetchesStatisticsWithoutCache(t *testing.T) {
 				case "/api/info/asn/botclass/3462":
 					botCalls++
 					if tc.botPayload == "" {
-						http.Error(w, "unavailable", http.StatusNotFound)
+						http.Error(w, "unavailable", tc.botStatus)
 						return
 					}
 					fmt.Fprint(w, tc.botPayload)
