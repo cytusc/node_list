@@ -312,6 +312,52 @@ func TestIndependentCadenceAndManualRetirementScheduling(t *testing.T) {
 	}
 }
 
+func TestSchedulerBackfillsMissingTrafficRatioWithCooldown(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		age       time.Duration
+		wantQueue bool
+	}{
+		{name: "stale ratio", age: 25 * time.Hour, wantQueue: true},
+		{name: "recent attempt", age: time.Hour, wantQueue: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setup(t)
+			ctx := context.Background()
+			f.evidence(t, "ratio-backfill")
+			f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=jsonb_set(payload,'{checkedAt}',to_jsonb($1::text)) WHERE ip='8.8.4.4'`, time.Now().Add(-tc.age).UTC().Format(time.RFC3339Nano))
+			if err := f.repo.Schedule(ctx, KindRisk, "8.8.4.4", Payload{IP: "8.8.4.4", Identity: f.id}, 0, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			f.exec(t, `UPDATE node_explorer_work SET state='done' WHERE kind=$1 AND key='8.8.4.4'`, KindRisk)
+			f.runner.Config.Role = "ip"
+			if err := f.runner.schedule(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var state string
+			var generation int64
+			if err := f.repo.Pool.QueryRow(ctx, `SELECT state,generation FROM node_explorer_work WHERE kind=$1 AND key='8.8.4.4'`, KindRisk).Scan(&state, &generation); err != nil {
+				t.Fatal(err)
+			}
+			if got := state == "queued"; got != tc.wantQueue {
+				t.Fatalf("queued=%v, want %v (state=%s)", got, tc.wantQueue, state)
+			}
+			if tc.wantQueue {
+				if err := f.runner.schedule(ctx); err != nil {
+					t.Fatal(err)
+				}
+				var repeatedGeneration int64
+				if err := f.repo.Pool.QueryRow(ctx, `SELECT generation FROM node_explorer_work WHERE kind=$1 AND key='8.8.4.4'`, KindRisk).Scan(&repeatedGeneration); err != nil {
+					t.Fatal(err)
+				}
+				if repeatedGeneration != generation {
+					t.Fatalf("queued backfill was regenerated: %d -> %d", generation, repeatedGeneration)
+				}
+			}
+		})
+	}
+}
+
 func TestRedisLostDeliveryIsRepublishedFromPostgres(t *testing.T) {
 	address := os.Getenv("NODE_EXPLORER_TEST_REDIS")
 	if address == "" {

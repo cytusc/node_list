@@ -102,6 +102,11 @@ func (r *Runner) schedule(ctx context.Context) error {
 			if err = schedule(ctx, tx, KindExit, i.id, p, priority, nextDue(exit.CheckedAt, interval)); err != nil {
 				return err
 			}
+			if exit.IP != "" {
+				if err = scheduleMissingTrafficRatio(ctx, tx, exit.IP, i.id, priority, attr); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return tx.Commit(ctx)
@@ -157,6 +162,27 @@ func scheduleIP(ctx context.Context, tx pgx.Tx, ip, id string, priority int) err
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func scheduleMissingTrafficRatio(ctx context.Context, tx pgx.Tx, ip, id string, priority int, attr domain.IPPureResult) error {
+	if attr.Status == "success" && attr.HumanPercent != nil && attr.BotPercent != nil {
+		return nil
+	}
+	if checkedAt, err := time.Parse(time.RFC3339Nano, attr.CheckedAt); err == nil && time.Since(checkedAt) < 24*time.Hour {
+		return nil
+	}
+	p := Payload{IP: ip, Identity: id}
+	if err := once(ctx, tx, KindRisk, ip, p, priority); err != nil {
+		return err
+	}
+	if err := scheduleCompletedIP(ctx, tx, KindRisk, ip, p, priority); err != nil {
+		return err
+	}
+	if priority > 0 {
+		_, err := tx.Exec(ctx, `UPDATE node_explorer_work SET priority=1 WHERE kind=$1 AND key=$2 AND state='queued' AND priority=0`, KindRisk, ip)
+		return err
 	}
 	return nil
 }
