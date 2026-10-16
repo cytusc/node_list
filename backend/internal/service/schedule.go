@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+const trafficRatioRetryInterval = 6 * time.Hour
+
 func once(ctx context.Context, tx pgx.Tx, kind, key string, p Payload, priority int) error {
 	b, e := json.Marshal(p)
 	if e != nil {
@@ -170,7 +172,7 @@ func scheduleMissingTrafficRatio(ctx context.Context, tx pgx.Tx, ip, id string, 
 	if attr.Status == "success" && attr.HumanPercent != nil && attr.BotPercent != nil {
 		return nil
 	}
-	if checkedAt, err := time.Parse(time.RFC3339Nano, attr.CheckedAt); err == nil && time.Since(checkedAt) < 24*time.Hour {
+	if checkedAt, err := time.Parse(time.RFC3339Nano, attr.CheckedAt); err == nil && time.Since(checkedAt) < trafficRatioRetryInterval {
 		return nil
 	}
 	p := Payload{IP: ip, Identity: id}
@@ -178,6 +180,9 @@ func scheduleMissingTrafficRatio(ctx context.Context, tx pgx.Tx, ip, id string, 
 		return err
 	}
 	if err := scheduleCompletedIP(ctx, tx, KindRisk, ip, p, priority); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE node_explorer_work SET due_at=now() WHERE kind=$1 AND key=$2 AND state='queued' AND due_at>now()`, KindRisk, ip); err != nil {
 		return err
 	}
 	if priority > 0 {

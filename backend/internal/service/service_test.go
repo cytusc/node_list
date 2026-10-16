@@ -317,9 +317,11 @@ func TestSchedulerBackfillsMissingTrafficRatioWithCooldown(t *testing.T) {
 		name      string
 		age       time.Duration
 		wantQueue bool
+		queued    bool
 	}{
-		{name: "stale ratio", age: 25 * time.Hour, wantQueue: true},
+		{name: "stale ratio", age: 7 * time.Hour, wantQueue: true},
 		{name: "recent attempt", age: time.Hour, wantQueue: false},
+		{name: "advance queued retry", age: 7 * time.Hour, wantQueue: true, queued: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := setup(t)
@@ -329,7 +331,11 @@ func TestSchedulerBackfillsMissingTrafficRatioWithCooldown(t *testing.T) {
 			if err := f.repo.Schedule(ctx, KindRisk, "8.8.4.4", Payload{IP: "8.8.4.4", Identity: f.id}, 0, time.Now()); err != nil {
 				t.Fatal(err)
 			}
-			f.exec(t, `UPDATE node_explorer_work SET state='done' WHERE kind=$1 AND key='8.8.4.4'`, KindRisk)
+			initialWorkState := "done"
+			if tc.queued {
+				initialWorkState = "queued"
+			}
+			f.exec(t, `UPDATE node_explorer_work SET state=$2,due_at=CASE WHEN $2='queued' THEN now()+interval '24 hours' ELSE due_at END WHERE kind=$1 AND key='8.8.4.4'`, KindRisk, initialWorkState)
 			f.runner.Config.Role = "ip"
 			if err := f.runner.schedule(ctx); err != nil {
 				t.Fatal(err)
@@ -343,6 +349,13 @@ func TestSchedulerBackfillsMissingTrafficRatioWithCooldown(t *testing.T) {
 				t.Fatalf("queued=%v, want %v (state=%s)", got, tc.wantQueue, state)
 			}
 			if tc.wantQueue {
+				var due time.Time
+				if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at FROM node_explorer_work WHERE kind=$1 AND key='8.8.4.4'`, KindRisk).Scan(&due); err != nil {
+					t.Fatal(err)
+				}
+				if time.Until(due) > time.Minute {
+					t.Fatalf("backfill due remains in the future: %v", due)
+				}
 				if err := f.runner.schedule(ctx); err != nil {
 					t.Fatal(err)
 				}

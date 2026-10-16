@@ -5,9 +5,50 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestASNCacheCoalescesConcurrentLoadsAndExpires(t *testing.T) {
+	cache := NewASNCacheWithTTL(10 * time.Millisecond)
+	var calls int
+	var mu sync.Mutex
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 12 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			value, err := cache.Load(context.Background(), 3462, func(context.Context) (map[string]any, error) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				time.Sleep(10 * time.Millisecond)
+				return map[string]any{"human": float64(74)}, nil
+			})
+			if err != nil || value["human"] != float64(74) {
+				t.Errorf("load = %v, %v", value, err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if calls != 1 {
+		t.Fatalf("concurrent loads = %d, want 1", calls)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if _, err := cache.Load(context.Background(), 3462, func(context.Context) (map[string]any, error) {
+		calls++
+		return map[string]any{"human": float64(75)}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("loads after expiry = %d, want 2", calls)
+	}
+}
 
 func TestQueryIPPureFetchesStatisticsWithoutCache(t *testing.T) {
 	for _, tc := range []struct {
