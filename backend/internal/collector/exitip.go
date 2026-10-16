@@ -748,45 +748,65 @@ func isASCIILetters(s string) bool {
 type ASNCache struct {
 	mu      sync.Mutex
 	entries map[int64]*asnEntry
+	ttl     time.Duration
 }
 
 type asnEntry struct {
-	once   sync.Once
-	value  map[string]any
-	err    error
-	loaded bool
+	value    map[string]any
+	loadedAt time.Time
+	loading  chan struct{}
+	loaded   bool
 }
 
 // NewASNCache builds a cache. It is safe for concurrent use.
 func NewASNCache() *ASNCache {
-	return &ASNCache{entries: make(map[int64]*asnEntry, 512)}
+	return NewASNCacheWithTTL(0)
 }
 
-// Load returns the cached value, computing it once per ASN. Failures are not
-// cached, so a transient outage does not poison later rounds.
+// NewASNCacheWithTTL builds a cache that refreshes successful values after ttl.
+func NewASNCacheWithTTL(ttl time.Duration) *ASNCache {
+	return &ASNCache{entries: make(map[int64]*asnEntry, 512), ttl: ttl}
+}
+
+// Load returns a cached value, coalescing concurrent lookups for one ASN.
+// Failures are not cached, so a transient outage does not poison later rounds.
 func (c *ASNCache) Load(ctx context.Context, asn int64, compute func(context.Context) (map[string]any, error)) (map[string]any, error) {
-	c.mu.Lock()
-	entry, ok := c.entries[asn]
-	if !ok {
-		entry = &asnEntry{}
-		c.entries[asn] = entry
-	}
-	c.mu.Unlock()
-	entry.once.Do(func() {
-		value, err := compute(ctx)
-		entry.value, entry.err = value, err
-		entry.loaded = err == nil
-	})
-	if !entry.loaded {
-		// Retry outside the once so a recovered endpoint is not permanently lost.
-		value, err := compute(ctx)
-		if err != nil {
-			return nil, err
-		}
+	for {
 		c.mu.Lock()
-		entry.value, entry.err, entry.loaded = value, nil, true
+		entry := c.entries[asn]
+		if entry == nil {
+			entry = &asnEntry{}
+			c.entries[asn] = entry
+		}
+		if entry.loaded && (c.ttl <= 0 || time.Since(entry.loadedAt) < c.ttl) {
+			value := entry.value
+			c.mu.Unlock()
+			return value, nil
+		}
+		if entry.loading != nil {
+			loading := entry.loading
+			c.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-loading:
+				continue
+			}
+		}
+		loading := make(chan struct{})
+		entry.loading = loading
 		c.mu.Unlock()
-		return value, nil
+
+		value, err := compute(ctx)
+		c.mu.Lock()
+		if err == nil {
+			entry.value = value
+			entry.loadedAt = time.Now()
+			entry.loaded = true
+		}
+		entry.loading = nil
+		close(loading)
+		c.mu.Unlock()
+		return value, err
 	}
-	return entry.value, entry.err
 }

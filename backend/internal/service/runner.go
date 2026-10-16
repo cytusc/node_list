@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cytusc/node_list/backend/internal/collector"
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/cytusc/node_list/backend/internal/taskqueue"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,6 +22,7 @@ type Runner struct {
 	Queue          taskqueue.Queue
 	Config         Config
 	Classification *ipcheck.Client
+	asnCache       *collector.ASNCache
 }
 
 func (r *Runner) kinds() []string {
@@ -46,6 +48,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	if r.Classification == nil {
 		r.Classification = ipcheck.NewClient(os.Getenv("IPINFO_TOKEN"), os.Getenv("IP_API_PRO_KEY"), os.Getenv("IPREGISTRY_API_KEY"), os.Getenv("ABUSEIPDB_API_KEY"))
+	}
+	if r.asnCache == nil {
+		r.asnCache = collector.NewASNCacheWithTTL(6 * time.Hour)
 	}
 	r.Classification.BeforeProvider = r.Repo.BeforeProvider
 	r.Classification.AfterProvider = r.Repo.AfterProvider

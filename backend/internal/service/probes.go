@@ -336,7 +336,7 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 	if path == nil || path.Error != nil {
 		return waiting{30 * time.Second}
 	}
-	verdict, queryErr := collector.QueryIPPure(ctx, collector.NewIPPureClient(path.Client, r.Config.APIOrigin, 10*time.Second), j.Payload.IP, nil)
+	verdict, queryErr := collector.QueryIPPure(ctx, collector.NewIPPureClient(path.Client, r.Config.APIOrigin, 10*time.Second), j.Payload.IP, r.asnCache)
 	v := &domain.IPPureResult{IP: j.Payload.IP, Status: "error", FailureStage: "ippure-query", Error: "风险查询失败"}
 	e := ipcheck.Evidence{Provider: "ippure", IP: j.Payload.IP, CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Outcome: "unknown", QueryStatus: "request-failed"}
 	if queryErr == nil {
@@ -359,6 +359,8 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 			if j.Priority > 0 {
 				delay = r.Config.ResidentialInterval
 			}
+		} else if v.HumanPercent == nil || v.BotPercent == nil {
+			delay = trafficRatioRetryInterval
 		}
 		return recur(ctx, tx, j, delay)
 	})
