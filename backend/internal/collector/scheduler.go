@@ -181,16 +181,17 @@ type job struct {
 	node       domain.Node
 	old        *domain.IPPureResult
 
-	shareOnly  bool
-	visible    bool
-	priority   int
-	firstSeen  int
-	attempts   int
-	backfill   bool
-	knownDead  bool
-	reuseExit  bool
-	exitIP     string
-	exitSource string
+	shareOnly            bool
+	visible              bool
+	priority             int
+	firstSeen            int
+	attempts             int
+	backfill             bool
+	trafficRatioBackfill bool
+	knownDead            bool
+	reuseExit            bool
+	exitIP               string
+	exitSource           string
 }
 
 // buildQueue selects and orders the work for one round.
@@ -287,9 +288,11 @@ func (s *Scheduler) buildQueue(ctx context.Context) ([]job, error) {
 			saved.SignatureVersion >= 2 && saved.ExitIPVersion == domain.ExitIPVersion &&
 			(saved.Status != "error" || saved.IP != "" || saved.ExitIPProbeVersion == domain.ExitIPProbeVersion)
 		backfill := s.classification == nil && saved != nil && saved.Status == "success" && currentExitIP && saved.Organization == ""
+		needsTrafficRatio := saved != nil && saved.Status == "success" && currentExitIP &&
+			(saved.HumanPercent == nil || saved.BotPercent == nil)
 		needsCountry := saved != nil && saved.Status == "success" && currentExitIP && saved.Country == ""
 		needsClassification := s.classification != nil && saved != nil && (saved.Classification == nil || saved.Classification.Version != ipcheck.VotingVersion || time.Since(parseTime(saved.Classification.CheckedAt)) >= 24*time.Hour)
-		if saved != nil && saved.Status == "success" && currentExitIP && !backfill && !needsCountry && !needsClassification {
+		if saved != nil && saved.Status == "success" && currentExitIP && !backfill && !needsTrafficRatio && !needsCountry && !needsClassification {
 			continue
 		}
 		attempts := 0
@@ -301,6 +304,8 @@ func (s *Scheduler) buildQueue(ctx context.Context) ([]job, error) {
 		case saved != nil && saved.Status == "error" && saved.FailureStage == "ippure-query" && saved.SignatureVersion < ippureSignatureVersion:
 			// Retry API failures once after correcting request headers and the
 			// signing connection lifetime, without resetting exit-probe backoff.
+		case needsTrafficRatio && saved != nil:
+			lastAttempt = saved.TrafficRatioCheckedAt
 		case backfill && saved != nil && saved.SignatureVersion >= 2:
 			lastAttempt = saved.OrganizationCheckedAt
 		case currentRetry && saved != nil:
@@ -324,22 +329,23 @@ func (s *Scheduler) buildQueue(ctx context.Context) ([]job, error) {
 				}
 			}
 		}
-		reuseExit := s.classification == nil && currentExitIP && saved != nil && saved.IP != "" && isIPv4(saved.IP)
+		reuseExit := (s.classification == nil || needsTrafficRatio) && currentExitIP && saved != nil && saved.IP != "" && isIPv4(saved.IP)
 		jobs = append(jobs, job{
-			snapshotID: e.snapshotID,
-			index:      e.index,
-			identity:   e.identity,
-			node:       e.node,
-			old:        saved,
-			shareOnly:  shareOnly,
-			priority:   priority,
-			firstSeen:  firstSeen[e.identity],
-			attempts:   attempts,
-			backfill:   backfill,
-			knownDead:  exitProbeFailures,
-			reuseExit:  reuseExit,
-			exitIP:     savedIP(saved),
-			exitSource: savedSource(saved),
+			snapshotID:           e.snapshotID,
+			index:                e.index,
+			identity:             e.identity,
+			node:                 e.node,
+			old:                  saved,
+			shareOnly:            shareOnly,
+			priority:             priority,
+			firstSeen:            firstSeen[e.identity],
+			attempts:             attempts,
+			backfill:             backfill,
+			trafficRatioBackfill: needsTrafficRatio,
+			knownDead:            exitProbeFailures,
+			reuseExit:            reuseExit,
+			exitIP:               savedIP(saved),
+			exitSource:           savedSource(saved),
 		})
 	}
 	sort.SliceStable(jobs, func(a, b int) bool {
@@ -649,6 +655,7 @@ func (s *Scheduler) runJob(ctx context.Context, j job, outbound *transport.Outbo
 	}
 
 	stage = "ippure-query"
+	result.TrafficRatioCheckedAt = result.CheckedAt
 	verdict, err := QueryIPPure(ctx, NewIPPureClient(client, s.apiOrigin, 10*time.Second), resolved.IP, asnCache)
 	if err != nil {
 		failed := s.failureResult(ctx, j, result, stage, err)
@@ -681,16 +688,21 @@ func (s *Scheduler) failureResult(ctx context.Context, j job, result domain.IPPu
 		result.Error = j.old.Error
 		return &result
 	}
-	if j.backfill && j.old != nil {
-		// Keep previously collected metrics when only the organization refresh fails.
+	if (j.backfill || j.trafficRatioBackfill) && j.old != nil {
+		// Keep previously collected metrics when a metadata refresh fails.
 		preserved := *j.old
-		preserved.SignatureVersion = ippureSignatureVersion
-		if j.old.SignatureVersion >= 2 {
-			preserved.OrganizationAttempts = j.old.OrganizationAttempts + 1
-		} else {
-			preserved.OrganizationAttempts = 1
+		if j.backfill {
+			preserved.SignatureVersion = ippureSignatureVersion
+			if j.old.SignatureVersion >= 2 {
+				preserved.OrganizationAttempts = j.old.OrganizationAttempts + 1
+			} else {
+				preserved.OrganizationAttempts = 1
+			}
+			preserved.OrganizationCheckedAt = result.CheckedAt
 		}
-		preserved.OrganizationCheckedAt = result.CheckedAt
+		if j.trafficRatioBackfill {
+			preserved.TrafficRatioCheckedAt = result.TrafficRatioCheckedAt
+		}
 		return &preserved
 	}
 	result.Status = "error"
