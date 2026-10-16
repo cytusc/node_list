@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// A generation is one complete assessment. Dependency retries reuse its proofs;
-// an unsuccessful assessment starts a new generation at the normal interval.
+// Each retirement gets one durable assessment. Dependency retries reuse its
+// proofs; completed assessments are never periodically requeued.
 func (r *Runner) recovery(ctx context.Context, j Job) error {
 	t, err := r.Repo.Target(ctx, j.Payload.Identity)
 	if err != nil {
@@ -20,14 +20,29 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if !matchesRetirement(t, j.Payload) {
 		return r.Repo.Finish(ctx, j, nil)
 	}
-	delay := r.Config.NormalInterval
-	if t.HistoricalResidential {
-		delay = r.Config.ResidentialInterval
+	finish := func(result, ip string) error {
+		return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+			return recordRecoveryResult(ctx, tx, j, result, ip)
+		})
 	}
-	finish := func() error { return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error { return recur(ctx, tx, j, delay) }) }
+	// Reuse the last observed real exit before creating any network probes.
+	previous, err := r.Repo.Exit(ctx, t.Identity)
+	if err != nil {
+		return err
+	}
+	if previous != nil && previous.IP != "" {
+		attr, err := r.Repo.Attributes(ctx, previous.IP)
+		if err != nil {
+			return err
+		}
+		if asn := hostingRecoveryASN(attr, previous.IP); asn != "" {
+			return finish("skipped-datacenter-asn", previous.IP)
+		}
+	}
 	if time.Since(j.Payload.StartedAt) > 3*time.Minute {
-		return finish()
+		return finish("timed-out", "")
 	}
+
 	session := "recovery:" + j.Ref()
 	p := j.Payload
 	p.Session = session
@@ -56,15 +71,18 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 		return waiting{time.Second}
 	}
 	if !live.Reachable || live.Error != "" || !fresh(live.CheckedAt, 3*time.Minute) || !validExit(exit) {
-		return finish()
+		return finish("probe-failed", exit.IP)
 	}
 	attr, err := r.Repo.Attributes(ctx, exit.IP)
 	if err != nil {
 		return err
 	}
+	if asn := hostingRecoveryASN(attr, exit.IP); asn != "" {
+		return finish("skipped-datacenter-asn", exit.IP)
+	}
 	if !domain.FreshResidential(attr, exit.IP, time.Now()) {
 		if attr != nil && attr.Classification != nil && fresh(attr.Classification.CheckedAt, 24*time.Hour) {
-			return finish()
+			return finish("not-residential", exit.IP)
 		}
 		err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
 			if e := scheduleIP(ctx, tx, exit.IP, t.Identity, j.Priority); e != nil {
@@ -92,7 +110,7 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 		return waiting{time.Second}
 	}
 	if !validExit(final) || final.IP != exit.IP || final.Version != exit.Version {
-		return finish()
+		return finish("exit-changed", final.IP)
 	}
 	p.Action = "restore"
 	p.IP = final.IP
@@ -102,8 +120,17 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 		if e := once(ctx, tx, KindLifecycle, "restore:"+j.Ref(), p, 1); e != nil {
 			return e
 		}
-		return recur(ctx, tx, j, delay)
+		return recordRecoveryResult(ctx, tx, j, "eligible", final.IP)
 	})
+}
+
+// Keep the result on the once-only task, including failed assessments. The
+// scheduler uses identity + retirement time as its durable deduplication key.
+func recordRecoveryResult(ctx context.Context, tx pgx.Tx, j Job, result, ip string) error {
+	_, err := tx.Exec(ctx, `UPDATE node_explorer_work SET payload=(payload-'startedAt') ||
+	 jsonb_build_object('recoveryResult',$2::text,'checkedAt',$3::text,'ip',$4::text) WHERE id=$1`,
+		j.ID, result, time.Now().UTC().Format(time.RFC3339Nano), ip)
+	return err
 }
 
 func validExit(e domain.ExitState) bool {
@@ -192,7 +219,7 @@ func (r *Runner) lifecycle(ctx context.Context, j Job) error {
 			if e = json.Unmarshal(raw, &attr); e != nil {
 				return e
 			}
-			if !domain.FreshResidential(&attr, exit.IP, time.Now()) {
+			if hostingRecoveryASN(&attr, exit.IP) != "" || !domain.FreshResidential(&attr, exit.IP, time.Now()) {
 				return nil
 			}
 			reason = j.Payload.Reason

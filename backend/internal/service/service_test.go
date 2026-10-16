@@ -167,7 +167,7 @@ func TestOneCompleteAssessmentRestoresImmediatelyWithoutRisk(t *testing.T) {
 func isWaiting(e error) bool { var w waiting; return errors.As(e, &w) }
 
 func TestLifecycleRejectsInvalidatedProofsAndManualDisable(t *testing.T) {
-	for _, scenario := range []string{"manual", "new-retirement", "changed-ip", "changed-version", "stale-exit", "ipv6", "failed-live", "old-voting", "dry-run", "deleted-source"} {
+	for _, scenario := range []string{"manual", "new-retirement", "changed-ip", "changed-version", "stale-exit", "ipv6", "failed-live", "old-voting", "dry-run", "deleted-source", "hosting-asn"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := setup(t)
 			ctx := context.Background()
@@ -196,6 +196,8 @@ func TestLifecycleRejectsInvalidatedProofsAndManualDisable(t *testing.T) {
 				f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=jsonb_set(payload,'{classification,version}','1')`)
 			case "dry-run":
 				f.runner.Config.DryRun = true
+			case "hosting-asn":
+				f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=payload || '{"asn":"AS12876"}'::jsonb`)
 			case "deleted-source":
 				f.exec(t, `DELETE FROM node_explorer_snapshots`)
 			}
@@ -697,7 +699,7 @@ func TestRecoveryAdmissionBoundsBacklogAndReservesResidentialLane(t *testing.T) 
 		t.Fatalf("admitted retry starved or backlog flooded: %v", q.refs)
 	}
 	// Finishing a cycle releases exactly one admission slot.
-	if err := f.repo.Finish(ctx, admitted[1], func(tx pgx.Tx) error { return recur(ctx, tx, admitted[1], 30*time.Minute) }); err != nil {
+	if err := f.repo.Finish(ctx, admitted[1], nil); err != nil {
 		t.Fatal(err)
 	}
 	count := 0

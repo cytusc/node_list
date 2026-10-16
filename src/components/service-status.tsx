@@ -13,7 +13,8 @@ const serviceNames: Record<string, string> = {
 const number = new Intl.NumberFormat("zh-CN");
 
 function waitLabel(seconds: number) {
-  if (seconds <= 60) return "—";
+  if (seconds <= 0) return "—";
+  if (seconds < 60) return `${Math.max(1, Math.floor(seconds))} 秒`;
   return `${number.format(Math.floor(seconds / 60))} 分钟`;
 }
 
@@ -82,17 +83,26 @@ export function ServiceStatusPanel({ services }: { services: Service[] }) {
                 </div>
                 <div>
                   <dt>最长等待</dt>
-                  <dd data-active={service.oldestWaitSeconds > 60}>
+                  <dd data-active={service.oldestWaitSeconds > 0}>
                     {waitLabel(service.oldestWaitSeconds)}
                   </dd>
                 </div>
               </dl>
-              {(service.restored > 0 || service.error) && (
+              {(service.restored > 0 || (service.scheduled ?? 0) > 0 || (service.checked ?? 0) > 0 || (service.skipped ?? 0) > 0 || service.error) && (
                 <div className="service-status-note">
                   {service.restored > 0 && (
                     <span className="service-status-restored">
                       已恢复 {number.format(service.restored)}
                     </span>
+                  )}
+                  {(service.scheduled ?? 0) > 0 && (
+                    <span>定时等待 {number.format(service.scheduled ?? 0)}</span>
+                  )}
+                  {(service.checked ?? 0) > 0 && (
+                    <span>已完成核验 {number.format(service.checked ?? 0)}</span>
+                  )}
+                  {(service.skipped ?? 0) > 0 && (
+                    <span>机房 ASN 已跳过 {number.format(service.skipped ?? 0)}</span>
                   )}
                   {service.error && (
                     <span className="service-status-error">

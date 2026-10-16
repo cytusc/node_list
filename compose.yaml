@@ -65,18 +65,24 @@ services:
     command: [node-worker, -role, connectivity]
     environment:
       <<: *environment
-      CONNECTIVITY_HIGH_CONTROLLER: http://connectivity-high-proxy:9090
-      CONNECTIVITY_HIGH_PROXY_URL: http://connectivity-high-proxy:7890
-      CONNECTIVITY_NORMAL_CONTROLLER: http://connectivity-normal-proxy:9090
-      CONNECTIVITY_NORMAL_PROXY_URL: http://connectivity-normal-proxy:7890
+      CONNECTIVITY_HIGH_CONTROLLER: http://connectivity-high-proxy:9090,http://connectivity-high-proxy-2:9090,http://connectivity-high-proxy-3:9090,http://connectivity-high-proxy-4:9090
+      CONNECTIVITY_HIGH_PROXY_URL: http://connectivity-high-proxy:7890,http://connectivity-high-proxy-2:7890,http://connectivity-high-proxy-3:7890,http://connectivity-high-proxy-4:7890
+      CONNECTIVITY_NORMAL_CONTROLLER: http://connectivity-normal-proxy:9090,http://connectivity-normal-proxy-2:9090,http://connectivity-normal-proxy-3:9090,http://connectivity-normal-proxy-4:9090
+      CONNECTIVITY_NORMAL_PROXY_URL: http://connectivity-normal-proxy:7890,http://connectivity-normal-proxy-2:7890,http://connectivity-normal-proxy-3:7890,http://connectivity-normal-proxy-4:7890
       PROBE_TIMEOUT_SECONDS: ${PROBE_TIMEOUT_SECONDS:-12}
       PROBE_RETRY_SECONDS: ${PROBE_RETRY_SECONDS:-10}
-      RESIDENTIAL_CONCURRENCY: ${RESIDENTIAL_CONCURRENCY:-2}
-      NORMAL_CONCURRENCY: ${NORMAL_CONCURRENCY:-2}
+      CONNECTIVITY_HIGH_CONCURRENCY: ${CONNECTIVITY_HIGH_CONCURRENCY:-4}
+      CONNECTIVITY_NORMAL_CONCURRENCY: ${CONNECTIVITY_NORMAL_CONCURRENCY:-4}
     depends_on:
       task-redis: { condition: service_healthy }
       connectivity-high-proxy: { condition: service_started }
+      connectivity-high-proxy-2: { condition: service_started }
+      connectivity-high-proxy-3: { condition: service_started }
+      connectivity-high-proxy-4: { condition: service_started }
       connectivity-normal-proxy: { condition: service_started }
+      connectivity-normal-proxy-2: { condition: service_started }
+      connectivity-normal-proxy-3: { condition: service_started }
+      connectivity-normal-proxy-4: { condition: service_started }
     healthcheck:
       test: [CMD, node-worker, -role, connectivity, -health]
       interval: 30s
@@ -87,21 +93,27 @@ services:
     command: [node-worker, -role, ip]
     environment:
       <<: *environment
-      IP_SERVICE_HIGH_CONTROLLER: http://ip-high-proxy:9090
-      IP_SERVICE_HIGH_PROXY_URL: http://ip-high-proxy:7890
-      IP_SERVICE_NORMAL_CONTROLLER: http://ip-normal-proxy:9090
-      IP_SERVICE_NORMAL_PROXY_URL: http://ip-normal-proxy:7890
+      IP_SERVICE_HIGH_CONTROLLER: http://ip-high-proxy:9090,http://ip-high-proxy-2:9090,http://ip-high-proxy-3:9090,http://ip-high-proxy-4:9090
+      IP_SERVICE_HIGH_PROXY_URL: http://ip-high-proxy:7890,http://ip-high-proxy-2:7890,http://ip-high-proxy-3:7890,http://ip-high-proxy-4:7890
+      IP_SERVICE_NORMAL_CONTROLLER: http://ip-normal-proxy:9090,http://ip-normal-proxy-2:9090,http://ip-normal-proxy-3:9090,http://ip-normal-proxy-4:9090
+      IP_SERVICE_NORMAL_PROXY_URL: http://ip-normal-proxy:7890,http://ip-normal-proxy-2:7890,http://ip-normal-proxy-3:7890,http://ip-normal-proxy-4:7890
       IPPURE_API_ORIGIN: ${IPPURE_API_ORIGIN:-https://api.123169.xyz}
       IPINFO_TOKEN: ${IPINFO_TOKEN:-}
       IP_API_PRO_KEY: ${IP_API_PRO_KEY:-}
       IPREGISTRY_API_KEY: ${IPREGISTRY_API_KEY:-}
       ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
-      RESIDENTIAL_CONCURRENCY: ${RESIDENTIAL_CONCURRENCY:-2}
-      NORMAL_CONCURRENCY: ${NORMAL_CONCURRENCY:-2}
+      IP_SERVICE_HIGH_CONCURRENCY: ${IP_SERVICE_HIGH_CONCURRENCY:-4}
+      IP_SERVICE_NORMAL_CONCURRENCY: ${IP_SERVICE_NORMAL_CONCURRENCY:-4}
     depends_on:
       task-redis: { condition: service_healthy }
       ip-high-proxy: { condition: service_started }
+      ip-high-proxy-2: { condition: service_started }
+      ip-high-proxy-3: { condition: service_started }
+      ip-high-proxy-4: { condition: service_started }
       ip-normal-proxy: { condition: service_started }
+      ip-normal-proxy-2: { condition: service_started }
+      ip-normal-proxy-3: { condition: service_started }
+      ip-normal-proxy-4: { condition: service_started }
     healthcheck:
       test: [CMD, node-worker, -role, ip, -health]
       interval: 30s
@@ -138,11 +150,35 @@ services:
       retries: 10
   connectivity-high-proxy:
     <<: *proxy
+  connectivity-high-proxy-2:
+    <<: *proxy
+  connectivity-high-proxy-3:
+    <<: *proxy
+  connectivity-high-proxy-4:
+    <<: *proxy
   connectivity-normal-proxy:
+    <<: *proxy
+  connectivity-normal-proxy-2:
+    <<: *proxy
+  connectivity-normal-proxy-3:
+    <<: *proxy
+  connectivity-normal-proxy-4:
     <<: *proxy
   ip-high-proxy:
     <<: *proxy
+  ip-high-proxy-2:
+    <<: *proxy
+  ip-high-proxy-3:
+    <<: *proxy
+  ip-high-proxy-4:
+    <<: *proxy
   ip-normal-proxy:
+    <<: *proxy
+  ip-normal-proxy-2:
+    <<: *proxy
+  ip-normal-proxy-3:
+    <<: *proxy
+  ip-normal-proxy-4:
     <<: *proxy
 networks:
   postgres:

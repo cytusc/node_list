@@ -79,6 +79,11 @@ func (r *Runner) schedule(ctx context.Context) error {
 	if r.Config.Role != "connectivity" && r.Config.Role != "ip" && r.Config.Role != "residential" {
 		return nil
 	}
+	if r.Config.Role == "residential" {
+		if err := r.Repo.skipHostingRecovery(ctx); err != nil {
+			return err
+		}
+	}
 	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.identity,n.historical_residential,c.payload,e.payload,a.payload,t.retired_at,t.reason
 	FROM node_explorer_node_registry n LEFT JOIN node_explorer_connectivity c USING(identity)
 	LEFT JOIN node_explorer_exits e USING(identity) LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
@@ -153,7 +158,7 @@ func (r *Runner) schedule(ctx context.Context) error {
 				continue
 			}
 			p.RetiredAt, p.Reason = *i.retired, *i.reason
-			// Completed recovery cycles are rescheduled by the cycle itself.
+			// Keep completed tasks as durable markers; each retirement is checked once.
 			work = append(work, scheduledWork{Kind: KindRecovery, Key: i.id + ":" + *i.retired, Payload: p, Priority: priority, Due: now, Mode: "once"})
 			continue
 		}
