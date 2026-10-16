@@ -37,6 +37,7 @@ export type IPPureResult = {
   asnOrganization?: string;
   humanPercent?: number | null;
   botPercent?: number | null;
+  trafficRatioStatus?: "available" | "no-data" | "query-failed";
   source?: string;
   attributes?: string[];
   score?: number;

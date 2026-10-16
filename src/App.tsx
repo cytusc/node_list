@@ -213,7 +213,11 @@ function IPPureMetric({
       </div>
     );
   if (result.humanPercent == null || result.botPercent == null)
-    return <span className="text-muted-foreground">统计数据不足</span>;
+    return (
+      <span className="text-muted-foreground">
+        {trafficRatioMessage(result.trafficRatioStatus)}
+      </span>
+    );
   return (
     <div className="ippure-metric">
       <div className="ippure-ratio-values">
@@ -230,6 +234,13 @@ function IPPureMetric({
     </div>
   );
 }
+
+function trafficRatioMessage(status?: IPPureResult["trafficRatioStatus"]) {
+  if (status === "query-failed") return "查询失败，稍后重试";
+  if (status === "no-data") return "上游暂无统计";
+  return "统计数据不足";
+}
+
 function IPPureSummary({ result }: { result?: IPPureResult }) {
   return (
     <div className="ippure-summary">
@@ -1355,7 +1366,7 @@ export default function App() {
                         [
                           "人机流量比",
                           selected.ippure.humanPercent == null
-                            ? "统计数据不足"
+                            ? trafficRatioMessage(selected.ippure.trafficRatioStatus)
                             : `human ${selected.ippure.humanPercent}% / bot ${selected.ippure.botPercent}%`,
                         ],
                         ["IP 来源", selected.ippure.source],
