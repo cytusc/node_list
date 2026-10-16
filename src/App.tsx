@@ -66,6 +66,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FilterMenu } from "@/components/filter-menu";
+import { ServiceStatusPanel } from "@/components/service-status";
 import {
   countryName,
   detailLabels,
@@ -704,37 +705,7 @@ export default function App() {
         </div>
       </header>
       <main className="main-content">
-        {!!services.length && (
-          <details className="source-warning">
-            <summary>
-              服务状态 · {services.filter((s) => s.healthy).length}/
-              {services.length} 正常
-            </summary>
-            <ul>
-              {services.map((s) => (
-                <li key={s.service}>
-                  {(
-                    {
-                      api: "查询与投影",
-                      "source-ingest": "来源导入",
-                      "ip-service": "IP 属性",
-                      connectivity: "连通性检测",
-                      "residential-recovery": "住宅 IP 恢复",
-                      "node-lifecycle": "节点状态",
-                    } as Record<string, string>
-                  )[s.service] || s.service}
-                  ：{s.healthy ? "正常" : "异常"}，待处理 {s.queued}，执行中{" "}
-                  {s.running}
-                  {s.oldestWaitSeconds > 60
-                    ? `，最长等待 ${Math.floor(s.oldestWaitSeconds / 60)} 分钟`
-                    : ""}
-                  {s.restored > 0 ? `，已恢复 ${s.restored}` : ""}
-                  {s.error ? ` · ${s.error}` : ""}
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
+        <ServiceStatusPanel services={services} />
         <section className="intro">
           <div className="intro-top">
             <div>

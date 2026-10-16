@@ -56,10 +56,10 @@ test("shows missing services and refreshes observations without closing details"
   await page.goto("/");
   await expect(page.getByLabel("排序方式")).toHaveValue("preferred-desc");
   expect(sorts[0]).toBe("preferred");
-  await page.getByText("服务状态 · 0/1 正常").click();
-  await expect(page.getByText(/连通性检测：异常/)).toContainText(
-    "服务尚未启动",
-  );
+  await page.locator(".service-status-summary").click();
+  await expect(
+    page.locator(".service-status-row").filter({ hasText: "连通性检测" }),
+  ).toContainText("服务尚未启动");
   await page.locator(".node-name").click();
   await expect(page.getByRole("dialog")).toContainText("节点检查");
   await expect(page.getByRole("dialog")).toContainText("可用");

@@ -1,6 +1,69 @@
 package collector
 
-import "testing"
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+func TestQueryIPPureFetchesStatisticsWithoutCache(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cache     *ASNCache
+		available bool
+		wantCalls int
+	}{
+		{"without cache", nil, true, 2},
+		{"shared cache", NewASNCache(), true, 1},
+		{"statistics unavailable", nil, false, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			botCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/info/ip-basic/118.168.211.221":
+					fmt.Fprint(w, `{"ok":true,"data":{"ip":"118.168.211.221","asn":{"number":3462,"organization":"Data Communication Business Group","type":"isp","is_residential":true},"traits":{"is_broadcast":false}}}`)
+				case "/api/info/ip-risk/118.168.211.221":
+					fmt.Fprint(w, `{"ok":true,"data":{"risk_score":3}}`)
+				case "/api/info/asn/botclass/3462":
+					botCalls++
+					if !tc.available {
+						http.Error(w, "unavailable", http.StatusNotFound)
+						return
+					}
+					fmt.Fprint(w, `{"ok":true,"data":{"human":74.0479,"bot":25.9521}}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			client := NewIPPureClient(server.Client(), server.URL, time.Second)
+			for range 2 {
+				v, err := QueryIPPure(context.Background(), client, "118.168.211.221", tc.cache)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if v.Score != 3 || v.Label != "极度纯净" || v.Source != "原生IP" || len(v.Attributes) != 1 || v.Attributes[0] != "住宅IP" {
+					t.Fatalf("unexpected verdict: %+v", v)
+				}
+				if tc.available {
+					if v.HumanPercent == nil || v.BotPercent == nil || *v.HumanPercent != 74.05 || *v.BotPercent != 25.95 {
+						t.Fatalf("unexpected statistics: %+v", v)
+					}
+				} else if v.HumanPercent != nil || v.BotPercent != nil {
+					t.Fatalf("expected absent statistics: %+v", v)
+				}
+			}
+			if botCalls != tc.wantCalls {
+				t.Fatalf("statistics requests = %d, want %d", botCalls, tc.wantCalls)
+			}
+		})
+	}
+}
 
 func TestBusinessASNDoesNotBecomeDatacenter(t *testing.T) {
 	for _, tc := range []struct{ kind, want string }{
