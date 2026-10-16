@@ -586,17 +586,17 @@ func QueryIPPure(ctx context.Context, c *IPPureClient, target string, asnCache *
 		return nil, errors.New("IPPure ASN 信息不完整")
 	}
 	var bot map[string]any
+	loadBot := func(ctx context.Context) (map[string]any, error) {
+		return c.get(ctx, fmt.Sprintf("/api/info/asn/botclass/%d", int64(asnNumber)))
+	}
 	if asnCache != nil {
-		bot, err = asnCache.Load(ctx, int64(asnNumber), func(ctx context.Context) (map[string]any, error) {
-			data, err := c.get(ctx, fmt.Sprintf("/api/info/asn/botclass/%d", int64(asnNumber)))
-			if err != nil {
-				return nil, err
-			}
-			return data, nil
-		})
-		if err != nil {
-			bot = nil
-		}
+		bot, err = asnCache.Load(ctx, int64(asnNumber), loadBot)
+	} else {
+		bot, err = loadBot(ctx)
+	}
+	// ASN statistics are optional; their absence must not discard a valid risk score.
+	if err != nil {
+		bot = nil
 	}
 	return NormalizeIPPure(target, basic, risk, bot)
 }
