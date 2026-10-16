@@ -184,6 +184,42 @@ func TestMihomoReloadFailureReleasesLease(t *testing.T) {
 	}
 }
 
+func TestMihomoInvalidShareLinkDoesNotRetryEngineOrTakeLease(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(204)
+	}))
+	defer server.Close()
+	engine := NewMihomoEngine([]MihomoConfig{{Controller: server.URL, ProxyURL: "http://127.0.0.1:18000"}}, time.Second)
+	valid := domain.Node{RawConfig: domain.ProxyConfig{"type": "ss", "server": "192.0.2.1", "port": 443}}
+	invalid := domain.Node{Type: "ss", RawLink: "ss://invalid"}
+	_, held, err := engine.Reserve(context.Background(), []domain.Node{valid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	paths, release, err := engine.Reserve(ctx, []domain.Node{invalid})
+	if err != nil {
+		t.Fatalf("invalid node was treated as retryable engine failure: %v", err)
+	}
+	release()
+	if paths[0] == nil || paths[0].Error == nil || requests.Load() != 1 {
+		t.Fatal("invalid node used a proxy or lost its permanent failure")
+	}
+	held()
+	paths, release, err = engine.Reserve(context.Background(), []domain.Node{invalid, valid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if paths[0] == nil || paths[0].Error == nil || paths[1] == nil || paths[1].Client == nil {
+		t.Fatal("invalid node disrupted a valid node in the same wave")
+	}
+}
+
 func TestNativeRoutingHonorsProxyTLSOptions(t *testing.T) {
 	native := NewNativeEngine()
 	fallback := NewMihomoEngine(nil, time.Second)

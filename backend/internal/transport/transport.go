@@ -144,20 +144,21 @@ func (e *NativeEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[in
 	for i, node := range nodes {
 		config := outboundConfig(node)
 		if !nativeCompatible(config) {
+			out[i] = &Outbound{Error: errors.New("unsupported connection configuration")}
 			continue
 		}
 		client, err := nativeClient(config)
 		if err != nil {
+			out[i] = &Outbound{Error: errors.New("unsupported connection configuration")}
 			continue
 		}
 		out[i] = &Outbound{Client: client, Label: "native:" + node.Type}
 	}
-	if len(out) == 0 {
-		return nil, nil, fmt.Errorf("native engine cannot carry any node in this wave")
-	}
 	return out, func() {
 		for _, o := range out {
-			o.Client.CloseIdleConnections()
+			if o.Client != nil {
+				o.Client.CloseIdleConnections()
+			}
 		}
 	}, nil
 }
@@ -377,16 +378,20 @@ func (e *MihomoEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[in
 	}
 	proxies := make([]domain.ProxyConfig, 0, len(nodes))
 	indexes := make([]int, 0, len(nodes))
+	rejected := make(map[int]*Outbound)
 	for i, node := range nodes {
 		config := outboundConfig(node)
 		if config == nil {
+			rejected[i] = &Outbound{Error: errors.New("unsupported connection configuration")}
 			continue
 		}
 		proxies = append(proxies, config)
 		indexes = append(indexes, i)
 	}
 	if len(proxies) == 0 {
-		return nil, nil, fmt.Errorf("mihomo engine cannot carry any node in this wave")
+		// Invalid share links are permanent node failures, not a failed engine.
+		// Return them without taking a proxy lease so workers persist the result.
+		return rejected, func() {}, nil
 	}
 
 	var slot int
@@ -412,7 +417,6 @@ func (e *MihomoEngine) Reserve(ctx context.Context, nodes []domain.Node) (map[in
 	// An unchanged configuration needs no reload: Mihomo already serves it.
 	// Waves that only replace a few nodes still reload, because dropping a
 	// listener requires a configuration change.
-	rejected := make(map[int]*Outbound)
 	if !same {
 		for len(proxies) > 0 {
 			reloadCtx, cancel := context.WithTimeout(ctx, e.apiTimeout)
