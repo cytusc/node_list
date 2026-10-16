@@ -12,19 +12,12 @@ import (
 //go:embed services.sql
 var serviceSchema string
 
-func (a *Adapter) initServices(ctx context.Context) error {
-	tx, err := a.pool.Begin(ctx)
-	if err != nil {
+func createServicesSchema(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, serviceSchema); err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-explorer-services'))`); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, serviceSchema); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	_, err := tx.Exec(ctx, liveSchema)
+	return err
 }
 
 func queryRuntime(ctx context.Context, tx pgx.Tx) (map[string]domain.NodeState, error) {

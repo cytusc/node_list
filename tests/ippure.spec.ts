@@ -4,7 +4,7 @@ import { test, expect } from "@playwright/test";
 test("shows business usage independently of residential votes and company type", async ({
   page,
 }) => {
-  await page.route("**/api/results?view=aggregate&**", (route) =>
+  await page.route("**/api/results?**", (route) =>
     fulfillRoute(route, {
       json: {
         speedTest: false,
@@ -97,7 +97,7 @@ test("filters IP source and attributes and clears selections", async ({
       checkedAt: "2026-10-14T00:00:00Z",
     },
   }));
-  await page.route("**/api/results?view=aggregate&**", (route) =>
+  await page.route("**/api/results?**", (route) =>
     fulfillRoute(route, {
       json: { speedTest: false, mediaCheck: false, nodes },
     }),
@@ -133,7 +133,7 @@ test("filters IP source and attributes and clears selections", async ({
 test("shows stored IPPure fields in desktop details and mobile cards", async ({
   page,
 }) => {
-  await page.route("**/api/results?view=aggregate&**", (route) =>
+  await page.route("**/api/results?**", (route) =>
     fulfillRoute(route, {
       json: {
         speedTest: false,
@@ -271,7 +271,7 @@ test("shows stored IPPure fields in desktop details and mobile cards", async ({
 test("retains an IPv6 exit and distinguishes unsupported scoring from a dead node", async ({
   page,
 }) => {
-  await page.route("**/api/results?view=aggregate&**", (route) =>
+  await page.route("**/api/results?**", (route) =>
     fulfillRoute(route, {
       json: {
         speedTest: false,

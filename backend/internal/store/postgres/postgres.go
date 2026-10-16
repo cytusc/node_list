@@ -137,9 +137,30 @@ func (a *Adapter) initSchema(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-explorer-base-schema'))`); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-explorer-schema'))`); err != nil {
 		return err
 	}
+	// Bump schemaVersion whenever base tables, service SQL or live views change.
+	// All services share one transactional migration lock and skip DDL once this
+	// version has committed. A failed migration leaves no applied-version marker.
+	const schemaVersion = 2
+	var migrationTable *string
+	if err = tx.QueryRow(ctx, `SELECT to_regclass('node_explorer_service_migrations')::text`).Scan(&migrationTable); err != nil {
+		return err
+	}
+	if migrationTable != nil {
+		var applied bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_explorer_service_migrations WHERE version=$1)`, schemaVersion).Scan(&applied); err != nil {
+			return err
+		}
+		if applied {
+			return tx.Commit(ctx)
+		}
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(`+lockKey+`)`); err != nil {
+		return err
+	}
+
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS ` + tableSnapshots + ` (
       id SERIAL PRIMARY KEY,
@@ -165,13 +186,16 @@ func (a *Adapter) initSchema(ctx context.Context) error {
 			return fmt.Errorf("create schema: %w", err)
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err = createChangeSchema(ctx, tx); err != nil {
 		return err
 	}
-	if err := (&Projector{pool: a.pool}).initSchema(ctx); err != nil {
+	if err = createServicesSchema(ctx, tx); err != nil {
 		return err
 	}
-	return a.initServices(ctx)
+	if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_service_migrations(version) VALUES($1)`, schemaVersion); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Pool exposes the connection pool to the projection, which needs transaction
@@ -527,7 +551,7 @@ func IsUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
-// initProjectionSchema creates the projection tables and change triggers.
+// initSchema lazily creates tables for explicitly requested legacy projections.
 func (p *Projector) initSchema(ctx context.Context) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
@@ -537,6 +561,13 @@ func (p *Projector) initSchema(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(`+lockKey+`)`); err != nil {
 		return err
 	}
+	if err = createProjectionSchema(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func createChangeSchema(ctx context.Context, tx pgx.Tx) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS ` + tableState + ` (
       singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
@@ -551,16 +582,6 @@ func (p *Projector) initSchema(ctx context.Context) error {
     )`,
 		`INSERT INTO ` + tableState + `(singleton) VALUES (true) ON CONFLICT DO NOTHING`,
 		`CREATE INDEX IF NOT EXISTS node_explorer_results_changes_revision ON ` + tableChanges + `(revision)`,
-		`CREATE TABLE IF NOT EXISTS ` + tableCurrent + ` (` + columnDefinitions() + `,
-      PRIMARY KEY (position), UNIQUE (identity) DEFERRABLE INITIALLY DEFERRED)`,
-		`CREATE INDEX IF NOT EXISTS node_explorer_current_speed
-      ON ` + tableCurrent + `(rank_speed DESC NULLS LAST, position)`,
-		`CREATE INDEX IF NOT EXISTS node_explorer_current_name
-      ON ` + tableCurrent + `(rank_name, position)`,
-		`CREATE INDEX IF NOT EXISTS node_explorer_current_country_speed
-      ON ` + tableCurrent + `(country, rank_speed DESC NULLS LAST, position)`,
-		`CREATE INDEX IF NOT EXISTS node_explorer_current_type_speed
-      ON ` + tableCurrent + `(type, rank_speed DESC NULLS LAST, position)`,
 		`CREATE OR REPLACE FUNCTION node_explorer_results_changed() RETURNS trigger
       LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
       DECLARE revision bigint; snapshot integer;
@@ -583,7 +604,7 @@ func (p *Projector) initSchema(ctx context.Context) error {
 	}
 	for _, stmt := range statements {
 		if _, err := tx.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("create projection schema: %w", err)
+			return fmt.Errorf("create change schema: %w", err)
 		}
 	}
 	for _, table := range []string{tableSnapshots, tableEnrichments, tableRetired} {
@@ -598,6 +619,28 @@ func (p *Projector) initSchema(ctx context.Context) error {
 			return err
 		}
 	}
+	return nil
+}
+
+func createProjectionSchema(ctx context.Context, tx pgx.Tx) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS ` + tableCurrent + ` (` + columnDefinitions() + `,
+      PRIMARY KEY (position), UNIQUE (identity) DEFERRABLE INITIALLY DEFERRED)`,
+		`CREATE INDEX IF NOT EXISTS node_explorer_current_speed
+      ON ` + tableCurrent + `(rank_speed DESC NULLS LAST, position)`,
+		`CREATE INDEX IF NOT EXISTS node_explorer_current_name
+      ON ` + tableCurrent + `(rank_name, position)`,
+		`CREATE INDEX IF NOT EXISTS node_explorer_current_country_speed
+      ON ` + tableCurrent + `(country, rank_speed DESC NULLS LAST, position)`,
+		`CREATE INDEX IF NOT EXISTS node_explorer_current_type_speed
+      ON ` + tableCurrent + `(type, rank_speed DESC NULLS LAST, position)`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("create projection schema: %w", err)
+		}
+	}
+
 	// Rebuild persisted facets once when upgrading from the older metadata format.
 	if _, err := tx.Exec(ctx, `UPDATE `+tableState+` SET built_revision = -1
     WHERE metadata IS NOT NULL AND NOT (metadata->'facets' ? 'ipSource'
@@ -611,7 +654,7 @@ func (p *Projector) initSchema(ctx context.Context) error {
       OR coalesce(metadata->>'payloadVersion', '') <> $2`, rankingRevision, nodePayloadRevision); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func columnDefinitions() string {

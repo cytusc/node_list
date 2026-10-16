@@ -27,7 +27,7 @@ test("loads real local results with no browser errors", async ({
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   const response = await request.get(
-    "/api/results?view=aggregate&page=1&limit=50",
+    "/api/results?page=1&limit=50",
   );
   test.skip(!response.ok(), "Local subs-check installation is not available");
   const data = await response.json();
@@ -53,11 +53,8 @@ test("loads real local results with no browser errors", async ({
 
 test.describe("interactions and data states", () => {
   test.beforeEach(async ({ page }) => {
-    await page.route("**/api/results?view=aggregate&**", (route) =>
+    await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, { json: snapshot }),
-    );
-    await page.route("**/api/history", (route) =>
-      fulfillRoute(route, { json: { items: [], total: 0 } }),
     );
     await page.route("**/api/downloads", (route) =>
       fulfillRoute(route, {
@@ -75,10 +72,10 @@ test.describe("interactions and data states", () => {
     await expect(page.locator(".title-count")).toHaveText("63");
   });
 
-  test("shows aggregated nodes and refreshes without a batch selector", async ({
+  test("shows current nodes and refreshes without a batch selector", async ({
     page,
   }) => {
-    await page.route("**/api/results?view=aggregate&**", (route) =>
+    await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
         json: {
           ...snapshot,
@@ -87,8 +84,8 @@ test.describe("interactions and data states", () => {
             {
               ...snapshot.nodes[0],
               checkedAt: "2026-10-10T00:00:00Z",
-              name: "Archived node",
-              baseName: "Archived node",
+              name: "Current node",
+              baseName: "Current node",
             },
             snapshot.nodes[1],
           ],
@@ -108,7 +105,7 @@ test.describe("interactions and data states", () => {
     await expect(page.locator(".page-footer")).toHaveCount(0);
     await page
       .getByRole("textbox", { name: "搜索节点", exact: true })
-      .fill("Archived node");
+      .fill("Current node");
     await page.locator(".node-name").first().click();
     await expect(page.getByRole("dialog")).toContainText("2026/10/10 08:00");
     await page.keyboard.press("Escape");
@@ -273,7 +270,7 @@ test.describe("interactions and data states", () => {
   });
 
   test("retains previous results after refresh fails", async ({ page }) => {
-    await page.route("**/api/results?view=aggregate&**", (route) =>
+    await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
         status: 503,
         json: { error: "读取失败", code: "READ_FAILED" },
@@ -287,7 +284,7 @@ test.describe("interactions and data states", () => {
   });
 
   test("handles zero nodes and disabled speed tests", async ({ page }) => {
-    await page.route("**/api/results?view=aggregate&**", (route) =>
+    await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
         json: { ...snapshot, speedTest: false, nodes: [] },
       }),
@@ -304,7 +301,7 @@ test.describe("interactions and data states", () => {
     await expect(
       page.getByRole("button", { name: "服务解锁筛选" }),
     ).toHaveCount(0);
-    await page.route("**/api/results?view=aggregate&**", (route) =>
+    await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
         json: {
           ...snapshot,

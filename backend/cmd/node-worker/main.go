@@ -49,9 +49,6 @@ func run() error {
 	repo := &service.Repository{Pool: a.Pool()}
 	if *role == "source" {
 		st := store.New(a, nil)
-		if err = st.Reload(ctx); err != nil {
-			return err
-		}
 		return repo.RunSource(ctx, st)
 	}
 	c, err := service.ConfigFromEnv(*role)

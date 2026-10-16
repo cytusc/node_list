@@ -21,14 +21,21 @@ type IngestResult struct {
 type Ingestor struct {
 	store *Store
 
-	mu         sync.Mutex
-	signature  string
-	backfilled bool
+	mu             sync.Mutex
+	signature      string
+	backfilled     bool
+	persistentOnly bool
 }
 
 // NewIngestor builds an importer for one store.
 func NewIngestor(s *Store) *Ingestor {
 	return &Ingestor{store: s}
+}
+
+// NewPersistentIngestor writes source rounds without retaining an archive cache.
+// The source worker synchronizes changed batches into the registry separately.
+func NewPersistentIngestor(s *Store) *Ingestor {
+	return &Ingestor{store: s, persistentOnly: true}
 }
 
 // ImportFile reads a detection result file and imports it when its signature
@@ -110,7 +117,7 @@ func (i *Ingestor) importLocked(ctx context.Context, snap domain.Snapshot, sourc
 		normalized.Nodes = append(normalized.Nodes, node)
 	}
 
-	needsBackfill := sources != nil && !i.backfilled
+	needsBackfill := sources != nil && !i.backfilled && !i.persistentOnly
 	if needsBackfill {
 		linked, err := i.buildBackfill(normalized, sources)
 		if err != nil {
@@ -171,6 +178,9 @@ func (i *Ingestor) buildBackfill(snap domain.Snapshot, sources *domain.Sources) 
 
 // reload refreshes the in-memory batches from the database.
 func (i *Ingestor) reload(ctx context.Context) error {
+	if i.persistentOnly {
+		return nil
+	}
 	return i.store.Sync(ctx)
 }
 

@@ -145,7 +145,7 @@ func TestOneCompleteAssessmentRestoresImmediatelyWithoutRisk(t *testing.T) {
 	if e != nil || target.Retired != nil {
 		t.Fatalf("not restored immediately: %+v %v", target, e)
 	}
-	// The worker's observations propagate to both API caches without rewriting history.
+	// A lifecycle change is also visible to the legacy store without rewriting history.
 	if e = f.st.Sync(ctx); e != nil {
 		t.Fatal(e)
 	}
@@ -402,6 +402,8 @@ func TestRedisLostDeliveryIsRepublishedFromPostgres(t *testing.T) {
 		t.Fatalf("initial delivery: %q %v", lost, err)
 	}
 	// Simulate a consumer crash after Redis removes the message but before CAS.
+	// Unchanged tasks are repaired after the bounded reconciliation interval.
+	f.exec(t, `UPDATE node_explorer_work SET published_at=now()-interval '31 seconds' WHERE key='lost'`)
 	if err = f.repo.Publish(ctx, q, []string{KindLive}); err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +551,7 @@ func TestNormalRecoveryDoesNotOccupyResidentialProbeLane(t *testing.T) {
 	}
 }
 
-func TestPreferredProjectionAndExplicitSortWithExpiringEvidence(t *testing.T) {
+func TestPreferredLiveQueriesAndExplicitSortWithExpiringEvidence(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	fast := domain.Node{Name: "A fast", Type: "http", Server: "192.0.2.2", Port: "443", Speed: 1000}
@@ -558,13 +560,10 @@ func TestPreferredProjectionAndExplicitSortWithExpiringEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.evidence(t, "current")
-	p, err := postgres.NewProjector(ctx, f.repo.Pool, f.st, postgres.ProjectorConfig{RetentionDays: -1})
-	if err != nil {
+	if err := f.repo.SyncRegistry(ctx, f.st); err != nil {
 		t.Fatal(err)
 	}
-	if err = p.Refresh(ctx); err != nil {
-		t.Fatal(err)
-	}
+	p := postgres.NewLiveReader(f.repo.Pool)
 	assertFirst := func(sort, direction, want string) {
 		t.Helper()
 		page, err := p.QueryPage(ctx, &postgres.Query{Page: 1, Limit: 50, Sort: sort, Direction: direction})
@@ -580,9 +579,6 @@ func TestPreferredProjectionAndExplicitSortWithExpiringEvidence(t *testing.T) {
 	assertFirst("name", "asc", "A fast")
 	// Risk refresh must not make original provider evidence fresh again.
 	f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=jsonb_set(payload,'{classification,evidence,0,checkedAt}',to_jsonb($1::text))`, time.Now().Add(-25*time.Hour).UTC().Format(time.RFC3339Nano))
-	if err = p.Refresh(ctx); err != nil {
-		t.Fatal(err)
-	}
 	assertFirst("preferred", "desc", "A fast")
 }
 

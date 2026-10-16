@@ -13,52 +13,8 @@ import (
 )
 
 // SyncRegistry is owned by source-ingest. Reused identities keep their facts.
-func (r *Repository) SyncRegistry(ctx context.Context, st *store.Store) error {
-	if err := st.Sync(ctx); err != nil {
-		return err
-	}
-	snapshot := st.Aggregate(true)
-	if snapshot == nil {
-		return nil
-	}
-	tx, err := r.Pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-registry'))`); err != nil {
-		return err
-	}
-	ids := make([]string, 0, len(snapshot.Nodes))
-	for _, n := range snapshot.Nodes {
-		id := domain.AggregateIdentity(n)
-		if id == "" || n.Batch() == 0 {
-			continue
-		}
-		ids = append(ids, id)
-		historical := n.IPPure != nil && n.IPPure.Classification != nil && n.IPPure.Classification.State == "residential"
-		n.IPPure = nil
-		n.Connectivity = nil
-		n.Exit = nil
-		n.Lifecycle = nil
-		b, e := json.Marshal(n)
-		if e != nil {
-			return e
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,snapshot_id,node_index,historical_residential)
-		VALUES($1,$2,$3,$4,$5) ON CONFLICT(identity) DO UPDATE SET node=EXCLUDED.node,snapshot_id=EXCLUDED.snapshot_id,
-		node_index=EXCLUDED.node_index,available=true,historical_residential=node_explorer_node_registry.historical_residential OR EXCLUDED.historical_residential
-		WHERE node_explorer_node_registry.node<>EXCLUDED.node OR node_explorer_node_registry.snapshot_id<>EXCLUDED.snapshot_id
-		OR NOT node_explorer_node_registry.available OR (EXCLUDED.historical_residential AND NOT node_explorer_node_registry.historical_residential)`, id, b, n.Batch(), n.Index, historical)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = tx.Exec(ctx, `UPDATE node_explorer_node_registry SET available=false WHERE available AND NOT(identity=ANY($1))`, ids)
-	if err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+func (r *Repository) SyncRegistry(ctx context.Context, _ *store.Store) error {
+	return r.syncRegistry(ctx)
 }
 
 func (r *Repository) Connectivity(ctx context.Context, id string) (*domain.ConnectivityState, error) {

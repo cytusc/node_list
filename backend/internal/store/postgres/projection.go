@@ -143,10 +143,10 @@ func NewProjector(ctx context.Context, pool *pgxpool.Pool, st *store.Store, cfg 
 			p.retentionDays = 7
 		}
 	}
-	if err := p.initSchema(ctx); err != nil {
+	if err := (&Adapter{pool: pool}).initSchema(ctx); err != nil {
 		return nil, err
 	}
-	if err := (&Adapter{pool: pool}).initServices(ctx); err != nil {
+	if err := p.initSchema(ctx); err != nil {
 		return nil, err
 	}
 	return p, nil

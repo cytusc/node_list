@@ -389,7 +389,6 @@ export default function App() {
   };
   const { pageIndex, pageSize } = pagination;
   const params = new URLSearchParams({
-    view: "aggregate",
     page: String(pageIndex + 1),
     limit: String(pageSize),
   });
@@ -478,7 +477,10 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController();
+    let pending = false;
     const update = async () => {
+      if (document.hidden || pending) return;
+      pending = true;
       try {
         const response = await fetch("/api/services", {
           signal: controller.signal,
@@ -489,6 +491,8 @@ export default function App() {
         }
       } catch {
         /* retain last observed status */
+      } finally {
+        pending = false;
       }
     };
     void update();
