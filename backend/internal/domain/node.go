@@ -70,16 +70,17 @@ type IPPureResult struct {
 	CheckedAt string `json:"checkedAt"`
 	Attempts  int    `json:"attempts"`
 
-	Status       string   `json:"status,omitempty"`
-	IP           string   `json:"ip,omitempty"`
-	ASN          string   `json:"asn,omitempty"`
-	Organization string   `json:"asnOrganization,omitempty"`
-	Source       string   `json:"source,omitempty"`
-	Attributes   []string `json:"attributes,omitempty"`
-	HumanPercent *float64 `json:"humanPercent,omitempty"`
-	BotPercent   *float64 `json:"botPercent,omitempty"`
-	Score        float64  `json:"score,omitempty"`
-	Label        string   `json:"label,omitempty"`
+	Status                string   `json:"status,omitempty"`
+	IP                    string   `json:"ip,omitempty"`
+	ASN                   string   `json:"asn,omitempty"`
+	Organization          string   `json:"asnOrganization,omitempty"`
+	Source                string   `json:"source,omitempty"`
+	Attributes            []string `json:"attributes,omitempty"`
+	HumanPercent          *float64 `json:"humanPercent,omitempty"`
+	BotPercent            *float64 `json:"botPercent,omitempty"`
+	TrafficRatioCheckedAt string   `json:"trafficRatioCheckedAt,omitempty"`
+	Score                 float64  `json:"score,omitempty"`
+	Label                 string   `json:"label,omitempty"`
 
 	Country       string `json:"country,omitempty"`
 	AddressFamily int    `json:"addressFamily,omitempty"`

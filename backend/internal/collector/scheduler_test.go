@@ -195,3 +195,50 @@ func TestQueueDeduplicatesConfigNodesAcrossHistory(t *testing.T) {
 		t.Fatalf("duplicate config probes: %+v %v", jobs, err)
 	}
 }
+
+func TestQueueBackfillsMissingTrafficRatioAndThrottlesRetries(t *testing.T) {
+	ctx := context.Background()
+	adapter, err := sqlite.New(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	st := store.New(adapter, nil)
+	importer := store.NewIngestor(st)
+	node := domain.Node{Name: "ratio", Type: "ss", Server: "192.0.2.1", Port: "443", RawConfig: domain.ProxyConfig{"type": "ss", "server": "192.0.2.1", "port": 443}}
+	if err := importer.Import(ctx, domain.Snapshot{CheckedAt: "2026-10-14T10:00:00Z", Nodes: []domain.Node{node}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	old := domain.IPPureResult{
+		Status: "success", IP: "118.168.211.221", ExitIPSource: "IP.SB", ExitIPMode: "proxy-echo",
+		ExitIPVersion: domain.ExitIPVersion, ExitIPProbeVersion: domain.ExitIPProbeVersion,
+		QueryMode: "specified-exit", TransportMode: "http", SignatureVersion: ippureSignatureVersion,
+		Score: 3, Label: "极度纯净", CheckedAt: "2026-10-14T10:00:00Z",
+	}
+	if err := st.SaveIPPure(1, 0, old, domain.AggregateIdentity(node)); err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := NewScheduler(st, transport.NewRouter(&waveEngine{}), SchedulerConfig{Concurrency: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := scheduler.buildQueue(ctx)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("missing ratio was not queued: jobs=%+v err=%v", jobs, err)
+	}
+	if !jobs[0].trafficRatioBackfill || !jobs[0].reuseExit || jobs[0].exitIP != old.IP {
+		t.Fatalf("ratio backfill did not reuse the verified exit: %+v", jobs[0])
+	}
+
+	old.TrafficRatioCheckedAt = store.NowTimestamp()
+	if err := st.SaveIPPure(1, 0, old, domain.AggregateIdentity(node)); err != nil {
+		t.Fatal(err)
+	}
+	if saved := st.GetCollectionContext().AggregateIP[domain.AggregateIdentity(node)]; saved == nil || saved.TrafficRatioCheckedAt != old.TrafficRatioCheckedAt {
+		t.Fatalf("ratio attempt timestamp did not survive persistence: saved=%+v want=%q", saved, old.TrafficRatioCheckedAt)
+	}
+	jobs, err = scheduler.buildQueue(ctx)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("recent ratio attempt was not throttled: jobs=%+v err=%v", jobs, err)
+	}
+}
