@@ -316,18 +316,26 @@ func TestSchedulerBackfillsMissingTrafficRatioWithCooldown(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		age       time.Duration
+		status    string
 		wantQueue bool
 		queued    bool
 	}{
-		{name: "stale ratio", age: 7 * time.Hour, wantQueue: true},
-		{name: "recent attempt", age: time.Hour, wantQueue: false},
-		{name: "advance queued retry", age: 7 * time.Hour, wantQueue: true, queued: true},
+		{name: "legacy result is checked once", age: time.Hour, wantQueue: true},
+		{name: "recent no-data response", age: time.Hour, status: "no-data", wantQueue: false},
+		{name: "recent query error", age: 20 * time.Minute, status: "query-failed", wantQueue: false},
+		{name: "retry query error after cooldown", age: 31 * time.Minute, status: "query-failed", wantQueue: true, queued: true},
+		{name: "retry no-data after six hours", age: 7 * time.Hour, status: "no-data", wantQueue: true, queued: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := setup(t)
 			ctx := context.Background()
 			f.evidence(t, "ratio-backfill")
-			f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=jsonb_set(payload,'{checkedAt}',to_jsonb($1::text)) WHERE ip='8.8.4.4'`, time.Now().Add(-tc.age).UTC().Format(time.RFC3339Nano))
+			stamp := time.Now().Add(-tc.age).UTC().Format(time.RFC3339Nano)
+			if tc.status == "" {
+				f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=(jsonb_set(payload,'{status}','"success"'::jsonb)-'{trafficRatioStatus}'-'{trafficRatioCheckedAt}') WHERE ip='8.8.4.4'`)
+			} else {
+				f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=jsonb_set(jsonb_set(jsonb_set(payload,'{status}','"success"'::jsonb),'{trafficRatioStatus}',to_jsonb($1::text)),'{trafficRatioCheckedAt}',to_jsonb($2::text)) WHERE ip='8.8.4.4'`, tc.status, stamp)
+			}
 			if err := f.repo.Schedule(ctx, KindRisk, "8.8.4.4", Payload{IP: "8.8.4.4", Identity: f.id}, 0, time.Now()); err != nil {
 				t.Fatal(err)
 			}

@@ -522,16 +522,17 @@ func pow2(n int) int {
 
 // IPPureResult is the normalised risk verdict.
 type IPPureResult struct {
-	IP           string   `json:"ip"`
-	ASN          string   `json:"asn"`
-	Organization string   `json:"asnOrganization"`
-	Source       string   `json:"source"`
-	Attributes   []string `json:"attributes"`
-	HumanPercent *float64 `json:"humanPercent"`
-	BotPercent   *float64 `json:"botPercent"`
-	Score        float64  `json:"score"`
-	Label        string   `json:"label"`
-	Country      string   `json:"country,omitempty"`
+	IP                 string   `json:"ip"`
+	ASN                string   `json:"asn"`
+	Organization       string   `json:"asnOrganization"`
+	Source             string   `json:"source"`
+	Attributes         []string `json:"attributes"`
+	HumanPercent       *float64 `json:"humanPercent"`
+	BotPercent         *float64 `json:"botPercent"`
+	TrafficRatioStatus string   `json:"trafficRatioStatus"`
+	Score              float64  `json:"score"`
+	Label              string   `json:"label"`
+	Country            string   `json:"country,omitempty"`
 }
 
 // scoreBands maps a risk score to its label.
@@ -586,19 +587,32 @@ func QueryIPPure(ctx context.Context, c *IPPureClient, target string, asnCache *
 		return nil, errors.New("IPPure ASN 信息不完整")
 	}
 	var bot map[string]any
+	var botErr error
 	loadBot := func(ctx context.Context) (map[string]any, error) {
 		return c.get(ctx, fmt.Sprintf("/api/info/asn/botclass/%d", int64(asnNumber)))
 	}
 	if asnCache != nil {
-		bot, err = asnCache.Load(ctx, int64(asnNumber), loadBot)
+		bot, botErr = asnCache.Load(ctx, int64(asnNumber), loadBot)
 	} else {
-		bot, err = loadBot(ctx)
+		bot, botErr = loadBot(ctx)
 	}
 	// ASN statistics are optional; their absence must not discard a valid risk score.
-	if err != nil {
+	if botErr != nil {
 		bot = nil
 	}
-	return NormalizeIPPure(target, basic, risk, bot)
+	result, err := NormalizeIPPure(target, basic, risk, bot)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case botErr != nil:
+		result.TrafficRatioStatus = "query-failed"
+	case result.HumanPercent != nil && result.BotPercent != nil:
+		result.TrafficRatioStatus = "available"
+	default:
+		result.TrafficRatioStatus = "no-data"
+	}
+	return result, nil
 }
 
 // NormalizeIPPure validates and shapes the API response.

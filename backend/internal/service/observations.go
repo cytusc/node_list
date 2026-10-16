@@ -163,6 +163,9 @@ func mergeAttributes(ctx context.Context, tx pgx.Tx, ip string, evidence []ipche
 	if verdict != nil && (verdict.Status == "success" || v.Status != "success") {
 		v.CheckedAt = now.Format(time.RFC3339Nano)
 	}
+	if verdict != nil && verdict.Status == "success" {
+		v.TrafficRatioCheckedAt = now.Format(time.RFC3339Nano)
+	}
 	v.IP = ip
 	b, err = json.Marshal(v)
 	if err != nil {

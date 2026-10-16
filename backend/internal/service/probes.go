@@ -346,6 +346,7 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		v.ASN, v.Organization, v.Country, v.Source = verdict.ASN, verdict.Organization, verdict.Country, verdict.Source
 		v.Attributes, v.Score, v.Label = verdict.Attributes, verdict.Score, verdict.Label
 		v.HumanPercent, v.BotPercent = verdict.HumanPercent, verdict.BotPercent
+		v.TrafficRatioStatus = verdict.TrafficRatioStatus
 		e = ipcheck.IPPureEvidence(j.Payload.IP, verdict.Attributes, e.CheckedAt)
 		e.QueryStatus = "success"
 	}

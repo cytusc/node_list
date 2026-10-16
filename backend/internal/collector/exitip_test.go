@@ -52,14 +52,16 @@ func TestASNCacheCoalescesConcurrentLoadsAndExpires(t *testing.T) {
 
 func TestQueryIPPureFetchesStatisticsWithoutCache(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		cache     *ASNCache
-		available bool
-		wantCalls int
+		name       string
+		cache      *ASNCache
+		botPayload string
+		wantStatus string
+		wantCalls  int
 	}{
-		{"without cache", nil, true, 2},
-		{"shared cache", NewASNCache(), true, 1},
-		{"statistics unavailable", nil, false, 2},
+		{"without cache", nil, `{"ok":true,"data":{"human":74.0479,"bot":25.9521}}`, "available", 2},
+		{"shared cache", NewASNCache(), `{"ok":true,"data":{"human":74.0479,"bot":25.9521}}`, "available", 1},
+		{"request failed", nil, "", "query-failed", 2},
+		{"statistics absent", nil, `{"ok":true,"data":{}}`, "no-data", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			botCalls := 0
@@ -72,11 +74,11 @@ func TestQueryIPPureFetchesStatisticsWithoutCache(t *testing.T) {
 					fmt.Fprint(w, `{"ok":true,"data":{"risk_score":3}}`)
 				case "/api/info/asn/botclass/3462":
 					botCalls++
-					if !tc.available {
+					if tc.botPayload == "" {
 						http.Error(w, "unavailable", http.StatusNotFound)
 						return
 					}
-					fmt.Fprint(w, `{"ok":true,"data":{"human":74.0479,"bot":25.9521}}`)
+					fmt.Fprint(w, tc.botPayload)
 				default:
 					http.NotFound(w, r)
 				}
@@ -91,12 +93,15 @@ func TestQueryIPPureFetchesStatisticsWithoutCache(t *testing.T) {
 				if v.Score != 3 || v.Label != "极度纯净" || v.Source != "原生IP" || len(v.Attributes) != 1 || v.Attributes[0] != "住宅IP" {
 					t.Fatalf("unexpected verdict: %+v", v)
 				}
-				if tc.available {
+				if tc.wantStatus == "available" {
 					if v.HumanPercent == nil || v.BotPercent == nil || *v.HumanPercent != 74.05 || *v.BotPercent != 25.95 {
 						t.Fatalf("unexpected statistics: %+v", v)
 					}
 				} else if v.HumanPercent != nil || v.BotPercent != nil {
 					t.Fatalf("expected absent statistics: %+v", v)
+				}
+				if v.TrafficRatioStatus != tc.wantStatus {
+					t.Fatalf("traffic ratio status = %q, want %q", v.TrafficRatioStatus, tc.wantStatus)
 				}
 			}
 			if botCalls != tc.wantCalls {

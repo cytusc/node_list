@@ -78,6 +78,7 @@ type IPPureResult struct {
 	Attributes            []string `json:"attributes,omitempty"`
 	HumanPercent          *float64 `json:"humanPercent,omitempty"`
 	BotPercent            *float64 `json:"botPercent,omitempty"`
+	TrafficRatioStatus    string   `json:"trafficRatioStatus,omitempty"`
 	TrafficRatioCheckedAt string   `json:"trafficRatioCheckedAt,omitempty"`
 	Score                 float64  `json:"score,omitempty"`
 	Label                 string   `json:"label,omitempty"`

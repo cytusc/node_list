@@ -11,6 +11,7 @@ import (
 )
 
 const trafficRatioRetryInterval = 6 * time.Hour
+const trafficRatioErrorRetryInterval = 30 * time.Minute
 
 func once(ctx context.Context, tx pgx.Tx, kind, key string, p Payload, priority int) error {
 	b, e := json.Marshal(p)
@@ -172,8 +173,17 @@ func scheduleMissingTrafficRatio(ctx context.Context, tx pgx.Tx, ip, id string, 
 	if attr.Status == "success" && attr.HumanPercent != nil && attr.BotPercent != nil {
 		return nil
 	}
-	if checkedAt, err := time.Parse(time.RFC3339Nano, attr.CheckedAt); err == nil && time.Since(checkedAt) < trafficRatioRetryInterval {
+	if attr.Status != "success" {
 		return nil
+	}
+	retryInterval := trafficRatioRetryInterval
+	if attr.TrafficRatioStatus == "query-failed" {
+		retryInterval = trafficRatioErrorRetryInterval
+	}
+	if attr.TrafficRatioCheckedAt != "" {
+		if t, err := time.Parse(time.RFC3339Nano, attr.TrafficRatioCheckedAt); err == nil && time.Since(t) < retryInterval {
+			return nil
+		}
 	}
 	p := Payload{IP: ip, Identity: id}
 	if err := once(ctx, tx, KindRisk, ip, p, priority); err != nil {
