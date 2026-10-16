@@ -1,4 +1,4 @@
-// Command node-explorer serves the API and read projection only.
+// Command node-explorer serves current database facts through the HTTP API.
 package main
 
 import (
@@ -35,35 +35,19 @@ func run() error {
 	}
 	defer a.Close()
 	st := store.New(a, nil)
-	if err = st.Reload(ctx); err != nil {
-		return err
-	}
-	p, err := postgres.NewProjectorForAdapter(ctx, a, st, postgres.ProjectorConfig{})
-	if err != nil {
-		return err
-	}
-	st.SetRefresh(p.Refresh)
-	if err = st.Refresh(ctx); err != nil {
-		return err
-	}
 	repo := &service.Repository{Pool: a.Pool()}
 	if err := repo.Heartbeat(ctx, "api", ""); err != nil {
 		return err
 	}
 	go func() {
-		tick := time.NewTicker(time.Second)
+		tick := time.NewTicker(10 * time.Second)
 		defer tick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				message := ""
-				if err := st.Refresh(ctx); err != nil {
-					log.Print("API projection refresh failed")
-					message = "当前节点投影暂时不可用"
-				}
-				_ = repo.Heartbeat(ctx, "api", message)
+				_ = repo.Heartbeat(ctx, "api", "")
 				var warning string
 				if err := a.Pool().QueryRow(ctx, `SELECT coalesce(payload->>'sourceWarning','') FROM node_explorer_service_status WHERE service='source-ingest'`).Scan(&warning); err == nil {
 					st.SetSourceWarning(warning)
@@ -74,18 +58,13 @@ func run() error {
 	collector := func() api.CollectorStatus {
 		check, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		all, e := repo.Statuses(check)
+		s, e := repo.Status(check, "ip-service")
 		if e != nil {
 			return api.CollectorStatus{Enabled: true, Error: "服务状态暂不可用"}
 		}
-		for _, s := range all {
-			if s.Service == "ip-service" {
-				return api.CollectorStatus{Enabled: true, Running: s.Healthy, Queued: int(s.Queued), LastRun: s.UpdatedAt.Format(time.RFC3339), Error: s.Error}
-			}
-		}
-		return api.CollectorStatus{Enabled: false}
+		return api.CollectorStatus{Enabled: true, Running: s.Healthy, Queued: int(s.Queued), LastRun: s.UpdatedAt.Format(time.RFC3339), Error: s.Error}
 	}
-	server := api.New(api.ServerConfig{Store: st, Projector: p, Collector: collector, DistDir: filepath.Join(root, "dist"), HasPostgres: true})
+	server := api.New(api.ServerConfig{Store: st, Live: postgres.NewLiveReader(a.Pool()), Collector: collector, DistDir: filepath.Join(root, "dist"), HasPostgres: true})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/services", func(w http.ResponseWriter, req *http.Request) { api.WriteServices(w, req, repo) })
 	mux.Handle("/", server.Handler())

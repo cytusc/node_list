@@ -17,8 +17,8 @@ func (a *Adapter) ReadChanges(ctx context.Context, since int64) (store.Changes, 
 
 func readChanges(ctx context.Context, tx pgx.Tx, since int64) (store.Changes, error) {
 	c := store.Changes{Full: since < 0}
-	var built, retiredRevision int64
-	if err := tx.QueryRow(ctx, `SELECT source_revision, built_revision, retired_revision FROM `+tableState).Scan(&c.Revision, &built, &retiredRevision); err != nil {
+	var retiredRevision int64
+	if err := tx.QueryRow(ctx, `SELECT source_revision, retired_revision FROM `+tableState).Scan(&c.Revision, &retiredRevision); err != nil {
 		return c, err
 	}
 	if c.Revision == since {
@@ -29,9 +29,8 @@ func readChanges(ctx context.Context, tx pgx.Tx, since int64) (store.Changes, er
 	if runtimeErr != nil {
 		return c, runtimeErr
 	}
-	// Older versions removed entries after publishing. A cursor behind that
-	// boundary must reload once, rather than silently missing those changes.
-	c.Full = c.Full || since < built
+	// Per-batch versions survive publication. Another reader advancing the
+	// projection must not turn this reader's incremental sync into a full load.
 	if !c.Full {
 		c.SnapshotIDs = make([]int, 0)
 		rows, err := tx.Query(ctx, `SELECT snapshot_id FROM `+tableChanges+` WHERE revision > $1`, since)

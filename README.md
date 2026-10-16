@@ -1,8 +1,8 @@
 # Node Explorer
 
-React／TypeScript 节点浏览器与 Go 后端，展示 subs-check 和 Qilan 节点、历史批次、连通性及出口 IP 属性。支持筛选、分页、详情、列设置和深浅主题。
+React／TypeScript 节点浏览器与 Go 后端，实时展示 subs-check 和 Qilan 节点的当前连通性及出口 IP 属性。支持筛选、分页、详情、列设置和深浅主题。
 
-现在由六个独立服务运行：API／投影、来源导入、测活、IP 属性、住宅恢复、节点生命周期。**PostgreSQL 保存业务数据，Redis 分发任务；住宅节点默认每 5 分钟检查，一次完整验证合格立即恢复。** 人工禁用不会自动恢复。
+现在由六个独立服务运行：API 查询、来源导入、测活、IP 属性、住宅恢复、节点生命周期。**PostgreSQL 保存业务数据，Redis 分发任务；住宅节点默认每 5 分钟检查，一次完整验证合格立即恢复。** 人工禁用不会自动恢复。
 
 完整的模块职责、任务契约、故障恢复、部署与升级步骤见 [MODULAR_SERVICES.md](MODULAR_SERVICES.md)，住宅判定规则见 [RESIDENTIAL_RECOVERY.md](RESIDENTIAL_RECOVERY.md)。
 
@@ -46,13 +46,13 @@ curl --fail http://127.0.0.1:3001/api/services
 
 `deploy/node-list.service`、`deploy/node-list-update.service` 和 timer 可安装到 systemd。`deploy/update.sh` 会同步更新六个应用服务，健康检查失败时回滚对应版本。`NODE_EXPLORER_AUTO_UPDATE=false` 可关闭应用自动更新。
 
-## 来源、历史与当前状态
+## 来源与当前状态
 
-来源服务监听 `SUBS_CHECK_DIR` 下 `config/cache/config/results.json`、`output/all.yaml` 和 `output/base64.txt`，防抖导入，并周期兜底。`RESULTS_FILE` 可覆盖结果文件路径。快照按检测内容去重，即使没有用户打开页面也会积累历史。
+来源服务监听 `SUBS_CHECK_DIR` 下 `config/cache/config/results.json`、`output/all.yaml` 和 `output/base64.txt`，防抖导入，并周期兜底。`RESULTS_FILE` 可覆盖结果文件路径。来源批次按检测内容去重；同步游标持久化，仅在批次新增或修改时更新连接注册表，不在空闲时遍历全部批次。
 
 Qilan 来源在 `COMPOSE_FILE` 追加 `:compose.qilan.yaml`，设置 `QILAN_SESSION_HOST_FILE` 为宿主会话文件；挂载到来源服务，文件只含 session Cookie 值。可设置 `QILAN_REFRESH_INTERVAL_SECONDS`（默认 900，至少 60）、`QILAN_USER_AGENT`。非容器运行支持 `QILAN_SESSION` 或 `QILAN_SESSION_FILE`。`FEISHU_WEBHOOK_URL` 是可选的会话过期／恢复通知配置。Cookie 和节点凭据不进入公开 API。
 
-历史快照保存完整 `rawConfig` 或分享链接，作为后续检测的连接依据。同一连接跨批次按配置身份合并，当前连通性、出口和 IP 属性按身份附加到聚合结果，不覆盖原始历史。数据库备份包含连接凭据，按私有订阅管理。
+历史快照保存完整 `rawConfig` 或分享链接，作为后续检测的连接依据。同一连接跨批次按配置身份合并，当前连通性、出口和 IP 属性按身份保存；页面每次请求直接关联这些当前记录，在 SQL 中筛选、排序和分页，不读取来源批次的完整内容。数据库备份包含连接凭据，按私有订阅管理。
 
 首页展示保留期内所有未退役连接。PostgreSQL 默认保留 7 天快照，`SNAPSHOT_RETENTION_DAYS` 设为负值禁用自动清理；没有有效源快照的连接不会被恢复。人工退役由维护操作写入 `node_explorer_retired_nodes`；自动恢复只匹配已知的自动退役原因和原退役时间。
 
@@ -68,12 +68,12 @@ Qilan 来源在 `COMPOSE_FILE` 追加 `:compose.qilan.yaml`，设置 `QILAN_SESS
 
 ## API 与后端
 
-- `/api/results?view=aggregate&page=1&limit=50`：当前聚合分页，默认住宅优先；支持 `sort=preferred` 或速度、名称等显式排序。
-- `/api/results`、`/api/results?snapshot=<id>`、`/api/history`：最新／历史快照与批次分页。
+- `/api/results?page=1&limit=50`：实时查询当前节点并分页，默认住宅优先；支持 `sort=preferred` 或速度、名称等显式排序。
+- `/api/results`：实时查询全部当前节点。历史接口已移除，历史路径返回 404，snapshot 参数返回 400。
 - `/api/services`：工作进程心跳、队列等待、执行数量及保留期内恢复数。
 - `/api/health`：HTTP API 存活。worker 使用 `node-worker -role <角色> -health`。
 
-后端主要目录：`internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和增量投影，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-explorer` 只提供 API，`cmd/node-worker` 按角色启动独立服务；旧 `github-patrol` 命令只提示迁移。
+后端主要目录：`internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-explorer` 只提供 API，`cmd/node-worker` 按角色启动独立服务；旧 `github-patrol` 命令只提示迁移。
 
 `legacy/node-server/` 已归档，仅作为兼容行为基准及旧数据维护参考，不参与运行时调度。`npm test` 运行归档行为测试；`npm run test:backend` 验证 Go。集成测试使用显式 `NODE_EXPLORER_TEST_PG`／`NODE_EXPLORER_TEST_REDIS`，不自动连接生产环境。
 

@@ -23,7 +23,7 @@ test("shows missing services and refreshes observations without closing details"
       },
     }),
   );
-  await page.route("**/api/results?view=aggregate&**", (route) => {
+  await page.route("**/api/results?**", (route) => {
     reads++;
     sorts.push(new URL(route.request().url()).searchParams.get("sort") || "");
     return fulfillRoute(route, {

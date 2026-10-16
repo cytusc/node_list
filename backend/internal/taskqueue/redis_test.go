@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+func TestDeliveryScoreNeverPrecedesDatabaseDueTime(t *testing.T) {
+	base := time.Unix(1700000000, 0)
+	for _, offset := range []time.Duration{0, time.Microsecond, time.Millisecond - time.Microsecond, time.Millisecond} {
+		due := base.Add(offset)
+		score := int64(deliveryScore(due))
+		if time.UnixMilli(score).Before(due) || time.UnixMilli(score).Sub(due) >= time.Millisecond {
+			t.Fatalf("due %v became Redis score %d", due, score)
+		}
+	}
+}
+
 func TestRedisAtomicDeliveryDueTimeAndLaneIsolation(t *testing.T) {
 	address := os.Getenv("NODE_EXPLORER_TEST_REDIS")
 	if address == "" {
@@ -23,7 +34,7 @@ func TestRedisAtomicDeliveryDueTimeAndLaneIsolation(t *testing.T) {
 	defer q.Close()
 	defer q.client.Del(ctx, q.key("exit", true), q.key("exit", false))
 	for range 2 {
-		if e = q.Push(ctx, "exit", true, "one", time.Now()); e != nil {
+		if e = q.PushBatch(ctx, []Delivery{{Kind: "exit", High: true, Ref: "one", Due: time.Now().Add(-time.Second)}}); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -50,7 +61,7 @@ func TestRedisAtomicDeliveryDueTimeAndLaneIsolation(t *testing.T) {
 	if v, e := q.Pop(ctx, "exit", false); e != nil || v != "" {
 		t.Fatal("future work popped early")
 	}
-	if e = q.Push(ctx, "exit", false, "normal", time.Now()); e != nil {
+	if e = q.Push(ctx, "exit", false, "normal", time.Now().Add(-time.Second)); e != nil {
 		t.Fatal(e)
 	}
 	if v, e := q.Pop(ctx, "exit", true); e != nil || v != "" {

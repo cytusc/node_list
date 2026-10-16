@@ -24,6 +24,25 @@ func testAdapter(t *testing.T) *Adapter {
 	return a
 }
 
+func TestRuntimeSchemaDoesNotCreateLegacyProjection(t *testing.T) {
+	a := testAdapter(t)
+	ctx := context.Background()
+	// Every service calls initSchema at startup. A second call must use the
+	// committed version without creating tables for the retired API projection.
+	if err := a.initSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var current *string
+	var applied bool
+	if err := a.pool.QueryRow(ctx, `SELECT to_regclass('node_explorer_current_nodes')::text,
+	 EXISTS(SELECT 1 FROM node_explorer_service_migrations WHERE version=2)`).Scan(&current, &applied); err != nil {
+		t.Fatal(err)
+	}
+	if current != nil || !applied {
+		t.Fatalf("unexpected runtime migration: legacy projection=%v applied=%v", current, applied)
+	}
+}
+
 func TestProjectionGenerationsAndLockOwnership(t *testing.T) {
 	a := testAdapter(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -61,6 +80,10 @@ func TestProjectionGenerationsAndLockOwnership(t *testing.T) {
 	}
 	if err := p.Refresh(ctx); err != nil {
 		t.Fatal(err)
+	}
+	changes, err := a.ReadChanges(ctx, 0)
+	if err != nil || changes.Full || len(changes.Batches) != 1 {
+		t.Fatalf("publication forced a full source reload: %+v %v", changes, err)
 	}
 	page := func(p *Projector, want int) {
 		t.Helper()

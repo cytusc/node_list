@@ -35,6 +35,7 @@ type CollectorStatus struct {
 type Server struct {
 	store       *store.Store
 	projector   *postgres.Projector
+	live        *postgres.LiveReader
 	collector   func() CollectorStatus
 	distDir     string
 	hasPostgres bool
@@ -44,6 +45,7 @@ type Server struct {
 type ServerConfig struct {
 	Store       *store.Store
 	Projector   *postgres.Projector
+	Live        *postgres.LiveReader
 	Collector   func() CollectorStatus
 	DistDir     string
 	HasPostgres bool
@@ -54,6 +56,7 @@ func New(cfg ServerConfig) *Server {
 	return &Server{
 		store:       cfg.Store,
 		projector:   cfg.Projector,
+		live:        cfg.Live,
 		collector:   cfg.Collector,
 		distDir:     cfg.DistDir,
 		hasPostgres: cfg.HasPostgres,
@@ -64,7 +67,9 @@ func New(cfg ServerConfig) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.health)
-	mux.HandleFunc("/api/history", s.history)
+	if s.live == nil {
+		mux.HandleFunc("/api/history", s.history)
+	}
 	mux.HandleFunc("/api/results", s.results)
 	mux.HandleFunc("/api/downloads", notFound("订阅下载暂不可用。"))
 	mux.HandleFunc("/api/download", notFound("订阅下载暂不可用。"))
@@ -108,6 +113,10 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) results(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	if s.live != nil {
+		s.liveResults(w, r)
+		return
+	}
 	query := r.URL.Query()
 	rawID := query.Get("snapshot")
 	aggregate := query.Get("view") == "aggregate"
@@ -217,6 +226,41 @@ func (s *Server) results(w http.ResponseWriter, r *http.Request) {
 		SourceWarning: sourceWarningPtr(public.SourceWarning),
 		Collector:     status,
 	})
+}
+
+func (s *Server) liveResults(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Has("snapshot") {
+		writeError(w, http.StatusBadRequest, "仅支持查询当前节点状态。", "")
+		return
+	}
+	parsed, err := parseResultsQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "节点分页、筛选或排序参数无效。", "")
+		return
+	}
+	var q *postgres.Query
+	if parsed != nil {
+		q = &postgres.Query{Page: parsed.Page, Limit: parsed.Limit, Search: parsed.Search,
+			Countries: parsed.Countries, Types: parsed.Types, Networks: parsed.Networks,
+			Features: parsed.Features, IPSources: parsed.IPSources, IPAttributes: parsed.IPAttributes,
+			Media: parsed.Media, MinSpeed: parsed.MinSpeed, Sort: parsed.Sort, Direction: parsed.Direction}
+	}
+	page, err := s.live.QueryPage(r.Context(), q)
+	if err != nil {
+		fmt.Printf("live results query failed: %v\n", err)
+		writeUnavailable(w)
+		return
+	}
+	status := CollectorStatus{Enabled: false}
+	if s.collector != nil {
+		status = s.collector()
+	}
+	page.Nodes = publicSnapshot(domain.Snapshot{Nodes: page.Nodes}).Nodes
+	writeJSON(w, http.StatusOK, struct {
+		postgres.Result
+		Collector     CollectorStatus `json:"ippureCollector"`
+		SourceWarning *string         `json:"sourceWarning"`
+	}{*page, status, sourceWarningPtr(s.store.SourceWarning())})
 }
 
 // publicSnapshot strips credentials: raw links and configurations must never

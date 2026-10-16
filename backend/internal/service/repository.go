@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
@@ -52,7 +53,12 @@ type Job struct {
 
 func (j Job) Ref() string { return fmt.Sprintf("%d:%d", j.ID, j.Generation) }
 
-type Repository struct{ Pool *pgxpool.Pool }
+type Repository struct {
+	Pool            *pgxpool.Pool
+	registryMu      sync.Mutex
+	registryVersion int64
+	registryReady   bool
+}
 
 // schedule is used inside the same transaction as the fact that creates work.
 func schedule(ctx context.Context, tx pgx.Tx, kind, key string, p Payload, priority int, due time.Time) error {
@@ -83,24 +89,58 @@ func (r *Repository) Schedule(ctx context.Context, kind, key string, p Payload, 
 
 func (r *Repository) Publish(ctx context.Context, q taskqueue.Queue, kinds []string) error {
 	rows, err := r.Pool.Query(ctx, `SELECT id,generation,kind,priority,due_at FROM (
-	SELECT id,generation,kind,priority,due_at,row_number() OVER(PARTITION BY kind,(priority>0) ORDER BY CASE WHEN kind='recovery' AND payload ? 'startedAt' THEN 0 ELSE 1 END,due_at,id) AS lane_position FROM node_explorer_work
+	SELECT id,generation,kind,priority,due_at,published_at,published_generation,published_due_at,published_priority,
+	row_number() OVER(PARTITION BY kind,(priority>0) ORDER BY CASE WHEN kind='recovery' AND payload ? 'startedAt' THEN 0 ELSE 1 END,due_at,id) AS lane_position FROM node_explorer_work
 	WHERE kind=ANY($1) AND ((state='queued' AND due_at<=now()+interval '10 seconds')
 	OR (state='running' AND lease_until<now()))) pending
-	WHERE lane_position<=CASE WHEN kind='recovery' THEN 2 ELSE 1000 END ORDER BY priority DESC,due_at,id`, kinds)
+	WHERE lane_position<=CASE WHEN kind='recovery' THEN 2 ELSE 1000 END
+	AND (published_at IS NULL OR published_at<now()-interval '30 seconds'
+	 OR published_generation IS DISTINCT FROM generation OR published_due_at IS DISTINCT FROM due_at
+	 OR published_priority IS DISTINCT FROM priority)
+	ORDER BY priority DESC,due_at,id`, kinds)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	var jobs []Job
 	for rows.Next() {
 		var j Job
 		if err = rows.Scan(&j.ID, &j.Generation, &j.Kind, &j.Priority, &j.Due); err != nil {
+			rows.Close()
 			return err
 		}
-		if err = q.Push(ctx, j.Kind, j.Priority > 0, j.Ref(), j.Due); err != nil {
+		jobs = append(jobs, j)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil || len(jobs) == 0 {
+		return err
+	}
+	// Release the query connection before talking to Redis. Record publication
+	// only after the whole wave succeeds; partial delivery is safe to repeat.
+	deliveries := make([]taskqueue.Delivery, 0, len(jobs))
+	ids, generations, priorities := make([]int64, 0, len(jobs)), make([]int64, 0, len(jobs)), make([]int, 0, len(jobs))
+	dues := make([]time.Time, 0, len(jobs))
+	for _, j := range jobs {
+		deliveries = append(deliveries, taskqueue.Delivery{Kind: j.Kind, High: j.Priority > 0, Ref: j.Ref(), Due: j.Due})
+		ids, generations, priorities, dues = append(ids, j.ID), append(generations, j.Generation), append(priorities, j.Priority), append(dues, j.Due)
+	}
+	if batch, ok := q.(taskqueue.BatchQueue); ok {
+		if err = batch.PushBatch(ctx, deliveries); err != nil {
 			return err
+		}
+	} else {
+		for _, d := range deliveries {
+			if err = q.Push(ctx, d.Kind, d.High, d.Ref, d.Due); err != nil {
+				return err
+			}
 		}
 	}
-	return rows.Err()
+	// Fence concurrent reschedules and promotions. Unchanged queued work is
+	// repaired every 30 seconds after Redis loss or a crash between Pop and Claim.
+	_, err = r.Pool.Exec(ctx, `UPDATE node_explorer_work w SET published_at=now(),
+	 published_generation=d.generation,published_due_at=d.due_at,published_priority=d.priority
+	 FROM unnest($1::bigint[],$2::bigint[],$3::timestamptz[],$4::integer[]) AS d(id,generation,due_at,priority)
+	 WHERE w.id=d.id AND w.generation=d.generation AND w.due_at=d.due_at AND w.priority=d.priority`, ids, generations, dues, priorities)
+	return err
 }
 
 func randomToken() string {

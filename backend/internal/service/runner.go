@@ -112,6 +112,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	lastSchedule := time.Time{}
+	lastHeartbeat := time.Time{}
+	lastMessage := ""
 	for {
 		message := ""
 		if conn != nil {
@@ -131,8 +133,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := r.Repo.Publish(ctx, r.Queue, kinds); err != nil {
 			message = "Redis 任务投递暂时失败，保留持久化待投递记录"
 		}
-		if err := r.Repo.Heartbeat(ctx, ServiceName(r.Config.Role), message); err != nil && ctx.Err() == nil {
-			log.Printf("%s: heartbeat failed", r.Config.Role)
+		if time.Since(lastHeartbeat) >= 10*time.Second || message != lastMessage {
+			if err := r.Repo.Heartbeat(ctx, ServiceName(r.Config.Role), message); err != nil {
+				if ctx.Err() == nil {
+					log.Printf("%s: heartbeat failed", r.Config.Role)
+				}
+			} else {
+				lastHeartbeat, lastMessage = time.Now(), message
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -162,16 +170,23 @@ type waiting struct{ delay time.Duration }
 func (w waiting) Error() string { return "awaiting dependency" }
 
 func (r *Runner) consume(ctx context.Context, kind string, high bool) {
+	idleDelay := 250 * time.Millisecond
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
 	for ctx.Err() == nil {
 		ref, err := r.Queue.Pop(ctx, kind, high)
 		if err != nil || ref == "" {
+			timer.Reset(idleDelay)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(250 * time.Millisecond):
+			case <-timer.C:
 			}
+			idleDelay = min(2*time.Second, idleDelay*2)
 			continue
 		}
+		idleDelay = 250 * time.Millisecond
 		j, err := r.Repo.Claim(ctx, kind, ref, high)
 		if err != nil || j == nil {
 			continue

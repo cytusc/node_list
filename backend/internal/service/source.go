@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/qilan"
@@ -12,7 +13,7 @@ import (
 )
 
 func (r *Repository) RunSource(ctx context.Context, st *store.Store) error {
-	ingestor := store.NewIngestor(st)
+	ingestor := store.NewPersistentIngestor(st)
 	dir := Env("SUBS_CHECK_DIR", filepath.Join(Root(), "data", "sub"))
 	results := Env("RESULTS_FILE", filepath.Join(dir, "config", "cache", "config", "results.json"))
 	clash, links := filepath.Join(dir, "output", "all.yaml"), filepath.Join(dir, "output", "base64.txt")
@@ -39,6 +40,12 @@ func (r *Repository) RunSource(ctx context.Context, st *store.Store) error {
 	defer tick.Stop()
 	lastIngest := time.Now()
 	lastSweep := time.Time{}
+	retentionDays := 7
+	if value := os.Getenv("SNAPSHOT_RETENTION_DAYS"); value != "" {
+		if days, err := strconv.Atoi(value); err == nil {
+			retentionDays = days
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -49,6 +56,9 @@ func (r *Repository) RunSource(ctx context.Context, st *store.Store) error {
 				_, _ = r.Pool.Exec(ctx, `DELETE FROM node_explorer_probe_results WHERE checked_at<now()-interval '2 days'`)
 				_, _ = r.Pool.Exec(ctx, `DELETE FROM node_explorer_work WHERE state='done' AND due_at<now()-interval '2 days'`)
 				_, _ = r.Pool.Exec(ctx, `DELETE FROM node_explorer_lifecycle_events WHERE created_at<now()-interval '30 days'`)
+				if err := r.pruneSources(ctx, retentionDays); err != nil {
+					return err
+				}
 				lastSweep = time.Now()
 			}
 			if time.Since(lastIngest) >= 30*time.Second {
@@ -67,6 +77,26 @@ func (r *Repository) RunSource(ctx context.Context, st *store.Store) error {
 	}
 }
 
+// Preserve the existing source retention policy without starting a projector.
+func (r *Repository) pruneSources(ctx context.Context, days int) error {
+	if days <= 0 {
+		return nil
+	}
+	cutoff := time.Now().AddDate(0, 0, -days).UTC().Format(time.RFC3339Nano)
+	tx, err := r.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_ippure_results WHERE snapshot_id IN (SELECT id FROM node_explorer_snapshots WHERE imported_at<$1)`, cutoff); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_snapshots WHERE imported_at<$1`, cutoff); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 type Status struct {
 	Service           string    `json:"service"`
 	UpdatedAt         time.Time `json:"updatedAt"`
@@ -79,15 +109,37 @@ type Status struct {
 }
 
 func (r *Repository) Statuses(ctx context.Context) ([]Status, error) {
-	rows, err := r.Pool.Query(ctx, `WITH expected(service) AS (VALUES ('api'),('source-ingest'),('connectivity'),('ip-service'),('residential-recovery'),('node-lifecycle')),
- s AS (SELECT e.service,h.updated_at,h.payload FROM expected e LEFT JOIN node_explorer_service_status h USING(service))
- SELECT s.service,coalesce(s.updated_at,'0001-01-01'::timestamptz),coalesce(s.updated_at>now()-interval '90 seconds' AND coalesce(s.payload->>'error','')='',false),
- CASE WHEN s.updated_at IS NULL THEN '服务尚未启动' WHEN s.updated_at<=now()-interval '90 seconds' THEN '服务心跳已过期' ELSE coalesce(s.payload->>'error','') END,
- (SELECT count(*) FROM node_explorer_work w WHERE w.kind=ANY(CASE s.service WHEN 'ip-service' THEN ARRAY['exit','attributes','risk'] WHEN 'residential-recovery' THEN ARRAY['recovery'] WHEN 'node-lifecycle' THEN ARRAY['lifecycle'] WHEN 'connectivity' THEN ARRAY['connectivity'] ELSE ARRAY[]::text[] END) AND w.state='queued'),
- (SELECT count(*) FROM node_explorer_work w WHERE w.kind=ANY(CASE s.service WHEN 'ip-service' THEN ARRAY['exit','attributes','risk'] WHEN 'residential-recovery' THEN ARRAY['recovery'] WHEN 'node-lifecycle' THEN ARRAY['lifecycle'] WHEN 'connectivity' THEN ARRAY['connectivity'] ELSE ARRAY[]::text[] END) AND w.state='running'),
- coalesce((SELECT greatest(0,extract(epoch FROM now()-min(due_at))) FROM node_explorer_work w WHERE w.state='queued' AND w.kind=ANY(CASE s.service WHEN 'ip-service' THEN ARRAY['exit','attributes','risk'] WHEN 'residential-recovery' THEN ARRAY['recovery'] WHEN 'node-lifecycle' THEN ARRAY['lifecycle'] WHEN 'connectivity' THEN ARRAY['connectivity'] ELSE ARRAY[]::text[] END)),0),
- CASE WHEN s.service='node-lifecycle' THEN (SELECT count(*) FROM node_explorer_lifecycle_events WHERE action='restore' AND NOT dry_run) ELSE 0 END
- FROM s ORDER BY service`)
+	return r.statuses(ctx, []string{"api", "source-ingest", "connectivity", "ip-service", "residential-recovery", "node-lifecycle"})
+}
+
+// Status reads only one service and its associated work kinds.
+func (r *Repository) Status(ctx context.Context, service string) (Status, error) {
+	all, err := r.statuses(ctx, []string{service})
+	if err != nil {
+		return Status{}, err
+	}
+	return all[0], nil
+}
+
+func (r *Repository) statuses(ctx context.Context, services []string) ([]Status, error) {
+	rows, err := r.Pool.Query(ctx, `WITH requested(service) AS (SELECT unnest($1::text[])),
+ kinds(service,kind) AS (VALUES ('connectivity','connectivity'),('ip-service','exit'),
+ ('ip-service','attributes'),('ip-service','risk'),('residential-recovery','recovery'),('node-lifecycle','lifecycle')),
+ work AS (
+ SELECT k.service,count(*) FILTER(WHERE w.state='queued') AS queued,
+ count(*) FILTER(WHERE w.state='running') AS running,
+ min(w.due_at) FILTER(WHERE w.state='queued') AS oldest
+ FROM requested r JOIN kinds k USING(service) JOIN node_explorer_work w ON w.kind=k.kind
+ WHERE w.state<>'done' GROUP BY k.service
+ )
+ SELECT r.service,coalesce(h.updated_at,'0001-01-01'::timestamptz),
+ coalesce(h.updated_at>now()-interval '90 seconds' AND coalesce(h.payload->>'error','')='',false),
+ CASE WHEN h.updated_at IS NULL THEN '服务尚未启动' WHEN h.updated_at<=now()-interval '90 seconds' THEN '服务心跳已过期' ELSE coalesce(h.payload->>'error','') END,
+ coalesce(w.queued,0),coalesce(w.running,0),
+ coalesce(greatest(0,extract(epoch FROM now()-w.oldest)),0)::double precision,
+ CASE WHEN r.service='node-lifecycle' THEN (SELECT count(*) FROM node_explorer_lifecycle_events WHERE action='restore' AND NOT dry_run) ELSE 0 END
+ FROM requested r LEFT JOIN node_explorer_service_status h USING(service) LEFT JOIN work w USING(service)
+ ORDER BY r.service`, services)
 	if err != nil {
 		return nil, err
 	}

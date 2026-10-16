@@ -42,30 +42,22 @@ CREATE TABLE IF NOT EXISTS node_explorer_service_status (
 CREATE TABLE IF NOT EXISTS node_explorer_provider_limits (
   provider text PRIMARY KEY, next_at timestamptz NOT NULL
 );
-CREATE OR REPLACE FUNCTION node_explorer_observation_changed() RETURNS trigger
-LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
-BEGIN
-  UPDATE node_explorer_results_state SET source_revision = source_revision + 1;
-  PERFORM pg_notify('node_explorer_changes', '');
-  RETURN NULL;
-END $$;
-DO $$ DECLARE tbl text; BEGIN
-  FOREACH tbl IN ARRAY ARRAY['node_explorer_connectivity','node_explorer_exits','node_explorer_ip_attributes'] LOOP
-    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = tbl::regclass AND tgname = 'observation_changed') THEN
-      EXECUTE format('CREATE TRIGGER observation_changed AFTER INSERT OR UPDATE OR DELETE ON %I FOR EACH STATEMENT EXECUTE FUNCTION node_explorer_observation_changed()', tbl);
-    END IF;
-  END LOOP;
-END $$;
+-- Live readers no longer consume projection revisions or notifications for
+-- runtime observations. Remove the old global-row write hotspot.
+DROP TRIGGER IF EXISTS registry_changed ON node_explorer_node_registry;
+DROP TRIGGER IF EXISTS observation_changed ON node_explorer_connectivity;
+DROP TRIGGER IF EXISTS observation_changed ON node_explorer_exits;
+DROP TRIGGER IF EXISTS observation_changed ON node_explorer_ip_attributes;
+DROP FUNCTION IF EXISTS node_explorer_observation_changed();
+
+ALTER TABLE node_explorer_work
+ ADD COLUMN IF NOT EXISTS published_at timestamptz,
+ ADD COLUMN IF NOT EXISTS published_generation bigint,
+ ADD COLUMN IF NOT EXISTS published_due_at timestamptz,
+ ADD COLUMN IF NOT EXISTS published_priority integer;
 INSERT INTO node_explorer_service_migrations(version) VALUES (1) ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS node_explorer_lifecycle_events (
  id bigserial PRIMARY KEY, identity text NOT NULL, action text NOT NULL,
  dry_run boolean NOT NULL, reason text NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
 );
-
-DO $$ BEGIN
- IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='node_explorer_node_registry'::regclass AND tgname='registry_changed') THEN
-  CREATE TRIGGER registry_changed AFTER INSERT OR UPDATE OR DELETE ON node_explorer_node_registry
-  FOR EACH ROW EXECUTE FUNCTION node_explorer_observation_changed();
- END IF;
-END $$;
