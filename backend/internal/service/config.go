@@ -93,6 +93,8 @@ func ConfigFromEnv(role string) (Config, error) {
 	if role == "ip" {
 		prefix = "IP_SERVICE"
 	}
+	c.HighConcurrency = Number(prefix+"_HIGH_CONCURRENCY", c.HighConcurrency)
+	c.NormalConcurrency = Number(prefix+"_NORMAL_CONCURRENCY", c.NormalConcurrency)
 	seen := map[string]bool{}
 	for _, lane := range []string{"HIGH", "NORMAL"} {
 		base := prefix + "_" + lane

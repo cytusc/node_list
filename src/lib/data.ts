@@ -49,9 +49,12 @@ export type ServiceStatus = {
   healthy: boolean;
   error?: string;
   queued: number;
+  scheduled?: number;
   running: number;
   oldestWaitSeconds: number;
   restored: number;
+  checked?: number;
+  skipped?: number;
 };
 export type NodeRecord = {
   connectivity?: { checkedAt: string; reachable: boolean; error?: string };

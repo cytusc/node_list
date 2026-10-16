@@ -54,7 +54,7 @@ func (r *Repository) RunSource(ctx context.Context, st *store.Store) error {
 			if time.Since(lastSweep) >= time.Hour {
 				// Network sessions cannot remain valid for more than three minutes.
 				_, _ = r.Pool.Exec(ctx, `DELETE FROM node_explorer_probe_results WHERE checked_at<now()-interval '2 days'`)
-				_, _ = r.Pool.Exec(ctx, `DELETE FROM node_explorer_work WHERE state='done' AND due_at<now()-interval '2 days'`)
+				_ = r.pruneCompletedWork(ctx)
 				_, _ = r.Pool.Exec(ctx, `DELETE FROM node_explorer_lifecycle_events WHERE created_at<now()-interval '30 days'`)
 				if err := r.pruneSources(ctx, retentionDays); err != nil {
 					return err
@@ -103,9 +103,12 @@ type Status struct {
 	Healthy           bool      `json:"healthy"`
 	Error             string    `json:"error,omitempty"`
 	Queued            int64     `json:"queued"`
+	Scheduled         int64     `json:"scheduled"`
 	Running           int64     `json:"running"`
 	OldestWaitSeconds float64   `json:"oldestWaitSeconds"`
 	Restored          int64     `json:"restored"`
+	Checked           int64     `json:"checked"`
+	Skipped           int64     `json:"skipped"`
 }
 
 func (r *Repository) Statuses(ctx context.Context) ([]Status, error) {
@@ -126,18 +129,21 @@ func (r *Repository) statuses(ctx context.Context, services []string) ([]Status,
  kinds(service,kind) AS (VALUES ('connectivity','connectivity'),('ip-service','exit'),
  ('ip-service','attributes'),('ip-service','risk'),('residential-recovery','recovery'),('node-lifecycle','lifecycle')),
  work AS (
- SELECT k.service,count(*) FILTER(WHERE w.state='queued') AS queued,
+ SELECT k.service,count(*) FILTER(WHERE w.state='queued' AND w.due_at<=now()) AS queued,
+ count(*) FILTER(WHERE w.state='queued' AND w.due_at>now()) AS scheduled,
  count(*) FILTER(WHERE w.state='running') AS running,
- min(w.due_at) FILTER(WHERE w.state='queued') AS oldest
+ min(w.due_at) FILTER(WHERE w.state='queued' AND w.due_at<=now()) AS oldest,
+ count(*) FILTER(WHERE w.state='done' AND w.payload->>'recoveryResult' IN ('eligible','not-residential','probe-failed','exit-changed','timed-out')) AS checked,
+ count(*) FILTER(WHERE w.state='done' AND w.payload->>'recoveryResult'='skipped-datacenter-asn') AS skipped
  FROM requested r JOIN kinds k USING(service) JOIN node_explorer_work w ON w.kind=k.kind
- WHERE w.state<>'done' GROUP BY k.service
+ WHERE w.state<>'done' OR w.kind='recovery' GROUP BY k.service
  )
  SELECT r.service,coalesce(h.updated_at,'0001-01-01'::timestamptz),
  coalesce(h.updated_at>now()-interval '90 seconds' AND coalesce(h.payload->>'error','')='',false),
  CASE WHEN h.updated_at IS NULL THEN '服务尚未启动' WHEN h.updated_at<=now()-interval '90 seconds' THEN '服务心跳已过期' ELSE coalesce(h.payload->>'error','') END,
- coalesce(w.queued,0),coalesce(w.running,0),
+ coalesce(w.queued,0),coalesce(w.scheduled,0),coalesce(w.running,0),
  coalesce(greatest(0,extract(epoch FROM now()-w.oldest)),0)::double precision,
- CASE WHEN r.service='node-lifecycle' THEN (SELECT count(*) FROM node_explorer_lifecycle_events WHERE action='restore' AND NOT dry_run) ELSE 0 END
+ CASE WHEN r.service='node-lifecycle' THEN (SELECT count(*) FROM node_explorer_lifecycle_events WHERE action='restore' AND NOT dry_run) ELSE 0 END,coalesce(w.checked,0),coalesce(w.skipped,0)
  FROM requested r LEFT JOIN node_explorer_service_status h USING(service) LEFT JOIN work w USING(service)
  ORDER BY r.service`, services)
 	if err != nil {
@@ -147,10 +153,16 @@ func (r *Repository) statuses(ctx context.Context, services []string) ([]Status,
 	out := []Status{}
 	for rows.Next() {
 		var s Status
-		if err = rows.Scan(&s.Service, &s.UpdatedAt, &s.Healthy, &s.Error, &s.Queued, &s.Running, &s.OldestWaitSeconds, &s.Restored); err != nil {
+		if err = rows.Scan(&s.Service, &s.UpdatedAt, &s.Healthy, &s.Error, &s.Queued, &s.Scheduled, &s.Running, &s.OldestWaitSeconds, &s.Restored, &s.Checked, &s.Skipped); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// Recovery rows are durable verification markers, not expiring probe sessions.
+func (r *Repository) pruneCompletedWork(ctx context.Context) error {
+	_, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_work WHERE state='done' AND kind<>'recovery' AND due_at<now()-interval '2 days'`)
+	return err
 }

@@ -29,16 +29,17 @@ const (
 )
 
 type Payload struct {
-	Identity    string    `json:"identity,omitempty"`
-	CheckedAt   string    `json:"checkedAt,omitempty"`
-	IP          string    `json:"ip,omitempty"`
-	ExitVersion int64     `json:"exitVersion,omitempty"`
-	RetiredAt   string    `json:"retiredAt,omitempty"`
-	Reason      string    `json:"reason,omitempty"`
-	Session     string    `json:"session,omitempty"`
-	ExpectedIP  string    `json:"expectedIP,omitempty"`
-	Action      string    `json:"action,omitempty"`
-	StartedAt   time.Time `json:"startedAt,omitempty,omitzero"`
+	RecoveryResult string    `json:"recoveryResult,omitempty"`
+	Identity       string    `json:"identity,omitempty"`
+	CheckedAt      string    `json:"checkedAt,omitempty"`
+	IP             string    `json:"ip,omitempty"`
+	ExitVersion    int64     `json:"exitVersion,omitempty"`
+	RetiredAt      string    `json:"retiredAt,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	Session        string    `json:"session,omitempty"`
+	ExpectedIP     string    `json:"expectedIP,omitempty"`
+	Action         string    `json:"action,omitempty"`
+	StartedAt      time.Time `json:"startedAt,omitempty,omitzero"`
 }
 
 type Job struct {

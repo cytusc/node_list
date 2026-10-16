@@ -259,7 +259,7 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 		if e = writeProbe(ctx, tx, j.Payload.Session, KindExit, t.Identity, v); e != nil {
 			return e
 		}
-		if v.Error == "" && v.AddressFamily == 4 {
+		if v.Error == "" && v.AddressFamily == 4 && !strings.HasPrefix(j.Payload.Session, "recovery:") {
 			if e = scheduleIP(ctx, tx, v.IP, t.Identity, j.Priority); e != nil {
 				return e
 			}
