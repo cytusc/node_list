@@ -55,7 +55,7 @@ bash deploy/compose.sh ps
 curl --fail http://127.0.0.1:3001/api/services
 ```
 
-`compose.yaml` 已包含全部 worker、十六个专用 Mihomo 和持久化 Redis，不暴露它们的宿主端口；只有来源服务挂载 subs-check 文件。旧的 `compose.pgsql.yaml`、`compose.ippure.yaml`、`compose.patrol.yaml`、`compose.patrol.pgsql.yaml` 成为空兼容 overlay，可从 `COMPOSE_FILE` 移除。`compose.qilan.yaml` 现在挂载到来源服务。现有更新脚本会一起更新／回滚六个应用服务。
+`compose.yaml` 已包含全部 worker、十六个专用 Mihomo 和持久化 Redis，不暴露它们的宿主端口；只有来源服务挂载 subs-check 文件。旧的 `compose.pgsql.yaml`、`compose.ippure.yaml`、`compose.patrol.yaml`、`compose.patrol.pgsql.yaml` 空兼容 overlay 已从仓库删除；仍在 `COMPOSE_FILE` 中引用它们的旧部署需先移除这些引用再升级。`compose.qilan.yaml` 现在挂载到来源服务。现有更新脚本会一起更新／回滚六个应用服务。
 
 没有 PostgreSQL 配置时启动会失败。运行时不再支持 SQLite，也不自动搬迁 SQLite 历史。旧 SQLite 卷不会被删除；需要保留旧历史时应单独迁移或继续保存备份。
 

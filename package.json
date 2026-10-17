@@ -1,6 +1,5 @@
 {
   "name": "node-explorer",
-  "version": "1.4.3",
   "private": true,
   "type": "module",
   "scripts": {

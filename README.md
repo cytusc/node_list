@@ -42,7 +42,7 @@ curl --fail http://127.0.0.1:3001/api/services
 
 默认 `COMPOSE_FILE=compose.yaml:compose.subs-check.yaml`，包含六个应用服务、Redis、四个专用 Mihomo 和上游 subs-check。已有 subs-check 时可只使用 `compose.yaml`。数据库是已有外部服务，不自动新建。只有来源服务挂载订阅目录；所有代理和 Redis 都不发布宿主端口。Web 默认绑定 `127.0.0.1:3001`，可用 `BIND_ADDRESS`／`WEB_PORT` 调整。
 
-旧的 PG／IPPure／巡检 overlay 可继续出现在 `COMPOSE_FILE` 中，但已不再创建额外服务。升级应停止旧巡检与采集进程，更新 Compose 文件，保留数据库与旧 SQLite 卷；SQLite 历史不会自动迁移。详见模块化升级说明。
+旧的 PG／IPPure／巡检 overlay 已删除（它们曾是为旧部署保留的空兼容文件，生产自 v1.4.x 起已不在 `COMPOSE_FILE` 中引用）。升级应停止旧巡检与采集进程，更新 Compose 文件，保留数据库与旧 SQLite 卷；SQLite 历史不会自动迁移。详见模块化升级说明。
 
 `deploy/node-list.service`、`deploy/node-list-update.service` 和 timer 可安装到 systemd。`deploy/update.sh` 会同步更新六个应用服务，健康检查失败时回滚对应版本。`NODE_EXPLORER_AUTO_UPDATE=false` 可关闭应用自动更新。
 
@@ -73,7 +73,7 @@ Qilan 来源在 `COMPOSE_FILE` 追加 `:compose.qilan.yaml`，设置 `QILAN_SESS
 - `/api/services`：工作进程心跳、队列等待、执行数量及保留期内恢复数。
 - `/api/health`：HTTP API 存活。worker 使用 `node-worker -role <角色> -health`。
 
-后端主要目录：`internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-explorer` 只提供 API，`cmd/node-worker` 按角色启动独立服务；旧 `github-patrol` 命令只提示迁移。
+后端主要目录：`internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-explorer` 只提供 API，`cmd/node-worker` 按角色启动独立服务（source／connectivity／ip／residential／lifecycle）。切换期的一次性分析命令（idcheck/idscan/linkdiff/sortchk）与旧 patrol 入口已完成使命并删除。
 
 `legacy/node-server/` 已归档，仅作为兼容行为基准及旧数据维护参考，不参与运行时调度。`npm test` 运行归档行为测试；`npm run test:backend` 验证 Go。集成测试使用显式 `NODE_EXPLORER_TEST_PG`／`NODE_EXPLORER_TEST_REDIS`，不自动连接生产环境。
 
