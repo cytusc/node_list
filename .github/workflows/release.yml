@@ -126,7 +126,7 @@ jobs:
           docker exec lifecycle-smoke node-worker -role lifecycle -health
       - name: Package production files
         if: startsWith(github.ref, 'refs/tags/')
-        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz dist backend legacy package.json package-lock.json Dockerfile compose.yaml compose.subs-check.yaml compose.pgsql.yaml compose.ippure.yaml compose.patrol.yaml compose.patrol.pgsql.yaml compose.qilan.yaml deploy README.md MODULAR_SERVICES.md RESIDENTIAL_RECOVERY.md .env.example
+        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz dist backend legacy package.json package-lock.json Dockerfile compose.yaml compose.subs-check.yaml compose.qilan.yaml deploy README.md MODULAR_SERVICES.md RESIDENTIAL_RECOVERY.md .env.example
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:

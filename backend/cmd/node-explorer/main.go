@@ -3,6 +3,9 @@ package main
 
 import (
 	"context"
+	"sync"
+	"time"
+
 	"github.com/cytusc/node_list/backend/internal/api"
 	"github.com/cytusc/node_list/backend/internal/service"
 	"github.com/cytusc/node_list/backend/internal/store"
@@ -12,7 +15,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 )
 
 func main() {
@@ -20,6 +22,41 @@ func main() {
 		log.Fatal(err)
 	}
 }
+
+// ttlCache memoizes a dashboard read for ttl and collapses concurrent misses
+// into a single query. Failures are never cached, so a transient fault clears
+// on the next request instead of persisting for the whole window. Staleness
+// stays below the frontend poll interval by configuration.
+type ttlCache[T any] struct {
+	mu   sync.Mutex
+	ttl  time.Duration
+	load func(context.Context) (T, error)
+	at   time.Time
+	val  T
+}
+
+func (c *ttlCache[T]) Get(ctx context.Context) (T, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.at.IsZero() && time.Since(c.at) < c.ttl {
+		return c.val, nil
+	}
+	val, err := c.load(ctx)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	c.val, c.at = val, time.Now()
+	return val, nil
+}
+
+// servicesSource adapts the cached board to the api.WriteServices contract.
+type servicesSource struct{ cache *ttlCache[[]service.Status] }
+
+func (s servicesSource) Statuses(ctx context.Context) ([]service.Status, error) {
+	return s.cache.Get(ctx)
+}
+
 func run() error {
 	root := service.Root()
 	service.LoadEnv(root)
@@ -55,18 +92,36 @@ func run() error {
 			}
 		}
 	}()
+	collectorCache := &ttlCache[api.CollectorStatus]{
+		ttl: service.Seconds("API_COLLECTOR_CACHE_SECONDS", 5),
+		load: func(ctx context.Context) (api.CollectorStatus, error) {
+			check, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			s, e := repo.Status(check, "ip-service")
+			if e != nil {
+				return api.CollectorStatus{Enabled: true, Error: "服务状态暂不可用"}, e
+			}
+			return api.CollectorStatus{Enabled: true, Running: s.Healthy, Queued: int(s.Queued), LastRun: s.UpdatedAt.Format(time.RFC3339), Error: s.Error}, nil
+		},
+	}
 	collector := func() api.CollectorStatus {
-		check, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		s, e := repo.Status(check, "ip-service")
-		if e != nil {
+		s, err := collectorCache.Get(ctx)
+		if err != nil {
 			return api.CollectorStatus{Enabled: true, Error: "服务状态暂不可用"}
 		}
-		return api.CollectorStatus{Enabled: true, Running: s.Healthy, Queued: int(s.Queued), LastRun: s.UpdatedAt.Format(time.RFC3339), Error: s.Error}
+		return s
+	}
+	servicesCache := &ttlCache[[]service.Status]{
+		ttl: service.Seconds("API_SERVICES_CACHE_SECONDS", 10),
+		load: func(ctx context.Context) ([]service.Status, error) {
+			return repo.Statuses(ctx)
+		},
 	}
 	server := api.New(api.ServerConfig{Store: st, Live: postgres.NewLiveReader(a.Pool()), Collector: collector, DistDir: filepath.Join(root, "dist"), HasPostgres: true})
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/services", func(w http.ResponseWriter, req *http.Request) { api.WriteServices(w, req, repo) })
+	mux.HandleFunc("/api/services", func(w http.ResponseWriter, req *http.Request) {
+		api.WriteServices(w, req, servicesSource{servicesCache})
+	})
 	mux.Handle("/", server.Handler())
 	return api.Serve(ctx, mux, service.Env("HOST", "127.0.0.1")+":"+service.Env("API_PORT", "3001"))
 }

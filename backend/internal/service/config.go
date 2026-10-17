@@ -75,17 +75,45 @@ type Config struct {
 	Role                                string
 	ResidentialInterval, NormalInterval time.Duration
 	Timeout, RetryDelay                 time.Duration
+	ScheduleInterval                    time.Duration
 	HighConcurrency, NormalConcurrency  int
-	APIOrigin                           string
-	HighRouter, NormalRouter            *transport.Router
-	DryRun                              bool
+	// LaneConcurrency overrides the consumer count per work kind. Slow lanes
+	// (risk, attributes, lifecycle, recovery) default to one so raising a
+	// count stays an explicit operational choice.
+	LaneConcurrency          map[string]int
+	APIOrigin                string
+	HighRouter, NormalRouter *transport.Router
+	DryRun                   bool
+}
+
+// laneConcurrency reads per-kind consumer counts. The role prefix wins over
+// the generic name, mirroring the lane concurrency convention; both default
+// to one consumer so probe-heavy lanes are unaffected unless configured.
+func laneConcurrency(role string) map[string]int {
+	prefix := "CONNECTIVITY"
+	switch role {
+	case "ip":
+		prefix = "IP_SERVICE"
+	case "residential":
+		prefix = "RESIDENTIAL_RECOVERY"
+	case "lifecycle":
+		prefix = "LIFECYCLE"
+	}
+	out := map[string]int{}
+	for _, kind := range []string{KindRisk, KindAttributes, KindLifecycle, KindRecovery} {
+		name := strings.ToUpper(kind)
+		out[kind] = Number(prefix+"_"+name+"_CONCURRENCY", Number(name+"_CONCURRENCY", 1))
+	}
+	return out
 }
 
 func ConfigFromEnv(role string) (Config, error) {
 	c := Config{Role: role, ResidentialInterval: Seconds("RESIDENTIAL_INTERVAL_SECONDS", 300), NormalInterval: Seconds("NORMAL_INTERVAL_SECONDS", 1800),
 		Timeout: Seconds("PROBE_TIMEOUT_SECONDS", 12), RetryDelay: Seconds("PROBE_RETRY_SECONDS", 10),
-		HighConcurrency: Number("RESIDENTIAL_CONCURRENCY", 2), NormalConcurrency: Number("NORMAL_CONCURRENCY", 2),
-		APIOrigin: Env("IPPURE_API_ORIGIN", "https://api.123169.xyz"), DryRun: Env("LIFECYCLE_DRY_RUN", "false") == "true"}
+		ScheduleInterval: Seconds("SCHEDULE_INTERVAL_SECONDS", 5),
+		HighConcurrency:  Number("RESIDENTIAL_CONCURRENCY", 2), NormalConcurrency: Number("NORMAL_CONCURRENCY", 2),
+		LaneConcurrency: laneConcurrency(role),
+		APIOrigin:       Env("IPPURE_API_ORIGIN", "https://api.123169.xyz"), DryRun: Env("LIFECYCLE_DRY_RUN", "false") == "true"}
 	if role != "connectivity" && role != "ip" {
 		return c, nil
 	}

@@ -39,6 +39,19 @@ func (r *Runner) kinds() []string {
 	return nil
 }
 
+// laneCount returns the consumer count for one kind and priority lane. Slow
+// lanes carry an explicit per-kind count (Config.LaneConcurrency); probe lanes
+// use the shared lane concurrency.
+func (r *Runner) laneCount(kind string, high bool) int {
+	if n, ok := r.Config.LaneConcurrency[kind]; ok && n > 0 {
+		return n
+	}
+	if high {
+		return r.Config.HighConcurrency
+	}
+	return r.Config.NormalConcurrency
+}
+
 func (r *Runner) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -95,13 +108,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	for _, kind := range kinds {
 		for _, high := range []bool{true, false} {
-			count := r.Config.NormalConcurrency
-			if high {
-				count = r.Config.HighConcurrency
-			}
-			if kind == KindRisk || kind == KindAttributes || kind == KindLifecycle || kind == KindRecovery {
-				count = 1
-			}
+			count := r.laneCount(kind, high)
 			for i := 0; i < count; i++ {
 				wg.Add(1)
 				go func(kind string, high bool) { defer wg.Done(); r.consume(ctx, kind, high) }(kind, high)
@@ -124,7 +131,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				return fmt.Errorf("controller ownership connection lost")
 			}
 		}
-		if time.Since(lastSchedule) >= 5*time.Second {
+		if time.Since(lastSchedule) >= r.Config.ScheduleInterval {
 			if err := r.schedule(ctx); err != nil {
 				message = "任务调度暂时失败"
 			}

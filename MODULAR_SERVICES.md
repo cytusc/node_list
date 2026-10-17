@@ -73,7 +73,7 @@ npm run dev
 ./backend/node-worker -role lifecycle
 ```
 
-各命令分别在终端或进程管理器中运行。填写 `.env.example` 的 Redis、PostgreSQL 和四组专用控制器配置；住宅与普通通道不能共享控制器，不同服务的控制器所有权也有数据库锁保护。探测服务需要 `PGPOOL_MAX>=2`，默认每个服务最多 6 个连接。
+各命令分别在终端或进程管理器中运行。填写 `.env.example` 的 Redis、PostgreSQL 和四组专用控制器配置；住宅与普通通道不能共享控制器，不同服务的控制器所有权也有数据库锁保护。探测服务需要 `PGPOOL_MAX>=2`，默认每个服务最多 8 个连接（控制器所有权常驻 1 个，剩余供任务租约与写入使用）。慢车道（risk/attributes/lifecycle/recovery）消费者默认每通道 1 个，可用 `<角色前缀>_<KIND>_CONCURRENCY` 或通用 `<KIND>_CONCURRENCY` 调整；ip-service 的 Compose 默认 `IP_SERVICE_RISK_CONCURRENCY=2`。
 
 `/api/services` 返回六个服务的心跳、已到期的待处理任务、未到期的定时等待任务、执行中任务、最久逾期等待时间、已完成核验数、机房 ASN 跳过数和保留期内的恢复数；未启动或心跳超过 90 秒的服务算异常。探测 worker 正常心跳每 10 秒写入，错误状态变化时立即写入；控制器所有权连接仍每秒检查。结果接口仅查询 IP 服务状态，服务列表按需汇总六个服务的任务计数。`node-worker -role <角色> -health` 可单独检查。`/api/health` 仍表示 HTTP API 存活。
 
