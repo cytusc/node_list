@@ -1,2 +1,0 @@
-# Compatibility overlay. PostgreSQL and modular workers are now included in compose.yaml.
-services: {}

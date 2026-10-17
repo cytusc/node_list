@@ -6,6 +6,11 @@
 // pinned two cores. Go keeps the decoded batches in-process behind an
 // RWMutex, so a refresh only re-reads the batches PostgreSQL reported as
 // changed and every reader sees the same memory.
+//
+// A read-through store (NewReadThrough) answers the same views without
+// retaining anything: every read loads one view from the adapter and runs the
+// identical hydrate, fold and filter code over it. Both modes share those code
+// paths, so their responses are byte-identical by construction.
 package store
 
 import (
@@ -128,6 +133,12 @@ type Store struct {
 
 	// refresh is the projection rebuild hook; nil for SQLite deployments.
 	refresh func(context.Context) error
+
+	// readThrough answers every read from the adapter without retaining
+	// decoded batches: the same views are served while the process holds no
+	// snapshot memory. Reload, Refresh and Sync degrade to no-ops, and writes
+	// stop updating a cache no read ever consults.
+	readThrough bool
 }
 
 // New builds a store over an adapter.
@@ -142,6 +153,18 @@ func New(adapter Adapter, refresh func(context.Context) error) *Store {
 		refreshFlight: newFlight(),
 		refresh:       refresh,
 	}
+}
+
+// NewReadThrough builds a store that answers reads from the adapter on demand.
+// The views are byte-identical to the retained store's - the same hydrate,
+// fold and filter code runs over a freshly loaded view - but nothing decoded
+// stays in memory, so the process footprint no longer scales with the batch
+// history. Collectors and patrol keep their own retained store: they loop over
+// the whole set, which is exactly what the cache is for.
+func NewReadThrough(adapter Adapter) *Store {
+	s := New(adapter, nil)
+	s.readThrough = true
+	return s
 }
 
 // flight collapses concurrent callers onto one in-flight operation, so a burst
@@ -189,8 +212,8 @@ const (
 )
 
 // SourceWarningFor classifies an ingestion failure. A missing file is expected
-// while subs-check has not finished its first round, so it is not reported as a
-// read failure; anything else is.
+// while subs-check has not finished its first round, so it is not reported as
+// a read failure; anything else is.
 func SourceWarningFor(err error) string {
 	switch {
 	case err == nil:
@@ -246,8 +269,12 @@ func (s *Store) SetRefresh(fn func(context.Context) error) {
 }
 
 // Reload re-reads every batch, enrichment and retirement from the adapter. Used
-// after a full rebuild or a provenance reconciliation.
+// after a full rebuild or a provenance reconciliation. A read-through store
+// retains nothing, so there is nothing to reload.
 func (s *Store) Reload(ctx context.Context) error {
+	if s.readThrough {
+		return nil
+	}
 	s.ioMu.Lock()
 	defer s.ioMu.Unlock()
 	if reader, ok := s.adapter.(ChangeReader); ok {
@@ -306,6 +333,9 @@ func (s *Store) reloadLegacy(ctx context.Context) error {
 
 // RemoveBatch drops a batch from the cache after pruning.
 func (s *Store) RemoveBatch(ids []int) {
+	if s.readThrough {
+		return
+	}
 	s.mu.Lock()
 	for _, id := range ids {
 		delete(s.batches, id)
@@ -324,35 +354,51 @@ func (s *Store) rebuildOrderLocked() {
 	s.order = ids
 }
 
-// RetiredNodeIdentities is the hot-path read used before every probe.
+// RetiredNodeIdentities is the hot-path read used before every probe. A
+// read-through store answers from the adapter; an adapter failure yields an
+// empty set, which only costs a redundant probe round.
 func (s *Store) RetiredNodeIdentities() map[string]struct{} {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.retiredNodeIdentitiesLocked()
-}
-
-func (s *Store) retiredNodeIdentitiesLocked() map[string]struct{} {
-	out := make(map[string]struct{}, len(s.retired))
-	for k := range s.retired {
-		out[k] = struct{}{}
+	if s.readThrough {
+		rows, err := s.adapter.RetiredNodes(context.Background())
+		if err != nil {
+			return map[string]struct{}{}
+		}
+		out := make(map[string]struct{}, len(rows))
+		for _, row := range rows {
+			out[row.Identity] = struct{}{}
+		}
+		return out
 	}
-	return out
+	v := s.cachedView()
+	return v.retiredIdentities()
 }
 
 // RetiredRows returns the full retirement list for the patrol recovery pass.
+// The read-through variant reads the adapter and reports an empty list on
+// failure, which skips a recovery pass rather than inventing candidates.
 func (s *Store) RetiredRows() []RetiredRow {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]RetiredRow, 0, len(s.retired))
-	for _, row := range s.retired {
+	if s.readThrough {
+		rows, err := s.adapter.RetiredNodes(context.Background())
+		if err != nil {
+			return nil
+		}
+		return sortedRetiredRows(rows)
+	}
+	v := s.cachedView()
+	out := make([]RetiredRow, 0, len(v.retired))
+	for _, row := range v.retired {
 		out = append(out, row)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Identity < out[j].Identity })
-	return out
+	return sortedRetiredRows(out)
+}
+
+func sortedRetiredRows(rows []RetiredRow) []RetiredRow {
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Identity < rows[j].Identity })
+	return rows
 }
 
 // hydrate attaches enrichment to a batch, returning independent node copies.
-func (s *Store) hydrate(batch *batchedSnapshot, enrich map[int]json.RawMessage, retired map[string]RetiredRow) domain.Snapshot {
+func hydrate(batch *batchedSnapshot, enrich map[int]json.RawMessage, retired map[string]RetiredRow) domain.Snapshot {
 	out := domain.Snapshot{
 		ID:         batch.ID,
 		CheckedAt:  batch.CheckedAt,
@@ -404,24 +450,189 @@ func (s *Store) hydrate(batch *batchedSnapshot, enrich map[int]json.RawMessage, 
 	return out
 }
 
-// Aggregate folds every batch into the current node set: the newest batch that
-// mentions a connection wins, and the most recent enrichment follows the
-// identity across batches.
-//
-// The JavaScript version re-decoded payloads on every call because the worker
-// thread could not share memory. Here the batches are already decoded, so the
-// fold is a single pass over cached slices.
-func (s *Store) Aggregate(includeRetired bool) *domain.Snapshot {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.aggregateLocked(includeRetired)
+// view is one consistent read of the persisted state. The retained store
+// shares its in-memory slices through a view; a read-through store builds a
+// fresh one per call. Every fold, filter and hydrate below runs on a view, so
+// both modes answer byte-identically.
+type view struct {
+	batches map[int]*batchedSnapshot
+	order   []int
+	enrich  map[int]map[int]json.RawMessage
+	retired map[string]RetiredRow
+	runtime map[string]domain.NodeState
+	warn    string
 }
 
-func (s *Store) aggregateLocked(includeRetired bool) *domain.Snapshot {
+func (v *view) rebuildOrder() {
+	ids := make([]int, 0, len(v.batches))
+	for id := range v.batches {
+		ids = append(ids, id)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(ids)))
+	v.order = ids
+}
 
-	batches := make([]*batchedSnapshot, 0, len(s.order))
-	for _, id := range s.order {
-		batches = append(batches, s.batches[id])
+// cachedView shares the retained state under the read lock. The fold code only
+// reads, and rebuildOrderLocked replaces (never mutates) the slices, so
+// sharing is safe; order is copied because callers sort their own slice.
+func (s *Store) cachedView() *view {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	order := make([]int, len(s.order))
+	copy(order, s.order)
+	return &view{
+		batches: s.batches,
+		order:   order,
+		enrich:  s.enrich,
+		retired: s.retired,
+		runtime: s.runtime,
+		warn:    s.snapshotWarn,
+	}
+}
+
+// loadView reads the whole persisted state for one read-through call. Corrupt
+// payloads are skipped with the same tolerance reloadLegacy applies: one bad
+// row must not fail the view.
+func (s *Store) loadView(ctx context.Context) (*view, error) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+	rows, err := s.adapter.All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	batches := make(map[int]*batchedSnapshot, len(rows))
+	for _, row := range rows {
+		batch, err := s.loadBatch(row)
+		if err != nil {
+			continue
+		}
+		batches[batch.ID] = batch
+	}
+	enrichments, err := s.adapter.Enrichments(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	bySnapshot := make(map[int]map[int]json.RawMessage, 64)
+	for _, item := range enrichments {
+		if bySnapshot[item.SnapshotID] == nil {
+			bySnapshot[item.SnapshotID] = make(map[int]json.RawMessage, 8)
+		}
+		bySnapshot[item.SnapshotID][item.NodeIndex] = json.RawMessage(item.Payload)
+	}
+	retired, err := s.retiredRowsThrough(ctx)
+	if err != nil {
+		return nil, err
+	}
+	v := &view{
+		batches: batches,
+		enrich:  bySnapshot,
+		retired: retired,
+		warn:    s.SourceWarning(),
+	}
+	v.rebuildOrder()
+	return v, nil
+}
+
+// loadOneView reads a single batch, its enrichment and the retirement set
+// hydrate needs. A missing batch yields an empty view, which get reports as
+// "not found" exactly like the retained store.
+func (s *Store) loadOneView(ctx context.Context, id int) (*view, error) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+	row, err := s.adapter.Get(ctx, &id)
+	if err != nil {
+		return nil, err
+	}
+	retired, err := s.retiredRowsThrough(ctx)
+	if err != nil {
+		return nil, err
+	}
+	v := &view{
+		batches: make(map[int]*batchedSnapshot, 1),
+		retired: retired,
+		warn:    s.SourceWarning(),
+	}
+	if row == nil {
+		return v, nil
+	}
+	batch, err := s.loadBatch(*row)
+	if err != nil {
+		return nil, fmt.Errorf("load snapshot %d: %w", id, err)
+	}
+	enrichments, err := s.adapter.Enrichments(ctx, &id)
+	if err != nil {
+		return nil, err
+	}
+	byIndex := make(map[int]json.RawMessage, len(enrichments))
+	for _, item := range enrichments {
+		byIndex[item.NodeIndex] = json.RawMessage(item.Payload)
+	}
+	v.batches[batch.ID] = batch
+	v.enrich = map[int]map[int]json.RawMessage{batch.ID: byIndex}
+	v.order = []int{batch.ID}
+	return v, nil
+}
+
+// loadNewestView resolves the newest batch id first, so answering one batch
+// never decodes the whole history.
+func (s *Store) loadNewestView(ctx context.Context) (*view, error) {
+	s.ioMu.Lock()
+	id, err := s.adapter.LatestSnapshotID(ctx)
+	s.ioMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if id == 0 {
+		return &view{batches: make(map[int]*batchedSnapshot), warn: s.SourceWarning()}, nil
+	}
+	return s.loadOneView(ctx, id)
+}
+
+func (s *Store) retiredRowsThrough(ctx context.Context) (map[string]RetiredRow, error) {
+	rows, err := s.adapter.RetiredNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]RetiredRow, len(rows))
+	for _, row := range rows {
+		out[row.Identity] = row
+	}
+	return out, nil
+}
+
+// Aggregate folds the retained batches into the current node set: the newest
+// batch that mentions a connection wins, and the most recent enrichment
+// follows the identity across batches.
+//
+// A read-through store retains nothing, so this reports nil; the request path
+// is AggregateContext, which loads one view per call. Both run view.aggregate,
+// so their answers are byte-identical.
+func (s *Store) Aggregate(includeRetired bool) *domain.Snapshot {
+	if s.readThrough {
+		return nil
+	}
+	snapshot, _ := s.AggregateContext(context.Background(), includeRetired)
+	return snapshot
+}
+
+// AggregateContext is Aggregate with the caller's context. A read-through
+// store surfaces adapter failures as an error instead of an empty view, so the
+// API can answer 503 rather than a misleading 404.
+func (s *Store) AggregateContext(ctx context.Context, includeRetired bool) (*domain.Snapshot, error) {
+	if s.readThrough {
+		v, err := s.loadView(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return v.aggregate(includeRetired), nil
+	}
+	return s.cachedView().aggregate(includeRetired), nil
+}
+
+func (v *view) aggregate(includeRetired bool) *domain.Snapshot {
+	batches := make([]*batchedSnapshot, 0, len(v.order))
+	for _, id := range v.order {
+		batches = append(batches, v.batches[id])
 	}
 	if len(batches) == 0 {
 		return nil
@@ -434,8 +645,8 @@ func (s *Store) aggregateLocked(includeRetired bool) *domain.Snapshot {
 		return batches[i].ID > batches[j].ID
 	})
 
-	enrichments := s.enrich
-	retired := s.retired
+	enrichments := v.enrich
+	retired := v.retired
 
 	nodes := make(map[string]domain.Node, 2048)
 	latest := make(map[string]*domain.IPPureResult, 2048)
@@ -517,7 +728,7 @@ func (s *Store) aggregateLocked(includeRetired bool) *domain.Snapshot {
 			domain.ApplyExitCountry(&node)
 		}
 		result = append(result, node)
-		if state, ok := s.runtime[identity]; ok {
+		if state, ok := v.runtime[identity]; ok {
 			state.Apply(&result[len(result)-1])
 		}
 	}
@@ -532,7 +743,7 @@ func (s *Store) aggregateLocked(includeRetired bool) *domain.Snapshot {
 		SpeedTest:     head.SpeedTest,
 		MediaCheck:    head.MediaCheck,
 		Nodes:         result,
-		SourceWarning: s.snapshotWarn,
+		SourceWarning: v.warn,
 	}
 	if len(result) > 0 {
 		snap.SpeedTest = false
@@ -574,25 +785,30 @@ type Candidate struct {
 }
 
 // IPPureCandidates lists connections that still need an IP result. The
-// JavaScript version recomputed every identity per call; the cache carries
-// them, so this is a scan over already-hashed identities.
+// JavaScript version recomputed every identity per call; the retained store
+// carries them, and a read-through store loads one view per call.
 func (s *Store) IPPureCandidates() []Candidate {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.ippureCandidatesLocked()
+	if s.readThrough {
+		v, err := s.loadView(context.Background())
+		if err != nil {
+			return nil
+		}
+		return v.ippureCandidates()
+	}
+	return s.cachedView().ippureCandidates()
 }
 
-func (s *Store) ippureCandidatesLocked() []Candidate {
+func (v *view) ippureCandidates() []Candidate {
 	candidates := make([]Candidate, 0, 1024)
-	for _, id := range s.order {
-		batch := s.batches[id]
-		byIndex := s.enrich[id]
+	for _, id := range v.order {
+		batch := v.batches[id]
+		byIndex := v.enrich[id]
 		for i := range batch.Nodes {
 			identity := batch.Identities[i]
 			if identity == "" {
 				continue
 			}
-			if _, ok := s.retired[identity]; ok {
+			if _, ok := v.retired[identity]; ok {
 				continue
 			}
 			node := batch.Nodes[i]
@@ -633,24 +849,29 @@ type CollectionSnapshot struct {
 // GetCollectionSnapshot returns the newest batch with retired connections
 // removed, plus the original node indexes for result writes.
 func (s *Store) GetCollectionSnapshot() *CollectionSnapshot {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.collectionSnapshotLocked()
+	if s.readThrough {
+		v, err := s.loadView(context.Background())
+		if err != nil {
+			return nil
+		}
+		return v.collectionSnapshot()
+	}
+	return s.cachedView().collectionSnapshot()
 }
 
-func (s *Store) collectionSnapshotLocked() *CollectionSnapshot {
-	if len(s.order) == 0 {
+func (v *view) collectionSnapshot() *CollectionSnapshot {
+	if len(v.order) == 0 {
 		return nil
 	}
-	batch := s.batches[s.order[0]]
-	enrich := s.enrich[batch.ID]
-	hydrated := s.hydrate(batch, enrich, s.retired)
+	batch := v.batches[v.order[0]]
+	enrich := v.enrich[batch.ID]
+	hydrated := hydrate(batch, enrich, v.retired)
 	kept := make([]domain.Node, 0, len(hydrated.Nodes))
 	indexes := make([]int, 0, len(hydrated.Nodes))
 	identities := make([]string, 0, len(hydrated.Nodes))
 	for i := range hydrated.Nodes {
 		identity := batch.Identities[i]
-		if _, ok := s.retired[identity]; ok {
+		if _, ok := v.retired[identity]; ok {
 			continue
 		}
 		kept = append(kept, hydrated.Nodes[i])
@@ -661,8 +882,8 @@ func (s *Store) collectionSnapshotLocked() *CollectionSnapshot {
 	return &CollectionSnapshot{Snapshot: hydrated, Indexes: indexes, Identities: identities}
 }
 
-// CollectionContext is everything one collection round needs. Building it under
-// a single read lock replaces the JavaScript pattern of three separate IPC
+// CollectionContext is everything one collection round needs. Building it from
+// a single view replaces the JavaScript pattern of three separate IPC
 // round-trips, each of which could observe a different refresh generation.
 type CollectionContext struct {
 	Snapshot    *CollectionSnapshot
@@ -674,12 +895,20 @@ type CollectionContext struct {
 }
 
 func (s *Store) GetCollectionContext() CollectionContext {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	snap := s.collectionSnapshotLocked()
-	candidates := s.ippureCandidatesLocked()
-	aggregate := s.aggregateLocked(false)
-	retired := s.retiredNodeIdentitiesLocked()
+	var v *view
+	if s.readThrough {
+		loaded, err := s.loadView(context.Background())
+		if err != nil {
+			return CollectionContext{}
+		}
+		v = loaded
+	} else {
+		v = s.cachedView()
+	}
+	snap := v.collectionSnapshot()
+	candidates := v.ippureCandidates()
+	aggregate := v.aggregate(false)
+	retired := v.retiredIdentities()
 
 	visible := make(map[string]struct{}, 1024)
 	results := make(map[string]*domain.IPPureResult, 1024)
@@ -702,13 +931,51 @@ func (s *Store) GetCollectionContext() CollectionContext {
 	}
 }
 
-// Get returns one batch, or the newest when id is nil.
+func (v *view) retiredIdentities() map[string]struct{} {
+	out := make(map[string]struct{}, len(v.retired))
+	for k := range v.retired {
+		out[k] = struct{}{}
+	}
+	return out
+}
+
+// Get reports the retained state: one batch by id, or the newest retained
+// batch when id is nil. A read-through store retains nothing, so a nil id
+// answers (nil, nil) while an explicitly addressed batch is loaded on demand;
+// the request path is GetContext, which also resolves the newest batch from
+// the adapter.
 func (s *Store) Get(id *int) (*domain.Snapshot, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	batch := s.latestLocked()
+	if s.readThrough && id == nil {
+		return nil, nil
+	}
+	return s.GetContext(context.Background(), id)
+}
+
+// GetContext is Get with the caller's context. A read-through store reports
+// adapter failures as errors so the API can answer 503 instead of 404.
+func (s *Store) GetContext(ctx context.Context, id *int) (*domain.Snapshot, error) {
+	if s.readThrough {
+		var (
+			v   *view
+			err error
+		)
+		if id != nil {
+			v, err = s.loadOneView(ctx, *id)
+		} else {
+			v, err = s.loadNewestView(ctx)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return v.get(id)
+	}
+	return s.cachedView().get(id)
+}
+
+func (v *view) get(id *int) (*domain.Snapshot, error) {
+	batch := v.latest()
 	if id != nil {
-		b, ok := s.batches[*id]
+		b, ok := v.batches[*id]
 		if !ok {
 			return nil, nil
 		}
@@ -717,41 +984,46 @@ func (s *Store) Get(id *int) (*domain.Snapshot, error) {
 	if batch == nil {
 		return nil, nil
 	}
-	snap := s.hydrate(batch, s.enrich[batch.ID], s.retired)
+	snap := hydrate(batch, v.enrich[batch.ID], v.retired)
 	if id == nil {
 		kept := make([]domain.Node, 0, len(snap.Nodes))
 		for i := range snap.Nodes {
-			if _, ok := s.retired[batch.Identities[i]]; ok {
+			if _, ok := v.retired[batch.Identities[i]]; ok {
 				continue
 			}
 			kept = append(kept, snap.Nodes[i])
 		}
 		snap.Nodes = kept
 	}
-	if s.snapshotWarn != "" {
-		snap.SourceWarning = s.snapshotWarn
+	if v.warn != "" {
+		snap.SourceWarning = v.warn
 	}
 	return &snap, nil
 }
 
-func (s *Store) latestLocked() *batchedSnapshot {
-	if len(s.order) == 0 {
+func (v *view) latest() *batchedSnapshot {
+	if len(v.order) == 0 {
 		return nil
 	}
-	return s.batches[s.order[0]]
+	return v.batches[v.order[0]]
 }
 
-// LatestSnapshotID is the newest batch id.
+// LatestSnapshotID is the newest batch id the store has loaded. A read-through
+// store retains nothing, so it always reports 0; query the adapter when the id
+// itself is needed.
 func (s *Store) LatestSnapshotID() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if len(s.order) == 0 {
+	if s.readThrough {
 		return 0
 	}
-	return s.order[0]
+	v := s.cachedView()
+	if len(v.order) == 0 {
+		return 0
+	}
+	return v.order[0]
 }
 
-// History lists batches for the UI.
+// History lists batches for the UI. The adapter answers per call, so both
+// modes share this path.
 func (s *Store) History(ctx context.Context, limit, offset int) ([]HistoryItem, int, error) {
 	return s.adapter.History(ctx, limit, offset)
 }
@@ -780,6 +1052,9 @@ func (s *Store) RetireNodes(nodes []domain.Node, reason string) (int, error) {
 	if err := s.adapter.RetireNodes(context.Background(), identities, at, reason); err != nil {
 		return 0, err
 	}
+	if s.readThrough {
+		return len(identities), nil
+	}
 	s.mu.Lock()
 	for _, identity := range identities {
 		if _, ok := s.retired[identity]; ok {
@@ -796,7 +1071,7 @@ func (s *Store) RestoreNode(identity, retiredAt, reason string) (int64, error) {
 	s.ioMu.Lock()
 	defer s.ioMu.Unlock()
 	n, err := s.adapter.RestoreNode(context.Background(), identity, retiredAt, reason)
-	if err == nil && n > 0 {
+	if err == nil && n > 0 && !s.readThrough {
 		s.mu.Lock()
 		delete(s.retired, identity)
 		s.mu.Unlock()
@@ -816,6 +1091,9 @@ func (s *Store) SaveIPPure(snapshotID, index int, result domain.IPPureResult, id
 	if err := s.adapter.SaveIPPure(context.Background(), snapshotID, index, payload, identity); err != nil {
 		return err
 	}
+	if s.readThrough {
+		return nil
+	}
 	s.mu.Lock()
 	if s.enrich[snapshotID] == nil {
 		s.enrich[snapshotID] = make(map[int]json.RawMessage, 8)
@@ -833,7 +1111,12 @@ func (s *Store) ReconcileSources(linked map[string]domain.Source, prune bool) er
 }
 
 // Refresh rebuilds the persisted projection when another process changed data.
+// A read-through store reads the adapter per call, so there is nothing to
+// rebuild.
 func (s *Store) Refresh(ctx context.Context) error {
+	if s.readThrough {
+		return nil
+	}
 	return s.refreshFlight.run(ctx, func(ctx context.Context) error {
 		if err := s.Sync(ctx); err != nil {
 			return err

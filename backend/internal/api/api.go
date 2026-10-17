@@ -189,14 +189,18 @@ func (s *Server) results(w http.ResponseWriter, r *http.Request) {
 	// exactly as the JavaScript store did. Retired connections stay hidden.
 	var snapshot *domain.Snapshot
 	if aggregate {
-		snapshot = s.store.Aggregate(false)
+		snapshot, err = s.store.AggregateContext(r.Context(), false)
+		if err != nil {
+			writeUnavailable(w)
+			return
+		}
 		if snapshot != nil {
 			// Aggregate returns a shared snapshot; the caller mutates it below.
 			copied := snapshot.Clone()
 			snapshot = &copied
 		}
 	} else {
-		snapshot, err = s.store.Get(id)
+		snapshot, err = s.store.GetContext(r.Context(), id)
 		if err != nil {
 			writeUnavailable(w)
 			return

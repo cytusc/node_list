@@ -5,7 +5,7 @@ x-environment: &environment
   PGDATABASE: ${PGDATABASE:?Set PGDATABASE in .env}
   PGUSER: ${PGUSER:?Set PGUSER in .env}
   PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
-  PGPOOL_MAX: ${PGPOOL_MAX:-6}
+  PGPOOL_MAX: ${PGPOOL_MAX:-8}
   REDIS_URL: redis://task-redis:6379/0
   REDIS_NAMESPACE: ${REDIS_NAMESPACE:-node-explorer}
   RESIDENTIAL_INTERVAL_SECONDS: ${RESIDENTIAL_INTERVAL_SECONDS:-300}
@@ -104,6 +104,7 @@ services:
       ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
       IP_SERVICE_HIGH_CONCURRENCY: ${IP_SERVICE_HIGH_CONCURRENCY:-4}
       IP_SERVICE_NORMAL_CONCURRENCY: ${IP_SERVICE_NORMAL_CONCURRENCY:-4}
+      IP_SERVICE_RISK_CONCURRENCY: ${IP_SERVICE_RISK_CONCURRENCY:-2}
     depends_on:
       task-redis: { condition: service_healthy }
       ip-high-proxy: { condition: service_started }

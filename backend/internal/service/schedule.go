@@ -84,6 +84,10 @@ func (r *Runner) schedule(ctx context.Context) error {
 			return err
 		}
 	}
+	// Every pass re-derives work for the whole schedulable set: rows are created
+	// ahead of their due time, completed rows are refreshed, and residential
+	// promotions are applied to queued rows. Skipping fresh nodes would delay
+	// all three, so the scan stays whole; ScheduleInterval bounds its cost.
 	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.identity,n.historical_residential,c.payload,e.payload,a.payload,t.retired_at,t.reason
 	FROM node_explorer_node_registry n LEFT JOIN node_explorer_connectivity c USING(identity)
 	LEFT JOIN node_explorer_exits e USING(identity) LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
@@ -92,8 +96,7 @@ func (r *Runner) schedule(ctx context.Context) error {
 	AND (($1::text='residential' AND t.identity IS NOT NULL
 	 AND (t.reason=$2 OR t.reason LIKE 'IPPure:%')
 	 AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='recovery' AND w.key=n.identity||':'||t.retired_at))
-	 OR ($1::text<>'residential' AND t.identity IS NULL))
-	ORDER BY n.identity`, r.Config.Role, store.RetireRestoreReason)
+	 OR ($1::text<>'residential' AND t.identity IS NULL))`, r.Config.Role, store.RetireRestoreReason)
 	if err != nil {
 		return err
 	}

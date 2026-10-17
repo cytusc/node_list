@@ -6,6 +6,8 @@ dist/
 release.env
 release.env.tmp
 .update.lock
+.pg-backup.lock
+backups/
 data/
 *.tsbuildinfo
 test-results/
@@ -15,14 +17,11 @@ playwright-report/
 # Go backend build output.
 backend/node-explorer
 backend/node-worker
-backend/github-patrol
-backend/idcheck
-backend/idscan
-backend/linkdiff
-backend/sortchk
 backend/*.exe
 backend/tools/*.tsv
 .workbuddy/
 *.md
+!README.md
 !RESIDENTIAL_RECOVERY.md
 !MODULAR_SERVICES.md
+!docs/*.md
