@@ -45,13 +45,20 @@ func TestRegistryConsumesOnlySourceChangesAcrossRestarts(t *testing.T) {
 	if batch != 2 || name != node.Name {
 		t.Fatalf("new source not registered: %d %s", batch, name)
 	}
-	// Deleting the latest source falls back once to an older surviving source.
+
+	// Source compaction removes obsolete full copies, so deleting the winning
+	// source cannot silently restore older configuration/measurements.
+	var copies int
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT sum(node_count) FROM node_explorer_snapshots`).Scan(&copies); err != nil || copies != 1 {
+		t.Fatalf("duplicate source records: %d %v", copies, err)
+	}
 	f.exec(t, `DELETE FROM node_explorer_snapshots WHERE id=2`)
 	if err := f.repo.SyncRegistry(ctx, f.st); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.repo.Pool.QueryRow(ctx, `SELECT snapshot_id FROM node_explorer_node_registry WHERE identity=$1 AND available`, f.id).Scan(&batch); err != nil || batch != 1 {
-		t.Fatalf("fallback: %d %v", batch, err)
+	var current bool
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT available FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&current); err != nil || current {
+		t.Fatalf("obsolete source revived: %v %v", current, err)
 	}
 	f.exec(t, `DELETE FROM node_explorer_snapshots`)
 	if err := f.repo.SyncRegistry(ctx, f.st); err != nil {
@@ -81,8 +88,8 @@ func TestSourceRetentionPreservesFactsAndHonorsDisable(t *testing.T) {
 	if err := f.repo.SyncRegistry(ctx, f.st); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_node_registry WHERE available`).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("expired source stayed available: %d %v", count, err)
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_node_registry WHERE available`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("current source removed by import age: %d %v", count, err)
 	}
 	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_exits`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("retention removed runtime facts: %d %v", count, err)

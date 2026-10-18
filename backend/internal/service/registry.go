@@ -62,6 +62,11 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
 			return nil
 		}
 	}
+
+	// Stabilize source payloads and index compaction against imports/reconciliation.
+	if _, err = tx.Exec(ctx, `LOCK TABLE node_explorer_snapshots,node_explorer_ippure_results IN EXCLUSIVE MODE`); err != nil {
+		return err
+	}
 	rows, err := tx.Query(ctx, `SELECT s.id,s.imported_at,s.payload,coalesce(c.revision,0)
  FROM node_explorer_snapshots s LEFT JOIN node_explorer_results_changes c ON c.snapshot_id=s.id
  LEFT JOIN node_explorer_registry_batches b ON b.snapshot_id=s.id
@@ -75,6 +80,12 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
 		revision int64
 	}
 	var markers []marker
+	type member struct {
+		SnapshotID int    `json:"snapshot_id"`
+		Index      int    `json:"node_index"`
+		Identity   string `json:"identity"`
+	}
+	var members []member
 	for rows.Next() {
 		var id int
 		var imported string
@@ -101,6 +112,7 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
 			if identity == "" {
 				continue
 			}
+			members = append(members, member{id, index, identity})
 			old, exists := nodes[identity]
 			historical := n.IPPure != nil && n.IPPure.Classification != nil && n.IPPure.Classification.State == "residential"
 			if exists && (old.SourceAt.After(stamp) || (old.SourceAt.Equal(stamp) && old.SnapshotID >= id)) {
@@ -128,6 +140,24 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
 	if err = rows.Err(); err != nil {
 		return err
 	}
+
+	memberIDs := make([]int, len(markers))
+	for i, m := range markers {
+		memberIDs[i] = m.id
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_snapshot_members WHERE snapshot_id=ANY($1::int[])`, memberIDs); err != nil {
+		return err
+	}
+	for start := 0; start < len(members); start += 1000 {
+		raw, e := json.Marshal(members[start:min(start+1000, len(members))])
+		if e != nil {
+			return e
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_snapshot_members(snapshot_id,node_index,identity)
+ SELECT snapshot_id,node_index,identity FROM jsonb_to_recordset($1::jsonb) AS x(snapshot_id int,node_index int,identity text)`, raw); err != nil {
+			return err
+		}
+	}
 	ids := make([]string, 0, len(nodes))
 	for id := range nodes {
 		ids = append(ids, id)
@@ -148,8 +178,9 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
  SELECT x.identity,x.node,x.snapshot_id,x.node_index,x.historical_residential,x.source_at
  FROM jsonb_to_recordset($1::jsonb) AS x(identity text,node jsonb,snapshot_id integer,node_index integer,historical_residential boolean,source_at timestamptz)
  LEFT JOIN node_explorer_node_registry old USING(identity)
- WHERE old.identity IS NULL OR ($2 OR x.source_at>old.source_at OR (x.source_at=old.source_at AND x.snapshot_id>=old.snapshot_id))
- AND (NOT old.available OR old.node<>x.node OR old.snapshot_id<>x.snapshot_id OR old.node_index<>x.node_index OR old.source_at<>x.source_at OR (x.historical_residential AND NOT old.historical_residential))
+ WHERE NOT EXISTS(SELECT 1 FROM node_explorer_deleted_nodes d WHERE d.identity=x.identity AND x.source_at<=d.deleted_at)
+ AND (old.identity IS NULL OR ($2 OR x.source_at>old.source_at OR (x.source_at=old.source_at AND x.snapshot_id>=old.snapshot_id))
+ AND (NOT old.available OR old.node<>x.node OR old.snapshot_id<>x.snapshot_id OR old.node_index<>x.node_index OR old.source_at<>x.source_at OR (x.historical_residential AND NOT old.historical_residential)))
  ON CONFLICT(identity) DO UPDATE SET node=EXCLUDED.node,snapshot_id=EXCLUDED.snapshot_id,node_index=EXCLUDED.node_index,
  available=true,source_at=EXCLUDED.source_at,historical_residential=current.historical_residential OR EXCLUDED.historical_residential`, raw, full)
 		if err != nil {
@@ -169,6 +200,17 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_registry_batches b WHERE NOT EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=b.snapshot_id)`); err != nil {
+		return err
+	}
+
+	if err = compactRegistrySources(ctx, tx); err != nil {
+		return err
+	}
+	// Compaction changes source revisions too; consume those changes in this fold.
+	if _, err = tx.Exec(ctx, `UPDATE node_explorer_registry_batches b SET revision=c.revision FROM node_explorer_results_changes c WHERE c.snapshot_id=b.snapshot_id AND b.revision<>c.revision`); err != nil {
+		return err
+	}
+	if err = tx.QueryRow(ctx, `SELECT coalesce(max(revision),0) FROM node_explorer_results_changes`).Scan(&version); err != nil {
 		return err
 	}
 	if err = tx.Commit(ctx); err != nil {

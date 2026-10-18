@@ -55,3 +55,11 @@
 - [IPinfo Company API](https://ipinfo.io/developers/company-api)
 - [IPinfo Privacy API](https://ipinfo.io/developers/privacy-api)
 - [IP-API JSON 与配额说明](https://ip-api.com/docs/api:json)
+
+## 非住宅低频恢复
+
+`normal-recovery` 是独立服务和持久化任务类型，默认每 6 小时复检一次（`NORMAL_RECOVERY_INTERVAL_SECONDS=21600`），完整核验并发固定为 1，探测任务仅使用普通通道。首次至少等待退役后一个间隔，旧积压额外错开最多 5 分钟；失败从完成时间计算下一次，重启不改变排期。每 30 秒最多补充 256 个候选。
+
+从未确认住宅的自动退役节点，以及住宅复检明确得到 `not-residential`／`skipped-datacenter-asn` 的节点进入该服务。仍在执行的住宅核验先完成后交接；住宅临时故障继续保留高频退避恢复。非住宅恢复不要求住宅分类，不排除机房 ASN，但同样要求 GitHub 可访问、ipify／AWS HTTPS 公网 IPv4 一致且区别于宿主，以及二次出口和版本一致。分类与风险查询异步执行，失败不阻止普通节点恢复。
+
+人工禁用、来源快照删除、连接不可用、退役记录变更、出口变化和过期证明仍受事务校验保护。恢复结果保留最近 16 次核验历史；服务看板单独显示「非住宅节点恢复」的心跳和任务计数。

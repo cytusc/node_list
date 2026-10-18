@@ -78,12 +78,15 @@ func reachable(ctx context.Context, client *http.Client, timeout time.Duration) 
 }
 
 func (r *Runner) live(ctx context.Context, j Job, high bool) error {
-	t, err := r.Repo.Target(ctx, j.Payload.Identity)
+	t, err := r.Repo.probeTarget(ctx, j.Payload)
 	if err != nil {
 		return err
 	}
-	if !matchesRetirement(t, j.Payload) {
+	if t == nil || (j.Payload.Action != "cleanup" && !matchesRetirement(t, j.Payload)) {
 		return r.Repo.Finish(ctx, j, nil)
+	}
+	if j.Payload.Incarnation == "" {
+		j.Payload.Incarnation = t.Incarnation
 	}
 	nodes := []domain.Node{t.Node}
 	reference, err := r.reference(ctx, t.Identity)
@@ -127,6 +130,11 @@ func (r *Runner) live(ctx context.Context, j Job, high bool) error {
 	}
 	v.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+		if v.Reachable && v.Error == "" {
+			if err := recordAvailable(ctx, tx, t.Identity, j.Payload.Incarnation, v.CheckedAt); err != nil {
+				return err
+			}
+		}
 		ok, err := guard(ctx, tx, j.Payload)
 		if err != nil || !ok {
 			return err
@@ -149,7 +157,9 @@ func (r *Runner) live(ctx context.Context, j Job, high bool) error {
 				}
 			}
 		}
-		v = accumulateFailures(previous, v)
+		if j.Payload.Action != "cleanup" {
+			v = accumulateFailures(previous, v)
+		}
 		b, err := json.Marshal(v)
 		if err != nil {
 			return err
@@ -162,7 +172,7 @@ func (r *Runner) live(ctx context.Context, j Job, high bool) error {
 		if err = writeProbe(ctx, tx, j.Payload.Session, KindLive, t.Identity, v); err != nil {
 			return err
 		}
-		if v.ConfirmedDead && t.Retired == nil {
+		if v.ConfirmedDead && t.Retired == nil && j.Payload.Action != "cleanup" {
 			p := j.Payload
 			p.Action = "retire"
 			p.Session = j.Ref()
@@ -228,6 +238,9 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	}
 	if !matchesRetirement(t, j.Payload) {
 		return r.Repo.Finish(ctx, j, nil)
+	}
+	if j.Payload.Incarnation == "" {
+		j.Payload.Incarnation = t.Incarnation
 	}
 	paths, release, err := r.reserve(ctx, []domain.Node{t.Node}, high)
 	if err != nil {

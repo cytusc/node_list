@@ -88,10 +88,10 @@ func (r *Repository) pruneSources(ctx context.Context, days int) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_ippure_results WHERE snapshot_id IN (SELECT id FROM node_explorer_snapshots WHERE imported_at<$1)`, cutoff); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_ippure_results WHERE snapshot_id IN (SELECT id FROM node_explorer_snapshots s WHERE imported_at<$1 AND NOT EXISTS(SELECT 1 FROM node_explorer_node_registry n WHERE n.snapshot_id=s.id AND n.available))`, cutoff); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_snapshots WHERE imported_at<$1`, cutoff); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_snapshots s WHERE imported_at<$1 AND NOT EXISTS(SELECT 1 FROM node_explorer_node_registry n WHERE n.snapshot_id=s.id AND n.available)`, cutoff); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -99,6 +99,6 @@ func (r *Repository) pruneSources(ctx context.Context, days int) error {
 
 // Recovery rows are durable verification markers, not expiring probe sessions.
 func (r *Repository) pruneCompletedWork(ctx context.Context) error {
-	_, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_work WHERE state='done' AND kind<>'recovery' AND due_at<now()-interval '2 days'`)
+	_, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_work WHERE state='done' AND kind NOT IN ('recovery','normal-recovery') AND due_at<now()-interval '2 days'`)
 	return err
 }

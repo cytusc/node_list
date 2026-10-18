@@ -21,7 +21,7 @@ func main() {
 	}
 }
 func run() error {
-	role := flag.String("role", "", "source, connectivity, ip, residential, lifecycle")
+	role := flag.String("role", "", "source, connectivity, ip, residential, normal-recovery, node-cleanup, lifecycle")
 	health := flag.Bool("health", false, "check persistent service heartbeat")
 	flag.Parse()
 	service.LoadEnv(service.Root())

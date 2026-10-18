@@ -61,3 +61,18 @@ CREATE TABLE IF NOT EXISTS node_explorer_lifecycle_events (
  id bigserial PRIMARY KEY, identity text NOT NULL, action text NOT NULL,
  dry_run boolean NOT NULL, reason text NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Migration time is a conservative observation baseline for legacy/unknown nodes.
+ALTER TABLE node_explorer_node_registry
+ ADD COLUMN IF NOT EXISTS first_seen_at timestamptz NOT NULL DEFAULT now(),
+ ADD COLUMN IF NOT EXISTS last_available_at timestamptz,
+ ADD COLUMN IF NOT EXISTS incarnation text NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text);
+UPDATE node_explorer_node_registry n SET last_available_at=c.checked_at
+ FROM node_explorer_connectivity c WHERE c.identity=n.identity AND n.last_available_at IS NULL
+ AND c.payload->>'reachable'='true' AND coalesce(c.payload->>'error','')='';
+CREATE INDEX IF NOT EXISTS node_explorer_cleanup_due ON node_explorer_node_registry
+ (greatest(first_seen_at,coalesce(last_available_at,first_seen_at)));
+-- Only connection identities and a watermark remain after physical deletion.
+CREATE TABLE IF NOT EXISTS node_explorer_deleted_nodes (
+ identity text PRIMARY KEY, deleted_at timestamptz NOT NULL
+);

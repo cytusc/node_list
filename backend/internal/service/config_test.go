@@ -1,6 +1,9 @@
 package service
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestProbeServicesHaveIndependentConcurrency(t *testing.T) {
 	t.Setenv("RESIDENTIAL_CONCURRENCY", "2")
@@ -30,5 +33,25 @@ func TestProbeServicesHaveIndependentConcurrency(t *testing.T) {
 	ip, err = ConfigFromEnv("ip")
 	if err != nil || ip.HighConcurrency != 2 {
 		t.Fatalf("legacy fallback: %d %v", ip.HighConcurrency, err)
+	}
+}
+
+func TestNormalRecoveryDefaultsAndIntervalOverride(t *testing.T) {
+	t.Setenv("NORMAL_RECOVERY_INTERVAL_SECONDS", "")
+	cfg, err := ConfigFromEnv("normal-recovery")
+	if err != nil || cfg.NormalRecoveryInterval != 6*time.Hour {
+		t.Fatalf("normal default: %+v %v", cfg, err)
+	}
+	r := Runner{Config: cfg}
+	if kinds := r.kinds(); len(kinds) != 1 || kinds[0] != KindNormalRecovery {
+		t.Fatalf("wrong queue: %v", kinds)
+	}
+	if r.laneCount(KindNormalRecovery, false) != 1 || ServiceName(cfg.Role) != "normal-recovery" {
+		t.Fatal("wrong concurrency or heartbeat")
+	}
+	t.Setenv("NORMAL_RECOVERY_INTERVAL_SECONDS", "43200")
+	cfg, err = ConfigFromEnv("normal-recovery")
+	if err != nil || cfg.NormalRecoveryInterval != 12*time.Hour {
+		t.Fatalf("interval override: %+v %v", cfg, err)
 	}
 }

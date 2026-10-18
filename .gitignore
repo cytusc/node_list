@@ -24,4 +24,5 @@ backend/tools/*.tsv
 !README.md
 !RESIDENTIAL_RECOVERY.md
 !MODULAR_SERVICES.md
+!NODE_CLEANUP.md
 !docs/*.md

@@ -7,6 +7,8 @@ const serviceNames: Record<string, string> = {
   "ip-service": "IP 属性",
   connectivity: "连通性检测",
   "residential-recovery": "住宅 IP 恢复",
+  "normal-recovery": "非住宅节点恢复",
+  "node-cleanup": "失效节点清理",
   "node-lifecycle": "节点状态",
 };
 

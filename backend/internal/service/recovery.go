@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Each assessment owns fresh proofs. Transient failures of historical residential
-// nodes can start a new generation after a persisted backoff.
+// Each assessment owns fresh proofs. The normal service shares transport checks
+// but does not require residential classification.
 func (r *Runner) recovery(ctx context.Context, j Job) error {
 	t, err := r.Repo.Target(ctx, j.Payload.Identity)
 	if err != nil {
@@ -30,7 +30,8 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if err != nil {
 		return err
 	}
-	if previous != nil && previous.IP != "" {
+	normal := j.Kind == KindNormalRecovery
+	if !normal && previous != nil && previous.IP != "" {
 		attr, err := r.Repo.Attributes(ctx, previous.IP)
 		if err != nil {
 			return err
@@ -45,6 +46,10 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 
 	session := "recovery:" + j.Ref()
 	p := j.Payload
+	p.RecoveryMode = ""
+	if normal {
+		p.RecoveryMode = "normal"
+	}
 	p.Session = session
 	err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
 		for _, kind := range []string{KindLive, KindExit} {
@@ -77,10 +82,10 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if err != nil {
 		return err
 	}
-	if asn := hostingRecoveryASN(attr, exit.IP); asn != "" {
+	if asn := hostingRecoveryASN(attr, exit.IP); !normal && asn != "" {
 		return finish("skipped-datacenter-asn", exit.IP)
 	}
-	if !domain.FreshResidential(attr, exit.IP, time.Now()) {
+	if !normal && !domain.FreshResidential(attr, exit.IP, time.Now()) {
 		if attr != nil && attr.Classification != nil && fresh(attr.Classification.CheckedAt, 24*time.Hour) {
 			if attr.Classification.State == "unknown" {
 				return finish("classification-unconfirmed", exit.IP)
@@ -123,6 +128,11 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	p.ExitVersion = final.Version
 	p.Session = session
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+		if normal {
+			if e := scheduleIP(ctx, tx, final.IP, t.Identity, 0); e != nil {
+				return e
+			}
+		}
 		if e := once(ctx, tx, KindLifecycle, "restore:"+j.Ref(), p, 1); e != nil {
 			return e
 		}
@@ -230,6 +240,10 @@ func (r *Runner) lifecycle(ctx context.Context, j Job) error {
 				return nil
 			}
 			e = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_ip_attributes WHERE ip=$1 FOR SHARE`, exit.IP).Scan(&raw)
+			if e == pgx.ErrNoRows && j.Payload.RecoveryMode == "normal" {
+				raw = []byte(`{}`)
+				e = nil
+			}
 			if e == pgx.ErrNoRows {
 				return nil
 			}
@@ -240,7 +254,7 @@ func (r *Runner) lifecycle(ctx context.Context, j Job) error {
 			if e = json.Unmarshal(raw, &attr); e != nil {
 				return e
 			}
-			if hostingRecoveryASN(&attr, exit.IP) != "" || !domain.FreshResidential(&attr, exit.IP, time.Now()) {
+			if j.Payload.RecoveryMode != "normal" && (hostingRecoveryASN(&attr, exit.IP) != "" || !domain.FreshResidential(&attr, exit.IP, time.Now())) {
 				return nil
 			}
 			reason = j.Payload.Reason

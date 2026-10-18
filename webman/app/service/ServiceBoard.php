@@ -15,7 +15,7 @@ use Throwable;
  *
  * 对应 Go 的 service.Repository.statuses()（Status/Statuses 已随接口层删除）：
  *
- *   GET /api/services                 → 6 个服务（10s 缓存，读失败 503）
+ *   GET /api/services                 → 7 个服务（10s 缓存，读失败 503）
  *   GET /api/results.ippureCollector  → 只看 ip-service（5s 缓存，读失败降级）
  *
  * api 自己的心跳由 Heartbeat 在 statuses() 入口惰性写入。
@@ -31,7 +31,7 @@ final class ServiceBoard
 {
     /** 看板固定展示的服务与顺序。 */
     public const BOARD_SERVICES = [
-        'api', 'source-ingest', 'connectivity', 'ip-service', 'residential-recovery', 'node-lifecycle',
+        'api', 'source-ingest', 'connectivity', 'ip-service', 'residential-recovery', 'normal-recovery', 'node-cleanup', 'node-lifecycle',
     ];
 
     private ReadCache $cache;
@@ -54,6 +54,8 @@ final class ServiceBoard
         'attributes' => 'ip-service',
         'risk' => 'ip-service',
         'recovery' => 'residential-recovery',
+        'normal-recovery' => 'normal-recovery',
+        'node-cleanup' => 'node-cleanup',
         'lifecycle' => 'node-lifecycle',
     ];
 
@@ -265,12 +267,12 @@ final class ServiceBoard
                 Db::raw("count(*) FILTER (WHERE state='queued' AND due_at<=now()) AS queued"),
                 Db::raw("count(*) FILTER (WHERE state='queued' AND due_at>now()) AS scheduled"),
                 Db::raw("count(*) FILTER (WHERE state='running') AS running"),
-                Db::raw("count(*) FILTER (WHERE state='done' AND payload->>'recoveryResult' IN ('eligible','not-residential','probe-failed','exit-changed','timed-out')) AS checked"),
+                Db::raw("count(*) FILTER (WHERE state='done' AND payload->>'recoveryResult' IN ('eligible','not-residential','probe-failed','exit-probe-failed','classification-unconfirmed','exit-changed','timed-out')) AS checked"),
                 Db::raw("count(*) FILTER (WHERE state='done' AND payload->>'recoveryResult'='skipped-datacenter-asn') AS skipped"),
                 Db::raw("coalesce(greatest(0,extract(epoch FROM now()-min(due_at) FILTER (WHERE state='queued' AND due_at<=now())))::double precision,0) AS oldest_wait"),
             ])
             ->where(function ($q): void {
-                $q->where('state', '!=', 'done')->orWhere('kind', 'recovery');
+                $q->where('state', '!=', 'done')->orWhereIn('kind', ['recovery', 'normal-recovery']);
             })
             ->groupBy('kind')
             ->get()->all();

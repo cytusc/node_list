@@ -273,7 +273,7 @@ foreach (['node-list:services', 'node-list:collector', 'node-list:source-warning
 Db::statement('DELETE FROM node_explorer_service_status');
 
 $services = $board->services()['services'];
-same(6, count($services), '看板固定 6 个服务');
+same(8, count($services), '看板固定 8 个服务');
 same('api', $services[0]['service'], '按服务名排序');
 // 字段集必须与 Go 的 service.Status 完全一致：多一个键就是契约漂移
 // （内部行里的 updatedAtRfc3339 只供采集器状态用，不能透出去）。
@@ -300,6 +300,18 @@ $isZeroTime = static fn (string $v): bool =>
     str_starts_with($v, '0000-12-31') || str_starts_with($v, '0001-01-01');
 ok($isZeroTime($ingest['updatedAt']), '无心跳时 updatedAt 是零值时间哨兵');
 same(false, $ingest['healthy'], '无心跳时 healthy=false');
+
+// 两类恢复任务的统计独立，出口失败和分类未确认也计入住宅核验结果。
+Db::statement("INSERT INTO node_explorer_work(kind,key,state,due_at,payload) VALUES
+ ('normal-recovery','board-low-scheduled','queued',now()+interval '6 hours','{}'),
+ ('normal-recovery','board-low-completed','done',now(),'{\"recoveryResult\":\"eligible\"}'),
+ ('recovery','board-high-exit-failed','done',now(),'{\"recoveryResult\":\"exit-probe-failed\"}'),
+ ('recovery','board-high-unconfirmed','done',now(),'{\"recoveryResult\":\"classification-unconfirmed\"}')");
+$split = array_column($board->statuses(['normal-recovery', 'residential-recovery']), null, 'service');
+same(1, $split['normal-recovery']['scheduled'], '非住宅恢复独立统计定时等待');
+same(1, $split['normal-recovery']['checked'], '非住宅恢复独立统计完成结果');
+same(2, $split['residential-recovery']['checked'], '住宅核验包含出口失败和分类未确认');
+Db::statement("DELETE FROM node_explorer_work WHERE key LIKE 'board-%'");
 
 // 心跳过期 → 明确文案，且不再健康。先灌一行再改旧：source-ingest 没有
 // 写入方，直接 UPDATE 会更新 0 行，读到的仍是「尚未启动」。

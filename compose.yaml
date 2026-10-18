@@ -1,4 +1,4 @@
-# Six independently restartable services. PostgreSQL is an existing external service.
+# Eight independently restartable services. PostgreSQL is an existing external service.
 x-environment: &environment
   PGHOST: ${PGHOST:?Set PGHOST in .env}
   PGPORT: ${PGPORT:-5432}
@@ -133,6 +133,29 @@ services:
     command: [node-worker, -role, residential]
     healthcheck:
       test: [CMD, node-worker, -role, residential, -health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+  normal-recovery:
+    <<: *worker
+    command: [node-worker, -role, normal-recovery]
+    environment:
+      <<: *environment
+      NORMAL_RECOVERY_INTERVAL_SECONDS: ${NORMAL_RECOVERY_INTERVAL_SECONDS:-21600}
+      SCHEDULE_INTERVAL_SECONDS: 30
+    healthcheck:
+      test: [CMD, node-worker, -role, normal-recovery, -health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+  node-cleanup:
+    <<: *worker
+    command: [node-worker, -role, node-cleanup]
+    environment:
+      <<: *environment
+      SCHEDULE_INTERVAL_SECONDS: 30
+    healthcheck:
+      test: [CMD, node-worker, -role, node-cleanup, -health]
       interval: 30s
       timeout: 10s
       start_period: 60s

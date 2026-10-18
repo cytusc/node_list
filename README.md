@@ -2,7 +2,7 @@
 
 React／TypeScript 节点浏览器与 PHP（webman）接口层，实时展示 subs-check 和 Qilan 节点的当前连通性及出口 IP 属性。支持筛选、分页、详情、列设置和深浅主题。
 
-现在由六个独立服务运行：API 查询（PHP/webman，实现见 `webman/`）、来源导入、测活、IP 属性、住宅恢复、节点生命周期（后五个是 Go `node-worker`）。**PostgreSQL 保存业务数据，Redis 分发任务；在用住宅节点默认每 5 分钟检查，自动退役节点仅做一轮恢复核验，合格立即恢复。** 人工禁用不会自动恢复。
+现在由七个独立服务运行：API 查询（PHP/webman，实现见 `webman/`）、来源导入、测活、IP 属性、住宅恢复、非住宅恢复、节点生命周期（后六个是 Go `node-worker`）。**PostgreSQL 保存业务数据，Redis 分发任务；在用住宅节点默认每 5 分钟检查，住宅恢复失败后按退避间隔重试；非住宅节点默认每 6 小时复检，合格立即恢复。** 人工禁用不会自动恢复。
 
 完整的模块职责、任务契约、故障恢复、部署与升级步骤见 [MODULAR_SERVICES.md](MODULAR_SERVICES.md)，住宅判定规则见 [RESIDENTIAL_RECOVERY.md](RESIDENTIAL_RECOVERY.md)。
 
@@ -41,11 +41,11 @@ curl --fail http://127.0.0.1:3001/api/health
 curl --fail http://127.0.0.1:3001/api/services
 ```
 
-默认 `COMPOSE_FILE=compose.yaml:compose.subs-check.yaml`，包含六个应用服务、Redis、四个专用 Mihomo 和上游 subs-check。已有 subs-check 时可只使用 `compose.yaml`。数据库是已有外部服务，不自动新建。只有来源服务挂载订阅目录；所有代理和 Redis 都不发布宿主端口。Web 默认绑定 `127.0.0.1:3001`，可用 `BIND_ADDRESS`／`WEB_PORT` 调整。
+默认 `COMPOSE_FILE=compose.yaml:compose.subs-check.yaml`，包含七个应用服务、Redis、十六个专用 Mihomo 和上游 subs-check。已有 subs-check 时可只使用 `compose.yaml`。数据库是已有外部服务，不自动新建。只有来源服务挂载订阅目录；所有代理和 Redis 都不发布宿主端口。Web 默认绑定 `127.0.0.1:3001`，可用 `BIND_ADDRESS`／`WEB_PORT` 调整。
 
 旧的 PG／IPPure／巡检 overlay 已删除（它们曾是为旧部署保留的空兼容文件，生产自 v1.4.x 起已不在 `COMPOSE_FILE` 中引用）。升级应停止旧巡检与采集进程，更新 Compose 文件，保留数据库与旧 SQLite 卷；SQLite 历史不会自动迁移。详见模块化升级说明。
 
-`deploy/node-list.service`、`deploy/node-list-update.service` 和 timer 可安装到 systemd。`deploy/update.sh` 会同步更新六个应用服务，健康检查失败时回滚对应版本。`NODE_EXPLORER_AUTO_UPDATE=false` 可关闭应用自动更新。
+`deploy/node-list.service`、`deploy/node-list-update.service` 和 timer 可安装到 systemd。`deploy/update.sh` 会同步更新七个应用服务，健康检查失败时回滚对应版本。`NODE_EXPLORER_AUTO_UPDATE=false` 可关闭应用自动更新。
 
 ## 来源与当前状态
 
@@ -93,3 +93,5 @@ bash deploy/ip-type-clean.sh --query-proxy http://audit-proxy:7890 --apply # 全
 在部署主机执行包装脚本；它从应用容器安全读取数据库配置，通过临时容器运行，报告写入宿主机 `ip-type-clean-reports/`。可通过 `IP_TYPE_CLEAN_CONTAINER`、`IP_TYPE_CLEAN_BINARY`、`IP_TYPE_CLEAN_REPORT_DIR` 覆盖默认值。二进制也可直接使用 PostgreSQL 标准环境变量运行。
 
 默认不写数据库；`--apply` 在每个 IP 的事务中锁定当前记录，先将原始 JSON 备份至 `node_explorer_ip_type_clean_backup`（按运行 ID、批次、节点索引唯一），再仅更新 `classification` 和 `attributes`。保留节点、检测时间、风险分数、真实出口及其他字段，避免覆盖并发采集结果。失败重跑会重新读取当前数据，数据库互斥锁阻止两个清洗任务同时运行。JSONL 报告记录每个 IP 的证据、来源缺失和更新数量；终端出现 `COMPLETE` 才表示该次全量处理结束。主标签采用独立来源票数最多的类型；最高票并列时，仅在并列项中按住宅 IP、商业宽带的顺序优先判定，其余平票判为机房 IP，全部弃权时显示“类型未知”，各来源原始类型保留在明细中。
+
+节点七天失效清理与可用时间记录：[NODE_CLEANUP.md](NODE_CLEANUP.md)。

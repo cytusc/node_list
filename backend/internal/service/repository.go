@@ -20,12 +20,14 @@ import (
 )
 
 const (
-	KindLive       = "connectivity"
-	KindExit       = "exit"
-	KindAttributes = "attributes"
-	KindRisk       = "risk"
-	KindRecovery   = "recovery"
-	KindLifecycle  = "lifecycle"
+	KindLive           = "connectivity"
+	KindExit           = "exit"
+	KindAttributes     = "attributes"
+	KindRisk           = "risk"
+	KindRecovery       = "recovery"
+	KindNormalRecovery = "normal-recovery"
+	KindCleanup        = "node-cleanup"
+	KindLifecycle      = "lifecycle"
 )
 
 type RecoveryAssessment struct {
@@ -36,9 +38,11 @@ type RecoveryAssessment struct {
 }
 
 type Payload struct {
+	RecoveryMode     string               `json:"recoveryMode,omitempty"`
 	RecoveryAttempts int                  `json:"recoveryAttempts,omitempty"`
 	RecoveryHistory  []RecoveryAssessment `json:"recoveryHistory,omitempty"`
 	RecoveryResult   string               `json:"recoveryResult,omitempty"`
+	Incarnation      string               `json:"incarnation,omitempty"`
 	Identity         string               `json:"identity,omitempty"`
 	CheckedAt        string               `json:"checkedAt,omitempty"`
 	IP               string               `json:"ip,omitempty"`
@@ -100,10 +104,10 @@ func (r *Repository) Schedule(ctx context.Context, kind, key string, p Payload, 
 func (r *Repository) Publish(ctx context.Context, q taskqueue.Queue, kinds []string) error {
 	rows, err := r.Pool.Query(ctx, `SELECT id,generation,kind,priority,due_at FROM (
 	SELECT id,generation,kind,priority,due_at,published_at,published_generation,published_due_at,published_priority,
-	row_number() OVER(PARTITION BY kind,(priority>0) ORDER BY CASE WHEN kind='recovery' AND payload ? 'startedAt' THEN 0 ELSE 1 END,due_at,id) AS lane_position FROM node_explorer_work
+	row_number() OVER(PARTITION BY kind,(priority>0) ORDER BY CASE WHEN kind IN ('recovery','normal-recovery','node-cleanup') AND payload ? 'startedAt' THEN 0 ELSE 1 END,due_at,id) AS lane_position FROM node_explorer_work
 	WHERE kind=ANY($1) AND ((state='queued' AND due_at<=now()+interval '10 seconds')
 	OR (state='running' AND lease_until<now()))) pending
-	WHERE lane_position<=CASE WHEN kind='recovery' THEN 2 ELSE 1000 END
+	WHERE lane_position<=CASE WHEN kind IN ('normal-recovery','node-cleanup') THEN 1 WHEN kind='recovery' THEN 2 ELSE 1000 END
 	AND (published_at IS NULL OR published_at<now()-interval '30 seconds'
 	 OR published_generation IS DISTINCT FROM generation OR published_due_at IS DISTINCT FROM due_at
 	 OR published_priority IS DISTINCT FROM priority)
@@ -177,7 +181,7 @@ func (r *Repository) Claim(ctx context.Context, kind, ref string, high bool) (*J
 	j := &Job{ID: id, Generation: generation, Kind: kind, Token: randomToken()}
 	query := r.Pool.QueryRow
 	var admission pgx.Tx
-	if kind == KindRecovery {
+	if kind == KindRecovery || kind == KindNormalRecovery || kind == KindCleanup {
 		// Bound complete assessments, including coordinators awaiting probes.
 		// A lane-specific transaction lock makes admission safe across replicas.
 		admission, e = r.Pool.Begin(ctx)
@@ -189,19 +193,48 @@ func (r *Repository) Claim(ctx context.Context, kind, ref string, high bool) (*J
 		if high {
 			lane = "residential"
 		}
-		if _, e = admission.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext($1))`, "recovery-admission:"+lane); e != nil {
+		if _, e = admission.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext($1))`, kind+"-admission:"+lane); e != nil {
 			return nil, e
+		}
+		query = admission.QueryRow
+	}
+
+	// Serialize new probe admission with deletion. Existing running leases are
+	// checked again by the deletion transaction before any data is removed.
+	if kind == KindLive || kind == KindExit {
+		admission, e = r.Pool.Begin(ctx)
+		if e != nil {
+			return nil, e
+		}
+		defer admission.Rollback(ctx)
+		var identity string
+		e = admission.QueryRow(ctx, `SELECT coalesce(payload->>'identity','') FROM node_explorer_work WHERE id=$1 AND generation=$2`, id, generation).Scan(&identity)
+		if e == pgx.ErrNoRows {
+			return nil, nil
+		}
+		if e != nil {
+			return nil, e
+		}
+		if _, e = admission.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext(current_schema()),hashtext($1))`, "node-probe:"+identity); e != nil {
+			return nil, e
+		}
+		var exists bool
+		if e = admission.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_explorer_node_registry WHERE identity=$1)`, identity).Scan(&exists); e != nil {
+			return nil, e
+		}
+		if !exists {
+			return nil, nil
 		}
 		query = admission.QueryRow
 	}
 	var raw []byte
 	err := query(ctx, `UPDATE node_explorer_work SET state='running',lease_token=$4,
 	lease_until=now()+interval '3 minutes',attempts=attempts+1,
- payload=CASE WHEN kind='recovery' AND (NOT(payload ? 'startedAt') OR payload->>'startedAt' LIKE '0001-%') THEN payload || jsonb_build_object('startedAt',to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ELSE payload END WHERE id=$1 AND generation=$2 AND kind=$3
+ payload=CASE WHEN kind IN ('recovery','normal-recovery','node-cleanup') AND (NOT(payload ? 'startedAt') OR payload->>'startedAt' LIKE '0001-%') THEN payload || jsonb_build_object('startedAt',to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ELSE payload END WHERE id=$1 AND generation=$2 AND kind=$3
 	AND (priority>0)=$5 AND due_at<=now() AND (state='queued' OR (state='running' AND lease_until<now()))
- AND (kind<>'recovery' OR (payload ? 'startedAt' AND payload->>'startedAt' NOT LIKE '0001-%') OR
- (SELECT count(*) FROM node_explorer_work active WHERE active.kind='recovery' AND (active.priority>0)=$5
- AND active.state<>'done' AND active.payload ? 'startedAt' AND active.payload->>'startedAt' NOT LIKE '0001-%')<2)
+ AND (kind NOT IN ('recovery','normal-recovery','node-cleanup') OR (payload ? 'startedAt' AND payload->>'startedAt' NOT LIKE '0001-%') OR
+ (SELECT count(*) FROM node_explorer_work active WHERE active.kind=node_explorer_work.kind AND (active.priority>0)=$5
+ AND active.state<>'done' AND active.payload ? 'startedAt' AND active.payload->>'startedAt' NOT LIKE '0001-%')<CASE WHEN kind IN ('normal-recovery','node-cleanup') THEN 1 ELSE 2 END)
 	RETURNING key,payload,priority,attempts,due_at`, id, generation, kind, j.Token, high).Scan(&j.Key, &raw, &j.Priority, &j.Attempts, &j.Due)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -263,6 +296,7 @@ func (r *Repository) Retry(ctx context.Context, j Job, delay time.Duration, mess
 type Target struct {
 	Node                  domain.Node
 	Identity              string
+	Incarnation           string
 	HistoricalResidential bool
 	Retired               *store.RetiredRow
 }
@@ -271,9 +305,9 @@ func (r *Repository) Target(ctx context.Context, id string) (*Target, error) {
 	var raw []byte
 	var retired, reason *string
 	t := &Target{Identity: id}
-	err := r.Pool.QueryRow(ctx, `SELECT n.node,n.historical_residential,r.retired_at,r.reason FROM node_explorer_node_registry n
+	err := r.Pool.QueryRow(ctx, `SELECT n.node,n.historical_residential,n.incarnation,r.retired_at,r.reason FROM node_explorer_node_registry n
 	LEFT JOIN node_explorer_retired_nodes r USING(identity) WHERE n.identity=$1 AND n.available
-	AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)`, id).Scan(&raw, &t.HistoricalResidential, &retired, &reason)
+	AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)`, id).Scan(&raw, &t.HistoricalResidential, &t.Incarnation, &retired, &reason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

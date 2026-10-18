@@ -143,7 +143,7 @@ func (a *Adapter) initSchema(ctx context.Context) error {
 	// Bump schemaVersion whenever base tables, service SQL or live views change.
 	// All services share one transactional migration lock and skip DDL once this
 	// version has committed. A failed migration leaves no applied-version marker.
-	const schemaVersion = 3
+	const schemaVersion = 4
 	var migrationTable *string
 	if err = tx.QueryRow(ctx, `SELECT to_regclass('node_explorer_service_migrations')::text`).Scan(&migrationTable); err != nil {
 		return err
@@ -207,26 +207,35 @@ func (a *Adapter) Pool() *pgxpool.Pool { return a.pool }
 // serialised the same nodes into a different hash: without it, a rewrite would
 // silently duplicate the whole history.
 func (a *Adapter) Insert(ctx context.Context, fingerprint string, payload []byte, checkedAt string, nodeCount int) error {
+
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-registry'))`); err != nil {
+		return err
+	}
+	payload, nodeCount, err = filterDeletedSnapshot(ctx, tx, payload, nodeCount)
+	if err != nil {
+		return err
+	}
 	if checkedAt != "" {
-		existing, err := a.latestPayloadByCheckedAt(ctx, checkedAt, nodeCount)
-		if err == nil && existing != nil {
-			if sameSnapshotContent(existing, payload) {
-				return nil
-			}
+		var existing []byte
+		e := tx.QueryRow(ctx, `SELECT payload FROM node_explorer_snapshots WHERE checked_at=$1 AND node_count=$2 ORDER BY id DESC LIMIT 1`, checkedAt, nodeCount).Scan(&existing)
+		if e != nil && e != pgx.ErrNoRows {
+			return e
+		}
+		if e == nil && sameSnapshotContent(existing, payload) {
+			return tx.Commit(ctx)
 		}
 	}
-	_, err := a.pool.Exec(ctx,
-		`INSERT INTO `+tableSnapshots+`
-		(fingerprint, checked_at, imported_at, node_count, payload)
-		SELECT $1, $2, $3, $4, $5
-		WHERE NOT EXISTS (SELECT 1 FROM `+tableSnapshots+` WHERE fingerprint = $1)
-		ON CONFLICT (fingerprint) DO NOTHING`,
-		fingerprint, nullIfEmpty(checkedAt), store.NowTimestamp(),
-		nodeCount, string(payload))
+	_, err = tx.Exec(ctx, `INSERT INTO node_explorer_snapshots(fingerprint,checked_at,imported_at,node_count,payload)
+ VALUES($1,$2,$3,$4,$5) ON CONFLICT(fingerprint) DO NOTHING`, fingerprint, nullIfEmpty(checkedAt), store.NowTimestamp(), nodeCount, string(payload))
 	if err != nil {
 		return fmt.Errorf("insert snapshot: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (a *Adapter) latestPayloadByCheckedAt(ctx context.Context, checkedAt string, nodeCount int) ([]byte, error) {
