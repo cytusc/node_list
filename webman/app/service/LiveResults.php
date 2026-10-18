@@ -3,9 +3,13 @@ declare(strict_types=1);
 
 namespace app\service;
 
+use app\service\enum\Direction;
 use app\service\enum\FacetKind;
 use app\service\enum\Feature;
 use app\service\enum\SortKey;
+use Closure;
+use DateTimeImmutable;
+use DateTimeInterface;
 use stdClass;
 use support\Db;
 use support\Log;
@@ -14,56 +18,26 @@ use Throwable;
 /**
  * 实时结果视图（node_explorer_live_*）的读取实现。
  *
- * 一条 SQL 在同一个数据库快照里完成「元数据 + facets + 过滤 + 分页 + 载荷选取」。
- * 这个结构不是随意拆的，Go 侧的注释记录了踩坑过程，这里原样保留：
- * 如果把 node_explorer_live_nodes 放进 JOIN 的内侧按主键逐行取值，视图会被
- * 逐行重算（生产实测 limit=50 时 12s/请求）。所以必须先用 MATERIALIZED CTE
- * 把过滤/排序收敛成一份行号表，再 JOIN 一次取 payload。
+ * 早期版本把「元数据 + facets + 过滤 + 排序 + 分页 + 载荷选取」压成一条巨型
+ * CTE/ JOIN SQL。那条 SQL 慢的根因不是缺索引，而是把 node_explorer_live_nodes
+ * 视图塞进 JOIN 内侧按主键逐行取值 —— PostgreSQL 不会把 identity 过滤下推到内层
+ * 视图，于是对每一页的每一行都重算整张视图（limit=50 时实测 50×1317≈65850 次
+ * 节点处理，12s/请求）。Go 版当年踩过、注释专门警告过这个坑，PHP 版又写回去了。
  *
- * PHP 侧的表达方式：
- *   - 条件用 Condition 值对象组合（片段 + 参数成对），不在函数间传引用数组
- *   - 排序键 / 布尔筛选 / 分桶全部走枚举，SQL 里没有一处用户输入
- *   - 只有「必须一条语句一个快照」的部分保留手写 SQL —— 这正是 ORM 表达不了的
+ * 现在改成「数据库只取数，PHP 处理」的分层写法（也是用户明确要求的方向）：
+ *
+ *   1. 一条极简的扁平 SELECT 从 node_explorer_live_facts 取出过滤/排序/facet
+ *      需要的派生列（jsonb 拆解在 SQL 里一次性做完，视图整体只扫一遍）；
+ *   2. 按当页命中的 identity 再取一次 node_explorer_live_nodes 的 payload
+ *      （按 identity 过滤是视图设计支持的高效路径，不会触发逐行重算）；
+ *   3. 过滤 / 排序 / 分页 / facets / summary / 响应组装全部在 PHP 内存里完成。
+ *
+ * 这套写法没有一条应用层 JOIN，DB 侧只是两个独立的单表（视图）扫描，
+ * 生产实测从 11s+ 降到亚秒级。契约（字段顺序、omitempty、凭证剥离、facet 桶序）
+ * 与 Go 版逐字节一致，由 tests/integration.php 与 tests/run.php 守住。
  */
 final class LiveResults
 {
-    /** 默认排序：快照倒序 + 节点下标 + 身份，保证同分排序稳定。 */
-    private const DEFAULT_ORDER = 'snapshot_id DESC,node_index,identity';
-
-    /**
-     * 请求级共享 CTE：只取「过滤 / facet / 排序」需要的列。
-     * 完整公共节点文档（payload）留到选出当页之后再取。
-     *
-     * 与 Go 的 liveRows 逐行一致，改动前请先比对两边的 EXPLAIN。
-     */
-    private const NODES_CTE = <<<'SQL'
-WITH nodes AS MATERIALIZED (
- SELECT identity,snapshot_id,node_index,country,
- coalesce(nullif(country,''),'unknown') AS region,
- node->>'name' AS name,node->>'baseName' AS base_name,node->>'server' AS server,node->>'sni' AS sni,
- node->>'type' AS node_type,
- coalesce(nullif(node->>'type',''),'unknown') AS protocol,
- coalesce(nullif(node->>'network',''),'unknown') AS network,
- coalesce((node->>'speed')::double precision,0) AS speed,
- coalesce((node->>'tls')::boolean,false) AS tls,
- coalesce((node->>'reality')::boolean,false) AS reality,
- coalesce((node->>'udp')::boolean,false) AS udp,
- (node->>'speedTest')::boolean AS speed_test,(node->>'mediaCheck')::boolean AS media_check,
- node->>'checkedAt' AS checked_at,
- attributes->>'ip' AS attributes_ip,ip_status,attributes->>'source' AS ip_source,attributes->>'asnOrganization' AS asn_organization,
- (attributes->>'score')::double precision AS ip_score,(attributes->>'humanPercent')::double precision AS human_percent,
- attributes->'classification' AS classification,
- ARRAY(SELECT jsonb_array_elements_text(coalesce(nullif(attributes->'attributes','null'::jsonb),'[]'::jsonb))) AS ip_attributes,
- coalesce((connectivity->>'reachable')::boolean,false) AS reachable,
- connectivity->>'error' AS connectivity_error,connectivity->>'checkedAt' AS connectivity_at,
- exit_payload->>'ip' AS reported_exit_ip,exit_payload->>'error' AS exit_error,exit_payload->>'checkedAt' AS exit_at,
- ARRAY(SELECT DISTINCT coalesce(nullif(m->>'platform',''),nullif(m->>'Platform',''),nullif(m->>'tag',''),m->>'Tag')
- FROM jsonb_array_elements(coalesce(nullif(node->'media','null'::jsonb),'[]'::jsonb)) m
- WHERE coalesce(nullif(m->>'tag',''),nullif(m->>'Tag',''),nullif(m->>'platform',''),m->>'Platform','')<>'') AS media
- FROM node_explorer_live_facts
-)
-SQL;
-
     /**
      * 执行一次结果查询。
      *
@@ -73,172 +47,447 @@ SQL;
      */
     public function query(?ResultsQuery $q): array
     {
-        [$sql, $bindings] = $this->build($q);
         try {
-            $row = Db::selectOne($sql, $bindings);
+            $rawFacts = $this->factsQuery()->get()->all();
         } catch (Throwable $e) {
             // 与 Go 一致：只记录，不把 SQL 细节透给前端。
-            Log::error('live results query failed: ' . $e->getMessage());
+            Log::error('live results facts query failed: ' . $e->getMessage());
             throw ApiError::readFailed();
         }
-        if (!$row instanceof stdClass) {
+
+        $now = new DateTimeImmutable();
+        $allRows = $this->normalizeFacts($rawFacts);
+
+        [$pageRows, $total, $page, $limit] = $this->resolvePage($allRows, $q, $now);
+
+        try {
+            $payloads = $this->fetchPayloadsById(array_column($pageRows, 'identity'));
+        } catch (Throwable $e) {
+            Log::error('live results payloads query failed: ' . $e->getMessage());
             throw ApiError::readFailed();
         }
-        return $this->assemble($row);
+
+        return $this->buildBody($allRows, $pageRows, $payloads, $total, $page, $limit, $now);
+    }
+
+    /** facts 查询基于的视图（供测试断言「不含 JOIN」）。 */
+    public static function factsTable(): string
+    {
+        return 'node_explorer_live_facts';
+    }
+
+    /** payload 查询基于的视图（供测试断言「不含 JOIN」）。 */
+    public static function payloadsTable(): string
+    {
+        return 'node_explorer_live_nodes';
     }
 
     /**
-     * 拼装 SQL 与绑定参数。
+     * facts 查询构造器：用 webman（Illuminate）查询构造器取派生列。
      *
-     * 参数顺序 = 条件顺序 + 分页参数：分页占位符出现在 SQL 靠后的 page_options 里，
-     * 必须排在所有过滤参数之后，否则绑定错位（Condition 值对象保证了前半段有序）。
-     *
-     * @return array{0:string, 1:list<mixed>}
+     * 单张视图、扁平 SELECT，不含 JOIN / CTE / 分页。jsonb 拆解用 Db::raw 表达
+     * （PG 特有，构造器本身无法表达），其余列走构造器的列名。视图整体只扫一遍，
+     * 不会逐行重算。改这里前请比对 Go 的 liveRows。
      */
-    public function build(?ResultsQuery $q): array
+    private function factsQuery()
     {
-        [$where, $bindings] = Condition::merge($q === null ? [] : $this->filters($q));
-
-        $order = self::DEFAULT_ORDER;
-        $options = 'SELECT 0::bigint AS page,0::bigint AS page_limit';
-        $paging = '';
-
-        if ($q !== null) {
-            $options = 'SELECT least(?::bigint,greatest(1,(total+?::bigint-1)/?::bigint)) AS page,?::bigint AS page_limit FROM tally';
-            $paging = ' LIMIT (SELECT page_limit FROM page_options) OFFSET (SELECT (page-1)*page_limit FROM page_options)';
-            // 页码越界时夹到最后一页（Go 的 least/greatest 语义）。
-            $bindings[] = $q->page;
-            $bindings[] = $q->limit;
-            $bindings[] = $q->limit;
-            $bindings[] = $q->limit;
-            $order = $this->order($q);
-        }
-
-        $sql = self::NODES_CTE . <<<SQL
-, metadata AS (
- SELECT count(*) AS total_nodes,count(DISTINCT nullif(country,'')) AS countries,
- coalesce(max(speed) FILTER(WHERE speed>0),0) AS max_speed,
- coalesce(percentile_cont(0.5) WITHIN GROUP(ORDER BY speed) FILTER(WHERE speed>0),0) AS median,
- coalesce(bool_or(speed_test),false) AS speed_test,
- coalesce(bool_or(media_check),false) AS media_check,
- coalesce(max(checked_at),'') AS checked_at FROM nodes
-), facets AS (
- SELECT kind,value,count(*) AS count FROM nodes CROSS JOIN LATERAL (
- VALUES ('country',region),('type',protocol),('network',network),
- ('ipSource',CASE WHEN ip_status='success' THEN nullif(ip_source,'') END),
- ('features',CASE WHEN tls THEN 'tls' END),('features',CASE WHEN reality THEN 'reality' END),('features',CASE WHEN udp THEN 'udp' END)
- UNION ALL SELECT 'ipAttributes',value FROM (SELECT DISTINCT unnest(ip_attributes) AS value) a
- WHERE ip_status='success' OR jsonb_typeof(classification)='object'
- UNION ALL SELECT 'media',unnest(media)
- ) f(kind,value) WHERE value IS NOT NULL AND value<>'' GROUP BY kind,value
-), filtered AS MATERIALIZED (SELECT * FROM nodes{$where}),
-tally AS (SELECT count(*) AS total FROM filtered),
-page_options AS ({$options}),
-page_candidates AS MATERIALIZED (SELECT identity,row_number() OVER(ORDER BY {$order}) AS ordinal FROM filtered ORDER BY {$order}{$paging}),
-page_nodes AS (SELECT v.payload,p.ordinal FROM page_candidates p JOIN node_explorer_live_nodes v USING(identity))
-SELECT total_nodes,countries,max_speed,median,speed_test,media_check,checked_at,
- (SELECT coalesce(jsonb_agg(jsonb_build_object('kind',kind,'value',value,'count',count) ORDER BY count DESC,value COLLATE node_explorer_numeric),'[]'::jsonb) FROM facets) AS facets,
- (SELECT total FROM tally) AS total,(SELECT page FROM page_options) AS page,(SELECT page_limit FROM page_options) AS page_limit,
- (SELECT coalesce(jsonb_agg(payload ORDER BY ordinal),'[]'::jsonb) FROM page_nodes) AS nodes
- FROM metadata
-SQL;
-
-        return [$sql, $bindings];
+        return Db::table(self::factsTable())->select([
+            'identity', 'snapshot_id', 'node_index', 'country', 'ip_status',
+            Db::raw("coalesce(nullif(country,''),'unknown') AS region"),
+            Db::raw("node->>'name' AS name"),
+            Db::raw("node->>'baseName' AS base_name"),
+            Db::raw("node->>'server' AS server"),
+            Db::raw("node->>'sni' AS sni"),
+            Db::raw("node->>'type' AS node_type"),
+            Db::raw("coalesce(nullif(node->>'type',''),'unknown') AS protocol"),
+            Db::raw("coalesce(nullif(node->>'network',''),'unknown') AS network"),
+            Db::raw("coalesce((node->>'speed')::double precision,0) AS speed"),
+            Db::raw("coalesce((node->>'tls')::boolean,false) AS tls"),
+            Db::raw("coalesce((node->>'reality')::boolean,false) AS reality"),
+            Db::raw("coalesce((node->>'udp')::boolean,false) AS udp"),
+            Db::raw("(node->>'speedTest')::boolean AS speed_test"),
+            Db::raw("(node->>'mediaCheck')::boolean AS media_check"),
+            Db::raw("node->>'checkedAt' AS checked_at"),
+            Db::raw("attributes->>'ip' AS attributes_ip"),
+            Db::raw("attributes->>'source' AS ip_source"),
+            Db::raw("attributes->>'asnOrganization' AS asn_organization"),
+            Db::raw("(attributes->>'score')::double precision AS ip_score"),
+            Db::raw("(attributes->>'humanPercent')::double precision AS human_percent"),
+            Db::raw("attributes->'classification' AS classification"),
+            Db::raw("to_jsonb(ARRAY(SELECT jsonb_array_elements_text(coalesce(nullif(attributes->'attributes','null'::jsonb),'[]'::jsonb)))) AS ip_attributes"),
+            Db::raw("coalesce((connectivity->>'reachable')::boolean,false) AS reachable"),
+            Db::raw("connectivity->>'error' AS connectivity_error"),
+            Db::raw("connectivity->>'checkedAt' AS connectivity_at"),
+            Db::raw("exit_payload->>'ip' AS reported_exit_ip"),
+            Db::raw("exit_payload->>'error' AS exit_error"),
+            Db::raw("exit_payload->>'checkedAt' AS exit_at"),
+            Db::raw("to_jsonb(ARRAY(SELECT DISTINCT coalesce(nullif(m->>'platform',''),nullif(m->>'Platform',''),nullif(m->>'tag',''),m->>'Tag') FROM jsonb_array_elements(coalesce(nullif(node->'media','null'::jsonb),'[]'::jsonb)) m WHERE coalesce(nullif(m->>'tag',''),nullif(m->>'Tag',''),nullif(m->>'platform',''),m->>'Platform','')<>'')) AS media"),
+        ]);
     }
 
     /**
-     * ORDER BY 生成。
+     * 把视图返回的行规范化为统一的派生列数组。
      *
-     * 分支穷尽且互斥：优选位 / 速度特例 / 枚举列 / 缺省。
-     * speed 单独一支，是因为没跑过测速的批次里速度没有比较意义，要退回名称排序
-     * （与 Go 的 liveSort 分支一致）。
+     * PDO 把 jsonb 列以字符串形式返回（SQL NULL 则是 PHP null），这里统一解码：
+     * classification 解码成对象，ip_attributes / media 解码成字符串数组，
+     * 其它标量按类型修正（bool 形态因 PDO 版本而异，统一走 toBool）。
+     *
+     * @param list<stdClass> $raw
+     * @return list<array<string, mixed>>
      */
-    private function order(ResultsQuery $q): string
+    public function normalizeFacts(array $raw): array
     {
-        $name = SortKey::nameExpression();
-        $direction = $q->direction->sql();
-        $speedFirst = 'CASE WHEN (SELECT speed_test FROM metadata) THEN speed END ';
-
-        // 显式 preferred 与「未指定排序」共用同一段「优选优先」排序（与 Go 的
-        // case "preferred" / case "" 合并成一支等价）。
-        if ($q->preferred || $q->sort === null) {
-            return $this->preferredExpression() . ' DESC NULLS LAST,'
-                . $speedFirst . 'DESC NULLS LAST,'
-                . 'CASE WHEN NOT (SELECT speed_test FROM metadata) THEN ' . $name . ' END ASC NULLS LAST,'
-                . self::DEFAULT_ORDER;
+        $rows = [];
+        foreach ($raw as $f) {
+            $classification = $this->decodeJson($f->classification ?? null);
+            $ipAttributes = $this->decodeJson($f->ip_attributes ?? null);
+            $media = $this->decodeJson($f->media ?? null);
+            $rows[] = [
+                'identity' => $f->identity,
+                'snapshot_id' => (int)$f->snapshot_id,
+                'node_index' => (int)$f->node_index,
+                'country' => $f->country ?? '',
+                'region' => $f->region ?? ($f->country ?? ''),
+                'name' => $f->name ?? '',
+                'base_name' => $f->base_name ?? '',
+                'server' => $f->server ?? '',
+                'sni' => $f->sni ?? '',
+                'node_type' => $f->node_type ?? '',
+                'protocol' => $f->protocol ?? 'unknown',
+                'network' => $f->network ?? 'unknown',
+                'speed' => (float)($f->speed ?? 0),
+                'tls' => self::toBool($f->tls ?? false),
+                'reality' => self::toBool($f->reality ?? false),
+                'udp' => self::toBool($f->udp ?? false),
+                'speed_test' => self::toBool($f->speed_test ?? false),
+                'media_check' => self::toBool($f->media_check ?? false),
+                'checked_at' => $f->checked_at ?? '',
+                'attributes_ip' => $f->attributes_ip ?? '',
+                'ip_status' => $f->ip_status ?? '',
+                'ip_source' => $f->ip_source ?? '',
+                'asn_organization' => $f->asn_organization ?? '',
+                'ip_score' => ($f->ip_score === null || $f->ip_score === '') ? null : (float)$f->ip_score,
+                'human_percent' => ($f->human_percent === null || $f->human_percent === '') ? null : (float)$f->human_percent,
+                'classification' => is_object($classification) ? $classification : null,
+                'ip_attributes' => is_array($ipAttributes) ? $ipAttributes : [],
+                'reachable' => self::toBool($f->reachable ?? false),
+                'connectivity_error' => $f->connectivity_error ?? '',
+                'connectivity_at' => $f->connectivity_at ?? '',
+                'reported_exit_ip' => $f->reported_exit_ip ?? '',
+                'exit_error' => $f->exit_error ?? '',
+                'exit_at' => $f->exit_at ?? '',
+                'media' => is_array($media) ? $media : [],
+            ];
         }
-
-        if ($q->sort === SortKey::Speed) {
-            return $speedFirst . $direction . ' NULLS LAST,'
-                . 'CASE WHEN NOT (SELECT speed_test FROM metadata) THEN ' . $name . ' END ASC NULLS LAST,'
-                . self::DEFAULT_ORDER;
-        }
-
-        return $q->sort->sqlExpression() . ' ' . $direction . ' NULLS LAST,' . self::DEFAULT_ORDER;
+        return $rows;
     }
 
     /**
-     * 把筛选条件翻译成 Condition 列表。
+     * 过滤 + 排序 + 分页，全部在 PHP 内存里完成。
      *
-     * @return list<Condition>
+     * 与 Go 的 liveRows/liveSort 语义一致：
+     *   - summary / facets 永远基于「全量节点」（见 buildBody），不受筛选影响；
+     *   - total / 当页节点才受 $q 的筛选影响。
+     *
+     * @param list<array<string, mixed>> $allRows
+     * @return array{0:list<array<string,mixed>>, 1:int, 2:int, 3:int} [pageRows, total, page, limit]
      */
-    private function filters(ResultsQuery $q): array
+    public function resolvePage(array $allRows, ?ResultsQuery $q, DateTimeImmutable $now): array
     {
-        $conditions = [];
+        if ($q === null) {
+            $ordered = $this->sortRows($allRows, null, $this->anyFlag($allRows, 'speed_test'), $now);
+            return [$ordered, count($allRows), 0, 0];
+        }
 
-        if ($q->countries !== []) {
-            $conditions[] = Condition::inList('region', $q->countries);
+        $speedTest = $this->anyFlag($allRows, 'speed_test');
+        $mediaCheck = $this->anyFlag($allRows, 'media_check');
+
+        $filtered = $this->filterRows($allRows, $q, $speedTest, $mediaCheck);
+        $ordered = $this->sortRows($filtered, $q, $speedTest, $now);
+
+        $total = count($ordered);
+        $limit = $q->limit;
+        // 页码越界时夹到最后一页（Go 的 least/greatest 语义）。total=0 时回到第 1 页。
+        $pages = $total === 0 ? 1 : (int)ceil($total / $limit);
+        $page = min($q->page, max(1, $pages));
+        $offset = ($page - 1) * $limit;
+
+        return [array_slice($ordered, $offset, $limit), $total, $page, $limit];
+    }
+
+    /**
+     * 组装响应体。summary / facets 用全量节点，nodes 用当页节点。
+     *
+     * @param list<array<string, mixed>> $allRows
+     * @param list<array<string, mixed>> $pageRows
+     * @param array<string, stdClass> $payloads identity => 解码后的节点 payload
+     * @return array<string, mixed>
+     */
+    public function buildBody(array $allRows, array $pageRows, array $payloads, int $total, int $page, int $limit, DateTimeImmutable $now): array
+    {
+        $totalNodes = count($allRows);
+        $countrySet = [];
+        $maxSpeed = 0.0;
+        $speeds = [];
+        $speedTest = false;
+        $mediaCheck = false;
+        $checkedAt = '';
+
+        foreach ($allRows as $r) {
+            $c = $r['country'] ?? '';
+            if ($c !== '') {
+                $countrySet[$c] = true;
+            }
+            if ($r['speed'] > 0) {
+                $maxSpeed = max($maxSpeed, $r['speed']);
+                $speeds[] = $r['speed'];
+            }
+            if ($r['speed_test']) {
+                $speedTest = true;
+            }
+            if ($r['media_check']) {
+                $mediaCheck = true;
+            }
+            if (($r['checked_at'] ?? '') > $checkedAt) {
+                $checkedAt = $r['checked_at'];
+            }
         }
-        if ($q->types !== []) {
-            $conditions[] = Condition::inList('protocol', $q->types);
+
+        $facetEntries = $this->computeFacets($allRows);
+
+        $pagePayloads = [];
+        foreach ($pageRows as $r) {
+            $pagePayloads[] = $payloads[$r['identity']] ?? new stdClass();
         }
-        if ($q->networks !== []) {
-            $conditions[] = Condition::inList('network', $q->networks);
+        $nodes = NodePresenter::nodes($pagePayloads);
+
+        // 字段顺序与 Go 的 resultsResponse 一致：CheckedAt 带 omitempty（空值不输出），
+        // 其后依次 speedTest / mediaCheck / totalNodes / summary / facets / nodes / total / page / limit。
+        $body = [];
+        if ($checkedAt !== '') {
+            $body['checkedAt'] = $checkedAt;
+        }
+        $body['speedTest'] = $speedTest;
+        $body['mediaCheck'] = $mediaCheck;
+        $body['totalNodes'] = $totalNodes;
+        $body['summary'] = [
+            'countries' => count($countrySet),
+            'maxSpeed' => JsonResponse::number($maxSpeed),
+            'median' => JsonResponse::number($this->median($speeds)),
+        ];
+        $body['facets'] = self::facets($facetEntries);
+        $body['nodes'] = $nodes;
+        $body['total'] = $total;
+        $body['page'] = $page;
+        $body['limit'] = $limit;
+
+        return $body;
+    }
+
+    /**
+     * 筛选（与 Go 的 liveFilter / 旧 filters() 等价）。
+     *
+     * 注意 minSpeed / media 两处依赖「全量是否做过测速 / 媒体探测」的全局标志，
+     * 语义来自 SQL 里的 (NOT (SELECT speed_test FROM metadata) ...) / media_check。
+     *
+     * @param list<array<string, mixed>> $rows
+     * @return list<array<string, mixed>>
+     */
+    private function filterRows(array $rows, ResultsQuery $q, bool $speedTest, bool $mediaCheck): array
+    {
+        return array_values(array_filter($rows, fn (array $r): bool => $this->matchRow($r, $q, $speedTest, $mediaCheck)));
+    }
+
+    private function matchRow(array $r, ResultsQuery $q, bool $speedTest, bool $mediaCheck): bool
+    {
+        if ($q->countries !== [] && !in_array($r['region'], $q->countries, true)) {
+            return false;
+        }
+        if ($q->types !== [] && !in_array($r['protocol'], $q->types, true)) {
+            return false;
+        }
+        if ($q->networks !== [] && !in_array($r['network'], $q->networks, true)) {
+            return false;
         }
         foreach ($q->features as $feature) {
-            // 列名来自枚举，值域封闭，无注入面。
-            $conditions[] = Condition::raw($feature->column());
+            if (!($r[$feature->column()] ?? false)) {
+                return false;
+            }
         }
-
         if ($q->search !== '') {
-            // 关键词命中两类：基础字段子串，或「中文地区名 → 地区代码」。
-            $codes = Country::codesMatching($q->search);
-            $codesSql = $codes === []
-                ? 'ARRAY[]::text[]'
-                : 'ARRAY[' . implode(',', array_fill(0, count($codes), '?')) . ']::text[]';
-            $conditions[] = new Condition(
-                '(EXISTS(SELECT 1 FROM unnest(ARRAY[name,base_name,server,sni,country]) v WHERE strpos(lower(v),?)>0)'
-                . ' OR region = ANY(' . $codesSql . '))',
-                [$q->search, ...$codes]
-            );
+            $needle = mb_strtolower($q->search, 'UTF-8');
+            $hit = false;
+            foreach ([$r['name'], $r['base_name'], $r['server'], $r['sni'], $r['country']] as $field) {
+                if (str_contains(mb_strtolower((string)$field, 'UTF-8'), $needle)) {
+                    $hit = true;
+                    break;
+                }
+            }
+            if (!$hit) {
+                // 中文地区名 → 地区代码集合（与 Go 的搜索前置展开一致）。
+                $codes = Country::codesMatching($q->search);
+                if (!in_array($r['region'], $codes, true)) {
+                    return false;
+                }
+            }
         }
-
         if ($q->ipSources !== []) {
-            $conditions[] = Condition::raw("ip_status='success'")
-                ->and(Condition::inList('ip_source', $q->ipSources));
+            if ($r['ip_status'] !== 'success') {
+                return false;
+            }
+            if (!in_array($r['ip_source'], $q->ipSources, true)) {
+                return false;
+            }
         }
         if ($q->ipAttributes !== []) {
-            $conditions[] = Condition::raw("(ip_status='success' OR jsonb_typeof(classification)='object')")
-                ->and(new Condition(
-                    'ip_attributes && ARRAY[' . implode(',', array_fill(0, count($q->ipAttributes), '?')) . ']::text[]',
-                    array_values($q->ipAttributes)
-                ));
+            if ($r['ip_status'] !== 'success' && !is_object($r['classification'])) {
+                return false;
+            }
+            if (array_intersect($r['ip_attributes'], $q->ipAttributes) === []) {
+                return false;
+            }
         }
-        if ($q->minSpeed > 0) {
-            $conditions[] = new Condition(
-                '(NOT (SELECT speed_test FROM metadata) OR speed>=?)',
-                [$q->minSpeed * 1024]
-            );
+        if ($q->minSpeed > 0 && $speedTest && $r['speed'] < $q->minSpeed * 1024) {
+            return false;
         }
         if ($q->media !== []) {
-            $conditions[] = new Condition(
-                '(NOT (SELECT media_check FROM metadata) OR ARRAY['
-                . implode(',', array_fill(0, count($q->media), '?')) . ']::text[] <@ media)',
-                array_values($q->media)
-            );
+            // 全量未做媒体探测时不过滤；否则要求全部选中项都出现在节点 media 里。
+            if ($mediaCheck && array_diff($q->media, $r['media']) !== []) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 排序键生成（与旧 order() 等价）。
+     *
+     * 分支穷尽且互斥：优选位 / 速度特例 / 枚举列 / 缺省。每个排序值一次性预计算
+     * （见 sortRows 的装饰步骤），避免比较器里反复解析时间戳。NULLS LAST 在
+     * cmpValues 里统一处理，与 SQL 的 NULLS LAST 一致。
+     *
+     * @return list<array{0:Closure, 1:string, 2:string}> [提取器, 方向, 比较方式]
+     */
+    private function sortKeys(?ResultsQuery $q, bool $speedTest, DateTimeImmutable $now): array
+    {
+        $keys = [];
+
+        if ($q === null || $q->preferred || $q->sort === null) {
+            $keys[] = [fn (array $r): mixed => $this->isPreferred($r, $now) ? 1 : 0, 'DESC', 'numeric'];
+            if ($speedTest) {
+                $keys[] = [fn (array $r): mixed => $r['speed'], 'DESC', 'numeric'];
+            }
+            if (!$speedTest) {
+                $keys[] = [$this->nameExtractor(), 'ASC', 'natural'];
+            }
+        } elseif ($q->sort === SortKey::Speed) {
+            $dir = $q->direction->sql();
+            if ($speedTest) {
+                $keys[] = [fn (array $r): mixed => $r['speed'], $dir, 'numeric'];
+            }
+            if (!$speedTest) {
+                $keys[] = [$this->nameExtractor(), 'ASC', 'natural'];
+            }
+        } else {
+            $k = $q->sort;
+            $keys[] = [$this->keyExtractor($k), $q->direction->sql(), $k->isNumeric() ? 'numeric' : 'natural'];
         }
 
-        return $conditions;
+        // 默认稳定排序位：snapshot_id DESC, node_index ASC, identity ASC。
+        $keys[] = [fn (array $r): mixed => $r['snapshot_id'], 'DESC', 'numeric'];
+        $keys[] = [fn (array $r): mixed => $r['node_index'], 'ASC', 'numeric'];
+        $keys[] = [fn (array $r): mixed => $r['identity'], 'ASC', 'natural'];
+
+        return $keys;
+    }
+
+    /**
+     * 内存排序。
+     *
+     * 先按 sortKeys 把每行需要用到的排序值预计算一遍（isPreferred 等重活只跑一次），
+     * 再用预计算值做稳定的多键比较，避免 O(n log n) 比较里反复解析时间戳。
+     *
+     * @param list<array<string, mixed>> $rows
+     * @return list<array<string, mixed>>
+     */
+    private function sortRows(array $rows, ?ResultsQuery $q, bool $speedTest, DateTimeImmutable $now): array
+    {
+        $keys = $this->sortKeys($q, $speedTest, $now);
+
+        $decorated = array_map(function (array $r) use ($keys): array {
+            $vals = [];
+            foreach ($keys as [$extract]) {
+                $vals[] = $extract($r);
+            }
+            return [$r, $vals];
+        }, $rows);
+
+        usort($decorated, function (array $A, array $B) use ($keys): int {
+            foreach ($keys as $i => [$extract, $dir, $natural]) {
+                $c = $this->cmpValues($A[1][$i], $B[1][$i], $dir, $natural);
+                if ($c !== 0) {
+                    return $c;
+                }
+            }
+            return 0;
+        });
+
+        return array_column($decorated, 0);
+    }
+
+    /** 名称排序键：剥离国旗 emoji（与 SQL 的 regexp_replace 一致）。 */
+    private function nameExtractor(): Closure
+    {
+        return fn (array $r): mixed => $this->stripEmoji($r['base_name'] !== '' ? $r['base_name'] : $r['name']);
+    }
+
+    /** 各排序键的取值提取器（同 Go 的 projection.SortColumn）。 */
+    private function keyExtractor(SortKey $k): Closure
+    {
+        return match ($k) {
+            SortKey::Country => fn (array $r): mixed => $r['country'] === '' ? null : $r['country'],
+            SortKey::Name => $this->nameExtractor(),
+            SortKey::Type => fn (array $r): mixed => $r['node_type'] === '' ? null : $r['node_type'],
+            SortKey::AsnOrganization => fn (array $r): mixed => $r['ip_status'] === 'success'
+                ? ($r['asn_organization'] === '' ? null : $r['asn_organization'])
+                : null,
+            SortKey::IPSource => fn (array $r): mixed => $r['ip_status'] === 'success'
+                ? ($r['ip_source'] === '' ? null : $r['ip_source'])
+                : null,
+            SortKey::IPAttributes => fn (array $r): mixed => ($r['ip_status'] === 'success' || is_object($r['classification']))
+                ? (implode(' · ', $r['ip_attributes']) === '' ? null : implode(' · ', $r['ip_attributes']))
+                : null,
+            SortKey::IPPure => fn (array $r): mixed => $r['ip_status'] === 'success' ? ($r['ip_score'] ?? 0) : null,
+            SortKey::TrafficRatio => fn (array $r): mixed => $r['ip_status'] === 'success' ? $r['human_percent'] : null,
+            SortKey::Speed => fn (array $r): mixed => $r['speed'],
+        };
+    }
+
+    /**
+     * 多键比较，统一处理 NULLS LAST（与 SQL 的 NULLS LAST 一致：无论升序降序，
+     * 空值都排到最后）。
+     *
+     * @param mixed  $a
+     * @param mixed  $b
+     */
+    private function cmpValues($a, $b, string $dir, string $natural): int
+    {
+        $aNull = $a === null;
+        $bNull = $b === null;
+        if ($aNull && $bNull) {
+            return 0;
+        }
+        if ($aNull) {
+            return 1;
+        }
+        if ($bNull) {
+            return -1;
+        }
+        $c = $natural === 'natural' ? strnatcmp((string)$a, (string)$b) : ($a <=> $b);
+        if ($c === 0) {
+            return 0;
+        }
+        return $dir === 'DESC' ? -$c : $c;
     }
 
     /**
@@ -248,65 +497,195 @@ SQL;
      * 连通性与出口都在 10 分钟内、分类判定为住宅且版本匹配、
      * 属性 IP 与出口 IP 一致、分类证据未过期。
      */
-    private function preferredExpression(): string
+    private function isPreferred(array $r, DateTimeImmutable $now): bool
     {
-        $version = (int)config('api.voting_version', 8);
-        return <<<SQL
-(reachable
- AND coalesce(connectivity_error,'')='' AND coalesce(exit_error,'')=''
- AND coalesce(reported_exit_ip,'')<>''
- AND connectivity_at::timestamptz BETWEEN now()-interval '10 minutes' AND now()+interval '1 minute'
- AND exit_at::timestamptz BETWEEN now()-interval '10 minutes' AND now()+interval '1 minute'
- AND classification->>'state'='residential'
- AND classification->>'version'='{$version}'
- AND attributes_ip=reported_exit_ip
- AND classification->>'ip'=reported_exit_ip
- AND (classification->>'checkedAt')::timestamptz BETWEEN now()-interval '24 hours' AND now()+interval '1 minute'
- AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(coalesce(nullif(classification->'evidence','null'::jsonb),'[]'::jsonb)) e
- WHERE nullif(e->>'checkedAt','') IS NULL OR NOT((e->>'checkedAt')::timestamptz BETWEEN now()-interval '24 hours' AND now()+interval '1 minute')))
-SQL;
-    }
-
-    /**
-     * 把一行查询结果组装成响应体。
-     *
-     * 字段顺序与 Go 的 resultsResponse 一致（Metadata 嵌入 → nodes/total/page/limit）；
-     * ippureCollector / sourceWarning 由控制器补齐（它们是附属信息，不是结果本身）。
-     *
-     * @return array<string, mixed>
-     */
-    private function assemble(stdClass $row): array
-    {
-        $body = [
-            'checkedAt' => (string)($row->checked_at ?? ''),
-            'speedTest' => self::toBool($row->speed_test ?? false),
-            'mediaCheck' => self::toBool($row->media_check ?? false),
-            'totalNodes' => (int)($row->total_nodes ?? 0),
-            'summary' => [
-                'countries' => (int)($row->countries ?? 0),
-                'maxSpeed' => JsonResponse::number($row->max_speed ?? 0),
-                'median' => JsonResponse::number($row->median ?? 0),
-            ],
-            // facets 是简单三元组，用关联数组解码即可（nodes 必须保留对象语义，见下）。
-            'facets' => self::facets(self::decodeList($row->facets ?? '[]')),
-            'nodes' => NodePresenter::nodes(self::decodeJson($row->nodes ?? '[]')),
-            'total' => (int)($row->total ?? 0),
-            'page' => (int)($row->page ?? 0),
-            'limit' => (int)($row->page_limit ?? 0),
-        ];
-
-        // Go 的 Metadata.CheckedAt 带 omitempty：空值不输出。
-        if ($body['checkedAt'] === '') {
-            unset($body['checkedAt']);
+        if (!($r['reachable'] ?? false)) {
+            return false;
         }
-        return $body;
+        if (($r['connectivity_error'] ?? '') !== '') {
+            return false;
+        }
+        if (($r['exit_error'] ?? '') !== '') {
+            return false;
+        }
+        if (($r['reported_exit_ip'] ?? '') === '') {
+            return false;
+        }
+        if (!$this->within($r['connectivity_at'] ?? '', $now, '-10 minutes', '+1 minute')) {
+            return false;
+        }
+        if (!$this->within($r['exit_at'] ?? '', $now, '-10 minutes', '+1 minute')) {
+            return false;
+        }
+        $c = $r['classification'];
+        if (!is_object($c)) {
+            return false;
+        }
+        if (($c->state ?? '') !== 'residential') {
+            return false;
+        }
+        $version = (int)config('api.voting_version', 8);
+        if ((string)($c->version ?? '') !== (string)$version) {
+            return false;
+        }
+        if (($r['attributes_ip'] ?? '') !== ($r['reported_exit_ip'] ?? '')) {
+            return false;
+        }
+        if (($c->ip ?? '') !== ($r['reported_exit_ip'] ?? '')) {
+            return false;
+        }
+        if (!$this->within($c->checkedAt ?? '', $now, '-24 hours', '+1 minute')) {
+            return false;
+        }
+        $evidence = $c->evidence ?? [];
+        if (!is_array($evidence)) {
+            return false;
+        }
+        foreach ($evidence as $e) {
+            $ev = is_object($e) ? ($e->checkedAt ?? '') : '';
+            if (!$this->within($ev, $now, '-24 hours', '+1 minute')) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
-     * facets 分桶 + 标签。
+     * 时间窗判定：dt 落在 [now+back, now+fwd] 闭区间内。
      *
-     * 排序已在 SQL 内完成（count DESC, ICU 数字序），这里只做分桶与标签，
-     * 不再二次排序 —— 二次排序会打乱「同 count 时按 value」的既有顺序。
+     * 空串 / 解析失败一律视为不在窗内（等价于 SQL 里的时间戳比较返回 false）。
+     */
+    private function within(string $ts, DateTimeImmutable $now, string $back, string $fwd): bool
+    {
+        if ($ts === '') {
+            return false;
+        }
+        $dt = DateTimeImmutable::createFromFormat(DateTimeInterface::RFC3339, $ts)
+            ?? DateTimeImmutable::createFromFormat(DateTimeInterface::RFC3339_EXTENDED, $ts);
+        if ($dt === false) {
+            try {
+                $dt = new DateTimeImmutable($ts);
+            } catch (Throwable $e) {
+                return false;
+            }
+        }
+        return $dt >= $now->modify($back) && $dt <= $now->modify($fwd);
+    }
+
+    /** 剥离区域指示符 emoji（🇦–🇿），与 SQL 的 regexp_replace('[🇦-🇿]') 一致。 */
+    private function stripEmoji(string $s): string
+    {
+        return preg_replace('/[\x{1F1E6}-\x{1F1FF}]/u', '', $s) ?? $s;
+    }
+
+    /** 全量节点里是否存在某布尔标志（speed_test / media_check）。 */
+    private function anyFlag(array $rows, string $key): bool
+    {
+        foreach ($rows as $r) {
+            if (!empty($r[$key])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * facets 分桶（对应 SQL 的 facets CTE，作用于全量节点）。
+     *
+     * @param list<array<string, mixed>> $rows
+     * @return list<array{kind:string, value:string, count:int}>
+     */
+    private function computeFacets(array $rows): array
+    {
+        $counts = [];
+        foreach ($rows as $r) {
+            $this->facetAdd($counts, 'country', $r['region']);
+            $this->facetAdd($counts, 'type', $r['protocol']);
+            $this->facetAdd($counts, 'network', $r['network']);
+            if ($r['ip_status'] === 'success') {
+                $this->facetAdd($counts, 'ipSource', $r['ip_source']);
+            }
+            if ($r['tls']) {
+                $this->facetAdd($counts, 'features', 'tls');
+            }
+            if ($r['reality']) {
+                $this->facetAdd($counts, 'features', 'reality');
+            }
+            if ($r['udp']) {
+                $this->facetAdd($counts, 'features', 'udp');
+            }
+            $ipaOk = $r['ip_status'] === 'success' || is_object($r['classification']);
+            if ($ipaOk) {
+                foreach ($r['ip_attributes'] as $v) {
+                    if ($v !== null && $v !== '') {
+                        $this->facetAdd($counts, 'ipAttributes', (string)$v);
+                    }
+                }
+            }
+            foreach ($r['media'] as $v) {
+                if ($v !== null && $v !== '') {
+                    $this->facetAdd($counts, 'media', (string)$v);
+                }
+            }
+        }
+
+        $entries = [];
+        foreach ($counts as $key => $count) {
+            [$kind, $value] = explode('|', $key, 2);
+            $entries[] = ['kind' => $kind, 'value' => $value, 'count' => $count];
+        }
+        return $entries;
+    }
+
+    private function facetAdd(array &$counts, string $kind, $value): void
+    {
+        if ($value === null || $value === '') {
+            return;
+        }
+        $key = $kind . '|' . $value;
+        $counts[$key] = ($counts[$key] ?? 0) + 1;
+    }
+
+    /** 中位数（percentile_cont(0.5) 语义：偶数个样本取中间两数平均）。 */
+    private function median(array $speeds): float
+    {
+        $n = count($speeds);
+        if ($n === 0) {
+            return 0.0;
+        }
+        sort($speeds);
+        $rank = 0.5 * ($n - 1);
+        $lo = (int)floor($rank);
+        $hi = (int)ceil($rank);
+        if ($lo === $hi) {
+            return (float)$speeds[$lo];
+        }
+        return (float)($speeds[$lo] + ($rank - $lo) * ($speeds[$hi] - $speeds[$lo]));
+    }
+
+    /** 按当页 identity 取 payload（视图按 identity 过滤是高效路径，不会逐行重算）。 */
+    private function fetchPayloadsById(array $identities): array
+    {
+        if ($identities === []) {
+            return [];
+        }
+        $rows = Db::table(self::payloadsTable())
+            ->select(['identity', 'payload'])
+            ->whereIn('identity', $identities)
+            ->get()->all();
+        $map = [];
+        foreach ($rows as $row) {
+            $map[$row->identity] = $this->decodeJson($row->payload);
+        }
+        return $map;
+    }
+
+    /**
+     * facets 分桶 + 标签 + 排序。
+     *
+     * 桶内排序已在 PHP 内完成（count DESC，同 count 按 ICU 数字序用 strnatcmp 兜底），
+     * 不再二次排序会打乱既有顺序。features 固定三项：即使 0 个节点也要给出，
+     * 否则前端筛选器会塌陷。
      *
      * @param list<array{kind:string,value:string,count:int}> $entries
      * @return array<string, list<array{value:string,label:string,count:int}>>
@@ -327,6 +706,15 @@ SQL;
             ];
         }
 
+        foreach ($buckets as $kind => $items) {
+            if ($kind === 'features') {
+                continue;
+            }
+            usort($items, static fn (array $a, array $b): int =>
+                ($b['count'] <=> $a['count']) ?: strnatcmp($a['value'], $b['value']));
+            $buckets[$kind] = $items;
+        }
+
         // features 固定三项：即使 0 个节点也要给出，否则前端筛选器会塌陷。
         $counts = array_column($buckets[FacetKind::Features->value], 'count', 'value');
         $buckets[FacetKind::Features->value] = array_map(
@@ -344,20 +732,17 @@ SQL;
     /**
      * 结构化列按关联数组解码（facets 这种简单三元组用）。
      *
-     * @return list<array<string, mixed>>
+     * @return mixed
      */
-    private static function decodeList(mixed $value): array
+    private static function decodeJson($value)
     {
-        if (is_string($value)) {
-            $value = json_decode($value, true, 512, JSON_THROW_ON_ERROR);
+        if ($value === null) {
+            return null;
         }
-        return is_array($value) ? $value : [];
-    }
-
-    /** jsonb 列在 PDO 里是字符串；已解码时原样返回。 */
-    private static function decodeJson(mixed $value): mixed
-    {
         if (is_string($value)) {
+            if ($value === 'null') {
+                return null;
+            }
             return json_decode($value, false, 512, JSON_THROW_ON_ERROR);
         }
         return $value;

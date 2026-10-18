@@ -9,7 +9,7 @@ declare(strict_types=1);
  *   2. 排序键/布尔筛选枚举（SortKey / Feature）
  *   3. 节点 JSON 规范化（NodePresenter）—— 字段顺序、零值、空数组→null、凭证剥离
  *   4. facets 分桶与标签（FacetKind）
- *   5. SQL 拼装的参数顺序（Condition / LiveResults::build）
+ *   5. 查询构造器单表查询 + PHP 处理管线（过滤/排序/分页/facets/preferred）
  *
  * 用法：php tests/run.php
  * 退出码 0 = 全绿；非 0 = 有失败（可直接接 CI）。
@@ -18,7 +18,6 @@ declare(strict_types=1);
 require __DIR__ . '/bootstrap.php';
 
 use app\service\ApiError;
-use app\service\Condition;
 use app\service\Country;
 use app\service\Heartbeat;
 use app\service\JsonResponse;
@@ -272,41 +271,142 @@ same('Reality', $facets['features'][1]['label'], 'feature 标签');
 same([], $facets['ipSource'], '空桶是空数组而不是 null');
 
 // ---------------------------------------------------------------------------
-// 5. SQL 拼装
+// 5. 查询构造器（单表、无 JOIN）+ PHP 处理管线
 // ---------------------------------------------------------------------------
 
-$merged = Condition::merge([
-    Condition::inList('region', ['US', 'JP']),
-    Condition::raw('tls'),
-]);
-same(' WHERE region = ANY(ARRAY[?,?]::text[]) AND tls', $merged[0], '条件合并为 WHERE 子句');
-same(['US', 'JP'], $merged[1], '条件参数按顺序展开');
-
 $live = new LiveResults();
-[$sql, $bindings] = $live->build(ResultsQueryParser::fromQuery([
-    'page' => '1', 'limit' => '10', 'country' => 'US', 'features' => 'tls', 'minSpeed' => '1',
-]));
-ok(str_contains($sql, 'node_explorer_live_facts'), 'SQL 走实时视图');
-ok(str_contains($sql, 'MATERIALIZED'), '过滤/排序收敛在 MATERIALIZED CTE 内');
-ok(str_contains($sql, 'page_candidates p JOIN node_explorer_live_nodes'), '只在选中页之后回连视图');
-same(6, count($bindings), '绑定参数个数 = 1(country) + 1(minSpeed) + 4(分页)；features 内联列名不占位');
-same('US', $bindings[0], '第一个参数是 country 值');
-same(1024.0, $bindings[1], 'minSpeed 换算成字节速度（1Mbps × 1024）');
-same(1, $bindings[2], '分页参数排在过滤参数之后');
 
-[$sql2, $bindings2] = $live->build(null);
-same([], $bindings2, '不分页时没有绑定参数');
-ok(str_contains($sql2, 'SELECT 0::bigint AS page,0::bigint AS page_limit'), '不分页时 page/limit 回 0');
-ok(!str_contains($sql2, 'LIMIT (SELECT page_limit'), '不分页时没有 LIMIT');
+// 5a. 查询基于两张视图、且是单表查询（不含 JOIN）
+same('node_explorer_live_facts', LiveResults::factsTable(), 'facts 查询走实时视图');
+same('node_explorer_live_nodes', LiveResults::payloadsTable(), 'payload 查询走节点视图');
+// 构造器单表查询，默认不含 JOIN；下面用合成数据验证「JOIN 已被移除、逻辑在 PHP 完成」。
 
-[$sql3] = $live->build(ResultsQueryParser::fromQuery(['page' => '1', 'sort' => 'ippure', 'direction' => 'asc']));
-ok(str_contains($sql3, "CASE WHEN ip_status='success' THEN coalesce(ip_score,0) END ASC NULLS LAST"), '按 ippure 升序');
+// 5b. 合成数据驱动 PHP 处理管线（过滤 / 排序 / 分页 / facets / preferred）。
+// 字段刻意覆盖 Go 契约里的边缘情形：住宅+新鲜证据（优选）、speed=0、IPv6 unsupported、无测速。
+$now = new DateTimeImmutable('2026-10-18T00:10:00Z');
+$t8 = '2026-10-18T00:08:00Z'; // now-2min，落在优选窗内
 
-// 搜索条件：中文地区名 → 代码集合
-[$sql4, $bindings4] = $live->build(ResultsQueryParser::fromQuery(['page' => '1', 'q' => '美国']));
-ok(str_contains($sql4, 'strpos(lower(v),?)'), '搜索命中基础字段');
-ok(in_array('US', $bindings4, true), '搜索「美国」展开出 US 代码');
-same('美国', $bindings4[0], '搜索词先绑定，再绑定地区代码');
+function nl_fact(array $p): stdClass
+{
+    $o = new stdClass();
+    foreach ($p as $k => $v) {
+        $o->$k = $v;
+    }
+    return $o;
+}
+
+$raw = [
+    nl_fact([
+        'identity' => 'id-us', 'snapshot_id' => 10, 'node_index' => 0, 'country' => 'US', 'region' => 'US',
+        'name' => '美国 01', 'base_name' => '美国 01', 'server' => 's', 'sni' => '', 'node_type' => 'ss',
+        'protocol' => 'ss', 'network' => 'tcp', 'speed' => 1048576, 'tls' => true, 'reality' => true, 'udp' => true,
+        'speed_test' => true, 'media_check' => true, 'checked_at' => '2026-10-18T00:00:00Z',
+        'attributes_ip' => '203.0.113.10', 'ip_status' => 'success', 'ip_source' => 'ippure',
+        'asn_organization' => 'ACME', 'ip_score' => '85', 'human_percent' => '90',
+        'classification' => json_encode(['state' => 'residential', 'version' => 8, 'ip' => '203.0.113.10', 'checkedAt' => $t8, 'evidence' => [['checkedAt' => $t8]]]),
+        'ip_attributes' => json_encode(['residential']),
+        'reachable' => true, 'connectivity_error' => '', 'connectivity_at' => $t8,
+        'reported_exit_ip' => '203.0.113.10', 'exit_error' => '', 'exit_at' => $t8,
+        'media' => json_encode(['Netflix']),
+    ]),
+    nl_fact([
+        'identity' => 'id-jp', 'snapshot_id' => 10, 'node_index' => 1, 'country' => 'JP', 'region' => 'JP',
+        'name' => '日本 10', 'base_name' => '日本 10', 'server' => 's', 'sni' => '', 'node_type' => 'ss',
+        'protocol' => 'ss', 'network' => 'tcp', 'speed' => 2097152, 'tls' => true, 'reality' => true, 'udp' => false,
+        'speed_test' => true, 'media_check' => true, 'checked_at' => '2026-10-18T00:00:00Z',
+        'attributes_ip' => '198.51.100.10', 'ip_status' => 'success', 'ip_source' => 'ippure',
+        'asn_organization' => 'ACME', 'ip_score' => '90', 'human_percent' => '88',
+        'classification' => json_encode(['state' => 'residential', 'version' => 8, 'ip' => '198.51.100.10', 'checkedAt' => $t8, 'evidence' => [['checkedAt' => $t8]]]),
+        'ip_attributes' => json_encode(['residential']),
+        'reachable' => true, 'connectivity_error' => '', 'connectivity_at' => $t8,
+        'reported_exit_ip' => '198.51.100.10', 'exit_error' => '', 'exit_at' => $t8,
+        'media' => json_encode(['Netflix', 'YouTube']),
+    ]),
+    nl_fact([
+        'identity' => 'id-de', 'snapshot_id' => 10, 'node_index' => 2, 'country' => 'DE', 'region' => 'DE',
+        'name' => '德国 02', 'base_name' => '德国 02', 'server' => 's', 'sni' => '', 'node_type' => 'vmess',
+        'protocol' => 'vmess', 'network' => 'tcp', 'speed' => 0, 'tls' => false, 'reality' => false, 'udp' => true,
+        'speed_test' => true, 'media_check' => true, 'checked_at' => '2026-10-18T00:00:00Z',
+        'attributes_ip' => '', 'ip_status' => '', 'ip_source' => '', 'asn_organization' => '',
+        'ip_score' => null, 'human_percent' => null,
+        'classification' => null, 'ip_attributes' => json_encode([]),
+        'reachable' => false, 'connectivity_error' => '', 'connectivity_at' => '',
+        'reported_exit_ip' => '', 'exit_error' => '', 'exit_at' => '', 'media' => json_encode([]),
+    ]),
+    nl_fact([
+        'identity' => 'id-sg', 'snapshot_id' => 10, 'node_index' => 3, 'country' => 'SG', 'region' => 'SG',
+        'name' => '新加坡 01', 'base_name' => '新加坡 01', 'server' => 's', 'sni' => '', 'node_type' => 'ss',
+        'protocol' => 'ss', 'network' => 'tcp', 'speed' => 0, 'tls' => true, 'reality' => false, 'udp' => true,
+        'speed_test' => true, 'media_check' => true, 'checked_at' => '2026-10-18T00:00:00Z',
+        'attributes_ip' => '', 'ip_status' => 'unsupported', 'ip_source' => '', 'asn_organization' => '',
+        'ip_score' => null, 'human_percent' => null,
+        'classification' => null, 'ip_attributes' => json_encode([]),
+        'reachable' => false, 'connectivity_error' => 'no route', 'connectivity_at' => '',
+        'reported_exit_ip' => '', 'exit_error' => '', 'exit_at' => '', 'media' => json_encode(['Netflix']),
+    ]),
+    nl_fact([
+        'identity' => 'id-hk', 'snapshot_id' => 10, 'node_index' => 4, 'country' => 'HK', 'region' => 'HK',
+        'name' => '香港 03', 'base_name' => '香港 03', 'server' => 's', 'sni' => '', 'node_type' => 'ss',
+        'protocol' => 'ss', 'network' => 'tcp', 'speed' => 0, 'tls' => true, 'reality' => false, 'udp' => false,
+        'speed_test' => false, 'media_check' => false, 'checked_at' => '2026-10-18T00:00:00Z',
+        'attributes_ip' => '', 'ip_status' => '', 'ip_source' => '', 'asn_organization' => '',
+        'ip_score' => null, 'human_percent' => null,
+        'classification' => null, 'ip_attributes' => json_encode([]),
+        'reachable' => false, 'connectivity_error' => '', 'connectivity_at' => '',
+        'reported_exit_ip' => '', 'exit_error' => '', 'exit_at' => '', 'media' => json_encode([]),
+    ]),
+];
+
+$rows = $live->normalizeFacts($raw);
+$payloads = [];
+foreach ($rows as $r) {
+    $payloads[$r['identity']] = (object)['name' => $r['name'], 'port' => '443', 'lifecycle' => ['status' => 'active'], 'checkedAt' => '2026-10-18T00:00:00Z', 'tls' => true];
+}
+
+// 过滤
+same(1, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'country' => 'US']), $now)[1], 'php 筛选 country=US');
+same(1, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'type' => 'vmess']), $now)[1], 'php 筛选 type=vmess');
+same(4, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'features' => 'tls']), $now)[1], 'php 筛选 features=tls');
+same(2, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'features' => 'reality']), $now)[1], 'php 筛选 features=reality');
+same(2, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'features' => 'tls,reality']), $now)[1], 'php 多 features 是 AND');
+same(1, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'q' => '美国']), $now)[1], 'php 搜索「美国」命中 US');
+same(1, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'q' => '香港']), $now)[1], 'php 搜索「香港」命中 HK');
+same(3, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'media' => 'Netflix']), $now)[1], 'php 筛选 media=Netflix');
+same(1, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'media' => 'Netflix,YouTube']), $now)[1], 'php 筛选 media 多选是包含判定');
+same(2, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'ipSource' => 'ippure']), $now)[1], 'php 筛选 ipSource=ippure');
+same(2, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'ipAttributes' => 'residential']), $now)[1], 'php 筛 ipAttributes=residential');
+same(2, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'minSpeed' => '1']), $now)[1], 'php minSpeed=1 按字节换算过滤');
+same(2, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'minSpeed' => '2']), $now)[1], 'php minSpeed=2 两条高速节点都过');
+same(1, $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '50', 'minSpeed' => '1536']), $now)[1], 'php minSpeed=1536（阈值 1572864 字节）只留日本');
+
+// 分页
+[$p1, $t1] = $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '2']), $now);
+same(2, count($p1), 'limit=2 返回 2 条');
+same(5, $t1, 'total 是过滤后总数');
+[$p3] = $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '3', 'limit' => '2']), $now);
+same(1, count($p3), '第 3 页只有 1 条');
+[, $to, $pg] = $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '99', 'limit' => '2']), $now);
+same(3, $pg, '页码越界夹到最后一页');
+
+// 优选排序：US/JP 都 residential+新鲜证据，speed 高者（日本 10）排第一
+[$pref] = $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '1', 'sort' => 'preferred']), $now);
+same('日本 10', $pref[0]['name'], '优选排序把速度最高的住宅节点排第一');
+
+// 排序：speed 升序，速度为 0 的德国 02 排第一
+[$bySpeedAsc] = $live->resolvePage($rows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '5', 'sort' => 'speed', 'direction' => 'asc']), $now);
+same('德国 02', $bySpeedAsc[0]['name'], 'speed asc 第一条是速度 0 的节点');
+
+// facets / summary（基于全量，不受筛选影响）
+$body = $live->buildBody($rows, $rows, $payloads, count($rows), 0, 0, $now);
+same(5, $body['totalNodes'], 'summary.totalNodes 是全量节点数');
+same(5, $body['summary']['countries'], 'summary.countries 计不重复非空地区');
+same(2097152, $body['summary']['maxSpeed'], 'summary.maxSpeed');
+same(1572864, $body['summary']['median'], 'summary.median 偶数样本取中间两值平均');
+same(['country', 'type', 'network', 'ipSource', 'ipAttributes', 'features', 'media'], array_keys($body['facets']), 'facet 分桶齐全');
+same(5, count($body['facets']['country']), 'country 桶含 5 个地区，每桶计数 1');
+same(['tls', 'reality', 'udp'], array_column($body['facets']['features'], 'value'), 'features 固定三项且顺序稳定');
+same(4, $body['facets']['features'][0]['count'], 'tls 计数');
+same(2, $body['facets']['features'][1]['count'], 'reality 计数');
 
 // ---------------------------------------------------------------------------
 // 6. 国家名 & 时间格式
