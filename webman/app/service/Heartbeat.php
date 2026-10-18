@@ -55,16 +55,23 @@ final class Heartbeat
     /**
      * 立即写一次心跳。失败只记日志：心跳是附属信息，不能把主接口带崩
      * （Go 侧 ticker 里同样忽略写失败的返回值）。
+     *
+     * 用查询构造器的 upsert（PG 生成 ON CONFLICT(service) DO UPDATE），
+     * 语义与旧的原生 INSERT ... ON CONFLICT 完全一致：updated_at 取库端
+     * now()（PHP 时钟与 DB 时钟可能有漂移，心跳窗口判定发生在库端）。
      */
     public static function beat(string $service): void
     {
         self::$last = microtime(true);
         try {
-            Db::statement(
-                "INSERT INTO node_explorer_service_status(service,updated_at,payload)
-                 VALUES(?,now(),?)
-                 ON CONFLICT(service) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload",
-                [$service, '{"error":"","running":true}']
+            Db::table('node_explorer_service_status')->upsert(
+                [[
+                    'service' => $service,
+                    'updated_at' => Db::raw('now()'),
+                    'payload' => '{"error":"","running":true}',
+                ]],
+                ['service'],
+                ['updated_at', 'payload']
             );
         } catch (Throwable $e) {
             Log::warning('heartbeat write failed: ' . $e->getMessage());

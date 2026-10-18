@@ -6,7 +6,6 @@ namespace app\service;
 use app\model\ServiceStatus;
 use DateTimeImmutable;
 use DateTimeZone;
-use stdClass;
 use support\Db;
 use support\Log;
 use Throwable;
@@ -21,9 +20,12 @@ use Throwable;
  *
  * api 自己的心跳由 Heartbeat 在 statuses() 入口惰性写入。
  *
- * 两个入口共用一条聚合 SQL：工作队列的统计（queued/scheduled/running/checked）
- * 需要 FILTER + 多表 LEFT JOIN，用 ORM 表达只会变成 N 次查询，所以保持原生 SQL；
- * 而单表按主键读 sourceWarning 这种简单场景交给 Eloquent（见 sourceWarning）。
+ * 数据获取按「构造器取数、PHP 组装」分层，三条单表查询代替一条聚合 SQL：
+ *   1. node_explorer_work 按 kind 聚合（FILTER 是 PG 特有，走 Db::raw）；
+ *   2. node_explorer_service_status 按服务取心跳（healthy/错误文案在库端算，
+ *      避免 PHP 与 DB 时钟漂移影响 90s 窗口判定）；
+ *   3. node_explorer_lifecycle_events 的 restore 计数（仅 node-lifecycle 需要时查）。
+ * 单表按主键读 sourceWarning 这种更简单的场景交给 Eloquent（见 sourceWarning）。
  */
 final class ServiceBoard
 {
@@ -43,36 +45,23 @@ final class ServiceBoard
     }
 
     /**
-     * 状态聚合 SQL。
-     *
-     * 与 Go 的 statuses() 逐行对应，唯一的改动是给每列起了别名：
-     * PDO 会把无别名的同名表达式列（多个 coalesce）互相覆盖，按列名取值才安全。
+     * work 队列的 kind → service 归属（对应旧 SQL 的 kinds VALUES）。
+     * ip-service 的三个 kind（exit/attributes/risk）合并统计到同一服务。
      */
-    private const STATUS_SQL = <<<'SQL'
-WITH requested(service) AS (SELECT unnest(ARRAY[%s]::text[])),
- kinds(service,kind) AS (VALUES ('connectivity','connectivity'),('ip-service','exit'),
- ('ip-service','attributes'),('ip-service','risk'),('residential-recovery','recovery'),('node-lifecycle','lifecycle')),
- work AS (
- SELECT k.service,count(*) FILTER(WHERE w.state='queued' AND w.due_at<=now()) AS queued,
- count(*) FILTER(WHERE w.state='queued' AND w.due_at>now()) AS scheduled,
- count(*) FILTER(WHERE w.state='running') AS running,
- min(w.due_at) FILTER(WHERE w.state='queued' AND w.due_at<=now()) AS oldest,
- count(*) FILTER(WHERE w.state='done' AND w.payload->>'recoveryResult' IN ('eligible','not-residential','probe-failed','exit-changed','timed-out')) AS checked,
- count(*) FILTER(WHERE w.state='done' AND w.payload->>'recoveryResult'='skipped-datacenter-asn') AS skipped
- FROM requested r JOIN kinds k USING(service) JOIN node_explorer_work w ON w.kind=k.kind
- WHERE w.state<>'done' OR w.kind='recovery' GROUP BY k.service
- )
- SELECT r.service AS service,
- coalesce(h.updated_at,'0001-01-01'::timestamptz) AS updated_at,
- coalesce(h.updated_at>now()-interval '90 seconds' AND coalesce(h.payload->>'error','')='',false) AS healthy,
- CASE WHEN h.updated_at IS NULL THEN '服务尚未启动' WHEN h.updated_at<=now()-interval '90 seconds' THEN '服务心跳已过期' ELSE coalesce(h.payload->>'error','') END AS error,
- coalesce(w.queued,0) AS queued,coalesce(w.scheduled,0) AS scheduled,coalesce(w.running,0) AS running,
- coalesce(greatest(0,extract(epoch FROM now()-w.oldest)),0)::double precision AS oldest_wait,
- CASE WHEN r.service='node-lifecycle' THEN (SELECT count(*) FROM node_explorer_lifecycle_events WHERE action='restore' AND NOT dry_run) ELSE 0 END AS restored,
- coalesce(w.checked,0) AS checked,coalesce(w.skipped,0) AS skipped
- FROM requested r LEFT JOIN node_explorer_service_status h USING(service) LEFT JOIN work w USING(service)
- ORDER BY r.service
-SQL;
+    private const KIND_SERVICES = [
+        'connectivity' => 'connectivity',
+        'exit' => 'ip-service',
+        'attributes' => 'ip-service',
+        'risk' => 'ip-service',
+        'recovery' => 'residential-recovery',
+        'lifecycle' => 'node-lifecycle',
+    ];
+
+    /** 空的工作队列统计（服务没有对应 work 行时输出 0）。 */
+    private const EMPTY_STATS = [
+        'queued' => 0, 'scheduled' => 0, 'running' => 0,
+        'checked' => 0, 'skipped' => 0, 'oldestWaitSeconds' => 0.0,
+    ];
 
     /**
      * @return array{services: list<array<string, mixed>>}
@@ -202,6 +191,10 @@ SQL;
      * 是因为 services() 与 collectorStatus() 都经过它，一个接入点覆盖
      * 两个接口；失败不影响查询结果。
      *
+     * 输出按服务名字母序（与旧 SQL 的 ORDER BY r.service 一致，不是
+     * BOARD_SERVICES 的传入顺序）。services() 之外的传入集合（如
+     * collectorStatus 只传 ip-service）也按字母序返回。
+     *
      * @param list<string> $services
      * @return list<array<string, mixed>>
      * @throws Throwable
@@ -209,31 +202,135 @@ SQL;
     public function statuses(array $services): array
     {
         Heartbeat::beatIfDue('api');
-        // unnest(ARRAY[?,?,...]) 与 Go 的 unnest($1::text[]) 等价，逐项绑定参数。
-        $placeholders = implode(',', array_fill(0, count($services), '?'));
-        $rows = Db::select(sprintf(self::STATUS_SQL, $placeholders), array_values($services));
 
-        $out = [];
-        foreach ($rows as $row) {
-            if (!$row instanceof stdClass) {
+        $stats = $this->workStats();
+        $hearts = $this->heartbeats($services);
+        $restored = in_array('node-lifecycle', $services, true) ? $this->restoredCount() : 0;
+
+        // kind 统计按 KIND_SERVICES 归并到服务（ip-service 三个 kind 相加）。
+        $byService = [];
+        foreach ($stats as $kind => $s) {
+            $svc = self::KIND_SERVICES[$kind] ?? null;
+            if ($svc === null || !in_array($svc, $services, true)) {
                 continue;
             }
+            if (!isset($byService[$svc])) {
+                $byService[$svc] = self::EMPTY_STATS;
+            }
+            foreach (['queued', 'scheduled', 'running', 'checked', 'skipped'] as $k) {
+                $byService[$svc][$k] += $s[$k];
+            }
+            // oldest_wait 各 kind 基于 DB 同一 now() 计算，取最大即最旧。
+            $byService[$svc]['oldestWaitSeconds'] = max($byService[$svc]['oldestWaitSeconds'], $s['oldestWaitSeconds']);
+        }
+
+        $out = [];
+        $ordered = $services;
+        sort($ordered);
+        foreach ($ordered as $svc) {
+            $w = $byService[$svc] ?? self::EMPTY_STATS;
+            $h = $hearts[$svc] ?? ['updated_at' => '0001-01-01 00:00:00+00', 'healthy' => false, 'error' => '服务尚未启动'];
             $out[] = [
-                'service' => (string)$row->service,
-                'updatedAt' => self::goTime((string)$row->updated_at),
-                'updatedAtRfc3339' => self::rfc3339((string)$row->updated_at),
-                'healthy' => self::toBool($row->healthy),
-                'error' => (string)$row->error,
-                'queued' => (int)$row->queued,
-                'scheduled' => (int)$row->scheduled,
-                'running' => (int)$row->running,
-                'oldestWaitSeconds' => (float)$row->oldest_wait,
-                'restored' => (int)$row->restored,
-                'checked' => (int)$row->checked,
-                'skipped' => (int)$row->skipped,
+                'service' => $svc,
+                'updatedAt' => self::goTime((string)$h['updated_at']),
+                'updatedAtRfc3339' => self::rfc3339((string)$h['updated_at']),
+                'healthy' => (bool)$h['healthy'],
+                'error' => (string)$h['error'],
+                'queued' => (int)$w['queued'],
+                'scheduled' => (int)$w['scheduled'],
+                'running' => (int)$w['running'],
+                'oldestWaitSeconds' => (float)$w['oldestWaitSeconds'],
+                'restored' => $svc === 'node-lifecycle' ? $restored : 0,
+                'checked' => (int)$w['checked'],
+                'skipped' => (int)$w['skipped'],
             ];
         }
         return $out;
+    }
+
+    /**
+     * work 队列按 kind 聚合的统计。
+     *
+     * 对应旧聚合 SQL 的 work CTE：WHERE 条件（state<>'done' OR kind='recovery'）
+     * 用构造器表达，FILTER 聚合是 PG 特有语法走 Db::raw。done 行只可能出现在
+     * recovery kind 下，checked/skipped 的语义与旧 SQL 完全一致。
+     *
+     * @return array<string, array{queued:int,scheduled:int,running:int,checked:int,skipped:int,oldestWaitSeconds:float}>
+     */
+    private function workStats(): array
+    {
+        $rows = Db::table('node_explorer_work')
+            ->select([
+                'kind',
+                Db::raw("count(*) FILTER (WHERE state='queued' AND due_at<=now()) AS queued"),
+                Db::raw("count(*) FILTER (WHERE state='queued' AND due_at>now()) AS scheduled"),
+                Db::raw("count(*) FILTER (WHERE state='running') AS running"),
+                Db::raw("count(*) FILTER (WHERE state='done' AND payload->>'recoveryResult' IN ('eligible','not-residential','probe-failed','exit-changed','timed-out')) AS checked"),
+                Db::raw("count(*) FILTER (WHERE state='done' AND payload->>'recoveryResult'='skipped-datacenter-asn') AS skipped"),
+                Db::raw("coalesce(greatest(0,extract(epoch FROM now()-min(due_at) FILTER (WHERE state='queued' AND due_at<=now())))::double precision,0) AS oldest_wait"),
+            ])
+            ->where(function ($q): void {
+                $q->where('state', '!=', 'done')->orWhere('kind', 'recovery');
+            })
+            ->groupBy('kind')
+            ->get()->all();
+
+        $stats = [];
+        foreach ($rows as $row) {
+            $stats[$row->kind] = [
+                'queued' => (int)$row->queued,
+                'scheduled' => (int)$row->scheduled,
+                'running' => (int)$row->running,
+                'checked' => (int)$row->checked,
+                'skipped' => (int)$row->skipped,
+                'oldestWaitSeconds' => (float)$row->oldest_wait,
+            ];
+        }
+        return $stats;
+    }
+
+    /**
+     * 心跳行（按服务取，healthy/错误文案在库端计算）。
+     *
+     * 对应旧聚合 SQL 的 h 列：90s 窗口与 now() 都在库端求值，PHP/DB 时钟
+     * 漂移不影响判定；零值 updated_at 的 coalesce 也留在库里，与旧 SQL 相同。
+     *
+     * @param list<string> $services
+     * @return array<string, array{updated_at:string,healthy:bool,error:string}>
+     */
+    private function heartbeats(array $services): array
+    {
+        if ($services === []) {
+            return [];
+        }
+        $rows = Db::table('node_explorer_service_status')
+            ->select([
+                'service',
+                Db::raw("coalesce(updated_at,'0001-01-01'::timestamptz) AS updated_at"),
+                Db::raw("coalesce(updated_at>now()-interval '90 seconds' AND coalesce(payload->>'error','')='',false) AS healthy"),
+                Db::raw("CASE WHEN updated_at IS NULL THEN '服务尚未启动' WHEN updated_at<=now()-interval '90 seconds' THEN '服务心跳已过期' ELSE coalesce(payload->>'error','') END AS error"),
+            ])
+            ->whereIn('service', $services)
+            ->get()->all();
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[$row->service] = [
+                'updated_at' => (string)$row->updated_at,
+                'healthy' => self::toBool($row->healthy),
+                'error' => (string)$row->error,
+            ];
+        }
+        return $out;
+    }
+
+    /** lifecycle restore 计数（对应旧 SQL 里 node-lifecycle 行的子查询）。 */
+    private function restoredCount(): int
+    {
+        return (int)Db::table('node_explorer_lifecycle_events')
+            ->where('action', 'restore')
+            ->where('dry_run', false)
+            ->count();
     }
 
     /**
