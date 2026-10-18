@@ -114,6 +114,19 @@ jobs:
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
+          # 冒烟库是全新库，但接口层只读取 node_explorer_live_* 视图（原由 Go 后端迁移创建，
+          # Go 下线后这些 DDL 不再随镜像启动执行）。这里手动建 schema（视图 + 基表），
+          # 但不可灌 seed——否则 /api/results 的 total!=0 断言会失败。
+          # 生产 PG 在 v1.4.12 时代已由 Go 迁移建好这些对象，部署不受影响。
+          psql "postgresql://postgres:test_password@127.0.0.1:5432/postgres" \
+            -c "DROP DATABASE IF EXISTS node_explorer_test" \
+            -c "CREATE DATABASE node_explorer_test"
+          for f in webman/tests/fixtures/core.sql \
+                   backend/internal/store/postgres/services.sql \
+                   backend/internal/store/postgres/live.sql; do
+            psql "postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test" \
+              -v ON_ERROR_STOP=1 -q -f "$f"
+          done
           # read_only 下 PHP 的 runtime/（pid/status/log/缓存）必须是 tmpfs，
           # 否则 Workerman 起不来——这正是 compose 里 node-explorer 的 tmpfs 段。
           docker run -d --read-only --tmpfs /tmp --tmpfs /app/webman/runtime:mode=0777 --network host \
