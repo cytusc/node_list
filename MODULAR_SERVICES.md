@@ -1,15 +1,17 @@
 # 模块化服务
 
-同一个 Go 仓库和镜像提供六个独立进程。Redis 分发任务引用，PostgreSQL 保存快照、业务状态、任务投递记录和恢复审计。工作进程通过数据库事实与异步任务协作，不直接调用其他进程。
+同一个仓库和镜像提供六个独立进程：API 查询是 PHP/webman（Workerman），其余五个是 Go `node-worker`。Redis 分发任务引用，PostgreSQL 保存快照、业务状态、任务投递记录和恢复审计。工作进程通过数据库事实与异步任务协作，不直接调用其他进程。
 
 | 服务      | 命令                             | 唯一职责                                            |
 | --------- | -------------------------------- | --------------------------------------------------- |
-| API 查询 | `node-explorer`                  | 实时查询当前状态、SQL 筛选排序和分页；不执行网络检测        |
+| API 查询 | `php start.php start`（镜像默认） | 实时查询当前状态、SQL 筛选排序和分页；不执行网络检测        |
 | 来源导入  | `node-worker -role source`       | subs-check 文件监听、Qilan、快照入库、连接注册      |
 | 测活      | `node-worker -role connectivity` | 连接 GitHub，记录连通性；确认失败后提交状态变更建议 |
 | IP 属性   | `node-worker -role ip`           | 获取节点真实出口；按出口 IP 共享分类、ASN、风险属性 |
 | 住宅恢复  | `node-worker -role residential`  | 优先复检自动退役节点；一次完整验证合格就请求恢复    |
 | 生命周期  | `node-worker -role lifecycle`    | 校验最新事实，统一执行自动退役／恢复并记录审计      |
+
+API 查询的实现在 `webman/`（详见该目录 README）：读取路径与采集器共用 `node_explorer_live_*` 视图，只读不写业务表；唯一写入是 `node_explorer_service_status` 的 `api` 行心跳（惰性补写，见下文）。容器里 `runtime/` 必须挂 tmpfs（`read_only: true` 下 Workerman 要写 pid/日志/文件缓存）。
 
 测活不查询 IP 属性；IP 属性查询失败不等于节点失效。IPPure 风险接口与其他六家分类来源分别排队，风险查询失败不阻塞住宅判断。历史批次保持原样，当前状态按连接身份附加，出口变化不会沿用旧 IP 的属性。
 
@@ -64,18 +66,20 @@ curl --fail http://127.0.0.1:3001/api/services
 ## 本地运行和检查
 
 ```bash
-npm run build:backend
+npm run build:worker
 npm run dev
-./backend/node-worker -role source
-./backend/node-worker -role connectivity
-./backend/node-worker -role ip
-./backend/node-worker -role residential
-./backend/node-worker -role lifecycle
+./node-worker -role source
+./node-worker -role connectivity
+./node-worker -role ip
+./node-worker -role residential
+./node-worker -role lifecycle
 ```
+
+`npm run dev` 会同时拉起 Vite 与 PHP 接口（`npm run dev:api` = `php webman/start.php start`，首次需 `cp webman/.env.example webman/.env` 并 `composer install`）。接口的离线测试：`php webman/tests/run.php`；连库集成测试见 `webman/README.md`。
 
 各命令分别在终端或进程管理器中运行。填写 `.env.example` 的 Redis、PostgreSQL 和四组专用控制器配置；住宅与普通通道不能共享控制器，不同服务的控制器所有权也有数据库锁保护。探测服务需要 `PGPOOL_MAX>=2`，默认每个服务最多 8 个连接（控制器所有权常驻 1 个，剩余供任务租约与写入使用）。慢车道（risk/attributes/lifecycle/recovery）消费者默认每通道 1 个，可用 `<角色前缀>_<KIND>_CONCURRENCY` 或通用 `<KIND>_CONCURRENCY` 调整；ip-service 的 Compose 默认 `IP_SERVICE_RISK_CONCURRENCY=2`。
 
-`/api/services` 返回六个服务的心跳、已到期的待处理任务、未到期的定时等待任务、执行中任务、最久逾期等待时间、已完成核验数、机房 ASN 跳过数和保留期内的恢复数；未启动或心跳超过 90 秒的服务算异常。探测 worker 正常心跳每 10 秒写入，错误状态变化时立即写入；控制器所有权连接仍每秒检查。结果接口仅查询 IP 服务状态，服务列表按需汇总六个服务的任务计数。`node-worker -role <角色> -health` 可单独检查。`/api/health` 仍表示 HTTP API 存活。
+`/api/services` 返回六个服务的心跳、已到期的待处理任务、未到期的定时等待任务、执行中任务、最久逾期等待时间、已完成核验数、机房 ASN 跳过数和保留期内的恢复数；未启动或心跳超过 90 秒的服务算异常。探测 worker 正常心跳每 10 秒写入，错误状态变化时立即写入；控制器所有权连接仍每秒检查。`api` 行由接口进程自己惰性写入（两次写入至少间隔 10 秒，页面轮询即驱动；页面全关 90 秒后该行显示「服务心跳已过期」符合事实）。结果接口仅查询 IP 服务状态，服务列表按需汇总六个服务的任务计数。`node-worker -role <角色> -health` 可单独检查。`/api/health` 仍表示 HTTP API 存活。
 
 数据库结构按版本在一个事务中迁移，六个服务共用迁移锁，已应用版本在后续启动时跳过 DDL。当前实时读取无需观察结果触发器；来源批次及退役状态仍保留增量追踪。
 

@@ -12,6 +12,9 @@ import (
 //go:embed services.sql
 var serviceSchema string
 
+//go:embed live.sql
+var liveSchema string
+
 func createServicesSchema(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx, serviceSchema); err != nil {
 		return err

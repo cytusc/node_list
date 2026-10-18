@@ -10,5 +10,11 @@
 !public/**
 !backend/
 !backend/**
+!webman/
+!webman/**
+# 本地 composer install / 运行产物不进构建上下文（vendor 由 composer stage 重装）
+webman/vendor
+webman/runtime
+webman/composer.phar
 !deploy/
 !deploy/legacy-node-launcher.sh

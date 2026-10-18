@@ -1,17 +1,18 @@
 # Node Explorer
 
-React／TypeScript 节点浏览器与 Go 后端，实时展示 subs-check 和 Qilan 节点的当前连通性及出口 IP 属性。支持筛选、分页、详情、列设置和深浅主题。
+React／TypeScript 节点浏览器与 PHP（webman）接口层，实时展示 subs-check 和 Qilan 节点的当前连通性及出口 IP 属性。支持筛选、分页、详情、列设置和深浅主题。
 
-现在由六个独立服务运行：API 查询、来源导入、测活、IP 属性、住宅恢复、节点生命周期。**PostgreSQL 保存业务数据，Redis 分发任务；在用住宅节点默认每 5 分钟检查，自动退役节点仅做一轮恢复核验，合格立即恢复。** 人工禁用不会自动恢复。
+现在由六个独立服务运行：API 查询（PHP/webman，实现见 `webman/`）、来源导入、测活、IP 属性、住宅恢复、节点生命周期（后五个是 Go `node-worker`）。**PostgreSQL 保存业务数据，Redis 分发任务；在用住宅节点默认每 5 分钟检查，自动退役节点仅做一轮恢复核验，合格立即恢复。** 人工禁用不会自动恢复。
 
 完整的模块职责、任务契约、故障恢复、部署与升级步骤见 [MODULAR_SERVICES.md](MODULAR_SERVICES.md)，住宅判定规则见 [RESIDENTIAL_RECOVERY.md](RESIDENTIAL_RECOVERY.md)。
 
 ## 开发与运行
 
-需要 Node.js 22.13+、Go 1.26+、PostgreSQL 和 Redis。复制 `.env.example` 为 `.env`，填写 PostgreSQL、Redis 及四组专用 Mihomo 地址。
+需要 Node.js 22.13+、Go 1.26+、PHP 8.1+（含 pdo_pgsql／pcntl／sockets／mbstring 扩展）、PostgreSQL 和 Redis。复制 `.env.example` 为 `.env`，填写 PostgreSQL、Redis 及四组专用 Mihomo 地址；接口另需 `cp webman/.env.example webman/.env` 并 `composer install`。
 
 ```bash
 npm ci
+composer install --working-dir=webman
 npm run dev
 ```
 
@@ -25,7 +26,7 @@ go -C backend run ./cmd/node-worker -role residential
 go -C backend run ./cmd/node-worker -role lifecycle
 ```
 
-生产构建使用 `npm run build && npm run build:backend`；`npm start` 启动 API，工作进程用 `backend/node-worker -role <角色>` 独立启动。运行时必须接入 PostgreSQL，不再使用 SQLite。测试夹具仍保留 SQLite，用于验证旧行为。
+生产构建使用 `npm run build && npm run build:worker`；接口用 `npm start`（= `php webman/start.php start`），工作进程用 `node-worker -role <角色>` 独立启动。运行时必须接入 PostgreSQL，不再使用 SQLite。测试夹具仍保留 SQLite，用于验证旧行为。接口测试：`npm run test:api`（离线断言）+ `php webman/tests/integration.php`（连库契约，见 `webman/README.md`）。
 
 ## 容器部署
 
@@ -73,11 +74,11 @@ Qilan 来源在 `COMPOSE_FILE` 追加 `:compose.qilan.yaml`，设置 `QILAN_SESS
 - `/api/services`：工作进程心跳、队列等待、执行数量及保留期内恢复数。
 - `/api/health`：HTTP API 存活。worker 使用 `node-worker -role <角色> -health`。
 
-后端主要目录：`internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-explorer` 只提供 API，`cmd/node-worker` 按角色启动独立服务（source／connectivity／ip／residential／lifecycle）。切换期的一次性分析命令（idcheck/idscan/linkdiff/sortchk）与旧 patrol 入口已完成使命并删除。
+后端主要目录：`backend/internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-worker` 按角色启动独立服务（source／connectivity／ip／residential／lifecycle）；HTTP 接口已改为 `webman/` 下的 PHP/webman 实现（同一镜像内运行，命令 `php start.php start`）。切换期的一次性分析命令（idcheck/idscan/linkdiff/sortchk）与旧 patrol 入口已完成使命并删除。
 
 `legacy/node-server/` 已归档，仅作为兼容行为基准及旧数据维护参考，不参与运行时调度。`npm test` 运行归档行为测试；`npm run test:backend` 验证 Go。集成测试使用显式 `NODE_EXPLORER_TEST_PG`／`NODE_EXPLORER_TEST_REDIS`，不自动连接生产环境。
 
-GitHub Actions 执行构建、Go race 测试、归档行为测试，并验证 API 和独立生命周期 worker 镜像。容器只包含 Go 二进制和前端资源。发布不会自动执行当前工作区部署。
+GitHub Actions 执行构建、Go race 测试、webman 离线与连库契约测试、归档行为测试，并验证 API 和独立生命周期 worker 镜像。容器包含 PHP 接口运行时（含前端静态资源）与 Go worker 二进制。发布不会自动执行当前工作区部署。
 
 ### 全库出口 IP 属性清洗
 

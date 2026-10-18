@@ -64,6 +64,24 @@ jobs:
           test ! -s /tmp/gofmt.out
           go vet ./...
           go test -race ./...
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: mbstring, pdo_pgsql, pcntl, sockets
+          coverage: none
+          tools: composer
+      - name: Test the webman API (offline + integration)
+        run: |
+          composer install --working-dir=webman --no-interaction --no-progress --quiet
+          php webman/tests/run.php
+          # 独立库：集成夹具会 TRUNCATE 相关表，不能和 Go 测试/冒烟共用 node_explorer_test
+          psql "postgresql://postgres:test_password@127.0.0.1:5432/postgres" \
+            -c "DROP DATABASE IF EXISTS node_explorer_webman_test" \
+            -c "CREATE DATABASE node_explorer_webman_test"
+          PGURL="postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_webman_test" \
+            bash webman/tests/fixtures/load.sh
+          PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=test_password \
+            PGDATABASE=node_explorer_webman_test php webman/tests/integration.php
       - name: Set image name
         run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - uses: docker/setup-qemu-action@v3
@@ -96,7 +114,9 @@ jobs:
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          docker run -d --read-only --tmpfs /tmp --network host \
+          # read_only 下 PHP 的 runtime/（pid/status/log/缓存）必须是 tmpfs，
+          # 否则 Workerman 起不来——这正是 compose 里 node-explorer 的 tmpfs 段。
+          docker run -d --read-only --tmpfs /tmp --tmpfs /app/webman/runtime:mode=0777 --network host \
             -e PGHOST=127.0.0.1 -e PGPORT=5432 -e PGDATABASE=node_explorer_test \
             -e PGUSER=postgres -e PGPASSWORD=test_password --name node-explorer-smoke "$IMAGE_NAME@$IMAGE_DIGEST"
           trap 'docker logs node-explorer-smoke; docker rm -f node-explorer-smoke' EXIT
@@ -126,7 +146,9 @@ jobs:
           docker exec lifecycle-smoke node-worker -role lifecycle -health
       - name: Package production files
         if: startsWith(github.ref, 'refs/tags/')
-        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz dist backend legacy package.json package-lock.json Dockerfile compose.yaml compose.subs-check.yaml compose.qilan.yaml deploy README.md MODULAR_SERVICES.md RESIDENTIAL_RECOVERY.md .env.example
+        # webman/ 只打包源码：vendor 由镜像的 composer stage 重装，runtime 是运行产物。
+        # 生产跑容器镜像，这份 tar 是服务器上的参考副本与部署脚本集合。
+        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz --exclude='webman/vendor' --exclude='webman/runtime' --exclude='webman/composer.phar' dist backend webman legacy package.json package-lock.json Dockerfile compose.yaml compose.subs-check.yaml compose.qilan.yaml deploy README.md MODULAR_SERVICES.md RESIDENTIAL_RECOVERY.md .env.example
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:

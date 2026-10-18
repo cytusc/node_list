@@ -47,13 +47,4 @@ func TestNowTimestampMatchesJavaScriptISO(t *testing.T) {
 	if _, err := time.Parse(jsTimestampLayout, raw); err != nil {
 		t.Fatalf("NowTimestamp() = %q: %v", raw, err)
 	}
-	if got := NormalizeTimestamp("2026-10-14T18:00:49Z"); got != "2026-10-14T18:00:49.000Z" {
-		t.Fatalf("NormalizeTimestamp without fraction = %q", got)
-	}
-	if got := NormalizeTimestamp("2026-10-14T18:00:49.123456789Z"); got != "2026-10-14T18:00:49.123Z" {
-		t.Fatalf("NormalizeTimestamp with nanos = %q", got)
-	}
-	if got := NormalizeTimestamp(""); got != "" {
-		t.Fatalf("NormalizeTimestamp on empty = %q", got)
-	}
 }

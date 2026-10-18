@@ -1,0 +1,11 @@
+# 依赖与运行时（机器相关，不入库）
+/vendor/
+/runtime/
+
+# composer 本地下载的可执行文件
+/composer.phar
+
+# 前端产物由 tools/sync-frontend.sh 从仓库根 dist/ 同步进来，不入库
+/public/*
+!/public/static/
+!/public/static/.gitkeep

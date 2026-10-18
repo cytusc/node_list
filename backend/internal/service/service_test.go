@@ -157,11 +157,6 @@ func TestOneCompleteAssessmentRestoresImmediatelyWithoutRisk(t *testing.T) {
 	if e != nil || historical.Nodes[0].Connectivity != nil || historical.Nodes[0].IPPure != nil {
 		t.Fatal("runtime facts rewrote immutable history")
 	}
-	statuses, e := f.repo.Statuses(ctx)
-	if e != nil {
-		t.Fatal(e)
-	}
-	_ = statuses
 }
 
 func isWaiting(e error) bool { var w waiting; return errors.As(e, &w) }
@@ -508,22 +503,13 @@ func TestProviderCooldownSurvivesNewRepository(t *testing.T) {
 	}
 }
 
-func TestMissingServicesAreVisibleAndUnhealthy(t *testing.T) {
+func TestHeartbeatMakesServiceHealthy(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
-	statuses, err := f.repo.Statuses(ctx)
-	if err != nil || len(statuses) != 6 {
-		t.Fatalf("missing expected services: %d %v", len(statuses), err)
-	}
-	for _, s := range statuses {
-		if s.Healthy || s.Error == "" {
-			t.Fatalf("missing service appears healthy: %+v", s)
-		}
-	}
-	if err = f.repo.Heartbeat(ctx, "connectivity", ""); err != nil {
+	if err := f.repo.Heartbeat(ctx, "connectivity", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err = f.repo.Healthy(ctx, "connectivity"); err != nil {
+	if err := f.repo.Healthy(ctx, "connectivity"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -551,37 +537,6 @@ func TestNormalRecoveryDoesNotOccupyResidentialProbeLane(t *testing.T) {
 	if err = f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE kind=ANY($1) AND priority>0`, []string{KindLive, KindExit}).Scan(&high); err != nil || high != 0 {
 		t.Fatal("normal recovery stole residential capacity", err)
 	}
-}
-
-func TestPreferredLiveQueriesAndExplicitSortWithExpiringEvidence(t *testing.T) {
-	f := setup(t)
-	ctx := context.Background()
-	fast := domain.Node{Name: "A fast", Type: "http", Server: "192.0.2.2", Port: "443", Speed: 1000}
-	raw, _ := json.Marshal(domain.Snapshot{SpeedTest: true, Nodes: []domain.Node{fast}})
-	if err := f.st.Adapter().Insert(ctx, "fast", raw, "", 1); err != nil {
-		t.Fatal(err)
-	}
-	f.evidence(t, "current")
-	if err := f.repo.SyncRegistry(ctx, f.st); err != nil {
-		t.Fatal(err)
-	}
-	p := postgres.NewLiveReader(f.repo.Pool)
-	assertFirst := func(sort, direction, want string) {
-		t.Helper()
-		page, err := p.QueryPage(ctx, &postgres.Query{Page: 1, Limit: 50, Sort: sort, Direction: direction})
-		if err != nil || len(page.Nodes) != 2 {
-			t.Fatalf("query: %+v %v", page, err)
-		}
-		if page.Nodes[0].Name != want {
-			t.Fatalf("sort %q first=%s want=%s", sort, page.Nodes[0].Name, want)
-		}
-	}
-	assertFirst("preferred", "desc", "residential")
-	assertFirst("speed", "desc", "A fast")
-	assertFirst("name", "asc", "A fast")
-	// Risk refresh must not make original provider evidence fresh again.
-	f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=jsonb_set(payload,'{classification,evidence,0,checkedAt}',to_jsonb($1::text))`, time.Now().Add(-25*time.Hour).UTC().Format(time.RFC3339Nano))
-	assertFirst("preferred", "desc", "A fast")
 }
 
 type roundTrip func(*http.Request) (*http.Response, error)
