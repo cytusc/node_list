@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace app\service;
 
+use stdClass;
+
 /**
  * IP 网络类型的投票与标签派生。
  *
@@ -45,6 +47,33 @@ final class IpClassification
 
     /** 这些标签表达的是「没法判定」，不进 attributes。 */
     private const NOISE_LABELS = ['性质争议', '性质未知', '类型未知', '类型待确认'];
+
+    /**
+     * 与 Go 的 IPPureResult.UnmarshalJSON 一致，按类型证据派生当前分类。
+     * facts 与详情必须共用此入口；仅复制并改值，不刷新证据或写回原始载荷。
+     */
+    public static function normalize(stdClass $result): stdClass
+    {
+        $result = clone $result;
+        $classification = $result->classification ?? null;
+        if (!$classification instanceof stdClass) {
+            return $result;
+        }
+        $types = $classification->types ?? null;
+        if ((string)($classification->ip ?? '') !== (string)($result->ip ?? '')
+            || !is_array($types) || $types === []) {
+            return $result;
+        }
+        $classification = clone $classification;
+        $summary = self::summaryType($types);
+        $classification->state = self::state($summary);
+        $result->classification = $classification;
+        $result->attributes = self::attributes(
+            is_array($result->attributes ?? null) ? array_values($result->attributes) : [],
+            $summary
+        );
+        return $result;
+    }
 
     /**
      * 由类型证据投票得出归一网络类型。

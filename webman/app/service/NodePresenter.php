@@ -310,23 +310,7 @@ final class NodePresenter
      */
     private static function ippure(mixed $value): array
     {
-        $obj = clone self::asObject($value);
-        $classification = $obj->classification ?? null;
-        if ($classification instanceof stdClass) {
-            // 浅拷贝一层再改，避免把派生结果写回调用方手里的原始载荷。
-            $classification = clone $classification;
-            $obj->classification = $classification;
-            $types = $classification->types ?? null;
-            if ((string)($classification->ip ?? '') === (string)($obj->ip ?? '')
-                && is_array($types) && $types !== []) {
-                $summary = IpClassification::summaryType($types);
-                $classification->state = IpClassification::state($summary);
-                $obj->attributes = IpClassification::attributes(
-                    is_array($obj->attributes ?? null) ? array_values($obj->attributes) : [],
-                    $summary
-                );
-            }
-        }
+        $obj = IpClassification::normalize(self::asObject($value));
         return self::renderShaped($obj, self::IPPURE_FIELDS);
     }
 

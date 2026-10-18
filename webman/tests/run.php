@@ -408,6 +408,66 @@ same(['tls', 'reality', 'udp'], array_column($body['facets']['features'], 'value
 same(4, $body['facets']['features'][0]['count'], 'tls 计数');
 same(2, $body['facets']['features'][1]['count'], 'reality 计数');
 
+// 回归：详情按 types 派生住宅标签时，筛选、facet 和优选也必须使用同一结论。
+$legacy = clone $raw[0];
+$legacy->classification = json_encode([
+    'state' => 'datacenter', 'version' => 8, 'ip' => $legacy->attributes_ip,
+    'checkedAt' => $t8,
+    'types' => [['provider' => 'ipinfo', 'usageType' => '住宅IP']],
+    'evidence' => [['checkedAt' => $t8]],
+]);
+$legacy->ip_attributes = json_encode(['机房IP', '原生IP']);
+foreach (['success', 'error'] as $riskStatus) {
+    $legacy->ip_status = $riskStatus;
+    $derivedRows = $live->normalizeFacts([$legacy, $raw[2]]);
+    $derivedQuery = ResultsQueryParser::fromQuery(['page' => '1', 'ipAttributes' => '住宅IP']);
+    same(1, $live->resolvePage($derivedRows, $derivedQuery, $now)[1], "{$riskStatus}：住宅筛选不能漏掉详情中的住宅节点");
+    $derivedPayload = (object)['ippure' => (object)[
+        'ip' => $legacy->attributes_ip, 'status' => $riskStatus,
+        'classification' => json_decode($legacy->classification),
+        'attributes' => json_decode($legacy->ip_attributes),
+    ]];
+    $presented = NodePresenter::node($derivedPayload)['ippure'];
+    same($presented['attributes'], $derivedRows[0]['ip_attributes'], '筛选标签与详情一致');
+    same($presented['classification']['state'], $derivedRows[0]['classification']->state, '优选分类与详情一致');
+    $derivedBody = $live->buildBody($derivedRows, $derivedRows, [], 2, 0, 0, $now);
+    $derivedFacets = array_column($derivedBody['facets']['ipAttributes'], 'count', 'value');
+    same(1, $derivedFacets['住宅IP'] ?? 0, 'facet 统计包含派生住宅标签');
+    ok(!isset($derivedFacets['机房IP']), 'facet 不保留过时机房标签');
+    // 德国节点名称靠前；只有住宅优选生效，旧标签节点才会排在它前面。
+    $noSpeedRows = array_map(static function (array $r): array {
+        $r['speed_test'] = false;
+        return $r;
+    }, $derivedRows);
+    [$derivedPage] = $live->resolvePage($noSpeedRows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '1']), $now);
+    same('id-us', $derivedPage[0]['identity'], '派生住宅节点在首页优先展示');
+}
+$mismatched = clone $legacy;
+$mismatched->attributes_ip = '203.0.113.99';
+same(['机房IP', '原生IP'], $live->normalizeFacts([$mismatched])[0]['ip_attributes'], '分类 IP 不一致时不派生住宅标签');
+same('datacenter', json_decode($legacy->classification)->state, '派生不修改原始分类');
+$hosting = clone $legacy;
+$hosting->classification = (object)[
+    'state' => 'residential', 'version' => 8, 'ip' => $hosting->attributes_ip,
+    'checkedAt' => $t8, 'types' => [(object)['provider' => 'ipinfo', 'usageType' => '机房IP']],
+];
+$hosting->ip_attributes = ['住宅IP'];
+$hostingRows = $live->normalizeFacts([$hosting]);
+same(0, $live->resolvePage($hostingRows, $derivedQuery, $now)[1], '过时住宅标签不能继续命中住宅筛选');
+same(['机房IP'], $hostingRows[0]['ip_attributes'], '当前类型证据改判机房');
+same('residential', $hosting->classification->state, '规范化不修改输入对象');
+$expired = clone $legacy;
+$expiredClassification = json_decode($expired->classification);
+$expiredClassification->checkedAt = '2026-10-16T00:08:00Z';
+$expired->classification = $expiredClassification;
+$expired->speed_test = false;
+$expiredOther = clone $raw[2];
+$expiredOther->speed_test = false;
+$expiredRows = $live->normalizeFacts([$expired, $expiredOther]);
+[$expiredPage] = $live->resolvePage($expiredRows, ResultsQueryParser::fromQuery(['page' => '1', 'limit' => '1']), $now);
+same('id-de', $expiredPage[0]['identity'], '标签重算不能让过期住宅证据获得优选');
+same($expiredClassification->checkedAt, $expiredRows[0]['classification']->checkedAt, '标签重算保留证据时间');
+
 // ---------------------------------------------------------------------------
 // 6. 国家名 & 时间格式
 // ---------------------------------------------------------------------------

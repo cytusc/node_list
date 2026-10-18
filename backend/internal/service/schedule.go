@@ -80,6 +80,9 @@ func (r *Runner) schedule(ctx context.Context) error {
 		return nil
 	}
 	if r.Config.Role == "residential" {
+		if err := r.Repo.retryResidentialRecovery(ctx); err != nil {
+			return err
+		}
 		if err := r.Repo.skipHostingRecovery(ctx); err != nil {
 			return err
 		}
@@ -161,12 +164,15 @@ func (r *Runner) schedule(ctx context.Context) error {
 				continue
 			}
 			p.RetiredAt, p.Reason = *i.retired, *i.reason
-			// Keep completed tasks as durable markers; each retirement is checked once.
+			// Create one durable marker per retirement; transient retries advance its generation.
 			work = append(work, scheduledWork{Kind: KindRecovery, Key: i.id + ":" + *i.retired, Payload: p, Priority: priority, Due: now, Mode: "once"})
 			continue
 		}
 		switch r.Config.Role {
 		case "connectivity":
+			if live.FailedRounds > 0 && !live.ConfirmedDead {
+				interval = retirementRoundInterval
+			}
 			work = append(work, scheduledWork{Kind: KindLive, Key: i.id, Payload: p, Priority: priority, Due: nextDue(live.CheckedAt, interval)})
 		case "ip":
 			work = append(work, scheduledWork{Kind: KindExit, Key: i.id, Payload: p, Priority: priority, Due: nextDue(exit.CheckedAt, interval)})

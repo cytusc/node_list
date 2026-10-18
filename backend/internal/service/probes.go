@@ -131,6 +131,25 @@ func (r *Runner) live(ctx context.Context, j Job, high bool) error {
 		if err != nil || !ok {
 			return err
 		}
+		// guard holds the registry lock, serializing streak updates with lifecycle.
+		var previous domain.ConnectivityState
+		var raw []byte
+		err = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_connectivity WHERE identity=$1`, t.Identity).Scan(&raw)
+		if err != nil && err != pgx.ErrNoRows {
+			return err
+		}
+		if len(raw) > 0 {
+			if err = json.Unmarshal(raw, &previous); err != nil {
+				return err
+			}
+			if old, e := time.Parse(time.RFC3339Nano, previous.CheckedAt); e == nil {
+				stamp, _ := time.Parse(time.RFC3339Nano, v.CheckedAt)
+				if !stamp.After(old) {
+					return nil
+				}
+			}
+		}
+		v = accumulateFailures(previous, v)
 		b, err := json.Marshal(v)
 		if err != nil {
 			return err
@@ -157,7 +176,7 @@ func (r *Runner) live(ctx context.Context, j Job, high bool) error {
 // StrongExit requires independent HTTPS echoes and rejects host egress. It is
 // shared by first and final recovery checks; normal monitoring uses fallbacks.
 func StrongExit(ctx context.Context, tunnel, host *http.Client) (string, error) {
-	get := func(client *http.Client) (string, error) {
+	get := func(client *http.Client, route string) (string, error) {
 		observed := ""
 		for _, endpoint := range []string{"https://api.ipify.org", "https://checkip.amazonaws.com"} {
 			req, e := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -167,27 +186,36 @@ func StrongExit(ctx context.Context, tunnel, host *http.Client) (string, error) 
 			client.CloseIdleConnections()
 			resp, e := client.Do(req)
 			if e != nil {
-				return "", fmt.Errorf("exit echo unavailable")
+				return "", fmt.Errorf("%s %s: %s", route, req.URL.Hostname(), probeFailure(e))
 			}
 			b, re := io.ReadAll(io.LimitReader(resp.Body, 128))
 			resp.Body.Close()
 			ip := net.ParseIP(strings.TrimSpace(string(b)))
-			if re != nil || resp.StatusCode != 200 || ip == nil || ip.To4() == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
-				return "", fmt.Errorf("invalid public IPv4 echo")
+			if re != nil {
+				return "", fmt.Errorf("%s %s: response read failed (%s)", route, req.URL.Hostname(), probeFailure(re))
+			}
+			if resp.StatusCode != 200 {
+				return "", fmt.Errorf("%s %s: HTTP %d", route, req.URL.Hostname(), resp.StatusCode)
+			}
+			if ip == nil || ip.To4() == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
+				return "", fmt.Errorf("%s %s: invalid public IPv4 echo", route, req.URL.Hostname())
 			}
 			if observed != "" && observed != ip.String() {
-				return "", fmt.Errorf("exit echoes disagree")
+				return "", fmt.Errorf("%s exit echoes disagree", route)
 			}
 			observed = ip.String()
 		}
 		return observed, nil
 	}
-	ip, err := get(tunnel)
+	ip, err := get(tunnel, "proxy")
 	if err != nil {
 		return "", err
 	}
-	direct, err := get(host)
-	if err != nil || direct == ip {
+	direct, err := get(host, "host")
+	if err != nil {
+		return "", err
+	}
+	if direct == ip {
 		return "", fmt.Errorf("exit cannot be distinguished from host egress")
 	}
 	return ip, nil
@@ -217,7 +245,7 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 		defer direct.CloseIdleConnections()
 		ip, e := StrongExit(probeCtx, path.Client, direct)
 		if e != nil {
-			v.Error = "真实出口核验失败"
+			v.Error = "真实出口核验失败：" + e.Error()
 		} else {
 			v.IP, v.Source, v.Verified, v.AddressFamily = ip, "ipify+aws", true, 4
 		}
@@ -232,9 +260,7 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 		}
 	}
 	v.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	if j.Payload.ExpectedIP != "" && v.IP != j.Payload.ExpectedIP {
-		v.Error = "复核期间出口变化"
-	}
+	checkExpectedExit(&v, j.Payload.ExpectedIP)
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
 		ok, e := guard(ctx, tx, j.Payload)
 		if e != nil || !ok {

@@ -225,6 +225,35 @@ foreach ($all['nodes'] as $node) {
 }
 ok(!array_key_exists('ippure', $hk ?? []), '无出口探针数据的节点没有 ippure 字段');
 
+// 标签统计和筛选必须与实际返回的详情一致，不能只读取库里的旧 attributes。
+foreach ($all['facets']['ipAttributes'] as $facet) {
+    $matching = array_values(array_filter($all['nodes'], static fn (array $node): bool =>
+        in_array($facet['value'], $node['ippure']['attributes'] ?? [], true)));
+    same(count($matching), $facet['count'], 'facet 计数与详情标签一致：' . $facet['value']);
+    $filtered = $run(['page' => '1', 'limit' => '50', 'ipAttributes' => $facet['value']]);
+    same(count($matching), $filtered['total'], '筛选数量与详情标签一致：' . $facet['value']);
+}
+same(1, $run(['page' => '1', 'ipAttributes' => '住宅IP'])['total'], '详情派生的住宅IP 标签也可筛选');
+
+// 模拟历史分类标签未更新、风险查询失败；类型证据仍支持住宅。
+Db::beginTransaction();
+try {
+    Db::table('node_explorer_ip_attributes')->where('ip', '203.0.113.10')->update([
+        'payload' => Db::raw("jsonb_set(jsonb_set(jsonb_set(payload,
+            '{attributes}', '[\"机房IP\"]'::jsonb),
+            '{classification,state}', '\"datacenter\"'::jsonb), '{status}', '\"error\"'::jsonb)"),
+    ]);
+    $reclassified = $run(['page' => '1', 'ipAttributes' => '住宅IP']);
+    same(1, $reclassified['total'], '旧标签与风险失败不能使住宅节点从筛选中消失');
+    same('🇺🇸 美国 01', $reclassified['nodes'][0]['name'] ?? null, '返回遗漏的住宅节点');
+    same(['住宅IP'], $reclassified['nodes'][0]['ippure']['attributes'] ?? null, '筛选后的详情标签一致');
+    same('🇺🇸 美国 01', $run(['page' => '1', 'limit' => '1'])['nodes'][0]['name'] ?? null, '旧分类重算后仍在首页优选');
+    $stored = json_decode(Db::table('node_explorer_ip_attributes')->where('ip', '203.0.113.10')->value('payload'));
+    same('datacenter', $stored->classification->state, '查询不回写数据库分类或时间');
+} finally {
+    Db::rollBack();
+}
+
 // ---------------------------------------------------------------------------
 // 7. 服务看板与附属字段
 //

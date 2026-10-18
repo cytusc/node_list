@@ -142,6 +142,11 @@ final class LiveResults
             $classification = $this->decodeJson($f->classification ?? null);
             $ipAttributes = $this->decodeJson($f->ip_attributes ?? null);
             $media = $this->decodeJson($f->media ?? null);
+            $ipResult = IpClassification::normalize((object)[
+                'ip' => $f->attributes_ip ?? '',
+                'classification' => is_object($classification) ? $classification : null,
+                'attributes' => is_array($ipAttributes) ? $ipAttributes : [],
+            ]);
             $rows[] = [
                 'identity' => $f->identity,
                 'snapshot_id' => (int)$f->snapshot_id,
@@ -168,8 +173,8 @@ final class LiveResults
                 'asn_organization' => $f->asn_organization ?? '',
                 'ip_score' => ($f->ip_score === null || $f->ip_score === '') ? null : (float)$f->ip_score,
                 'human_percent' => ($f->human_percent === null || $f->human_percent === '') ? null : (float)$f->human_percent,
-                'classification' => is_object($classification) ? $classification : null,
-                'ip_attributes' => is_array($ipAttributes) ? $ipAttributes : [],
+                'classification' => $ipResult->classification,
+                'ip_attributes' => $ipResult->attributes,
                 'reachable' => self::toBool($f->reachable ?? false),
                 'connectivity_error' => $f->connectivity_error ?? '',
                 'connectivity_at' => $f->connectivity_at ?? '',

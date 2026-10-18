@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Each retirement gets one durable assessment. Dependency retries reuse its
-// proofs; completed assessments are never periodically requeued.
+// Each assessment owns fresh proofs. Transient failures of historical residential
+// nodes can start a new generation after a persisted backoff.
 func (r *Runner) recovery(ctx context.Context, j Job) error {
 	t, err := r.Repo.Target(ctx, j.Payload.Identity)
 	if err != nil {
@@ -82,6 +82,9 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	}
 	if !domain.FreshResidential(attr, exit.IP, time.Now()) {
 		if attr != nil && attr.Classification != nil && fresh(attr.Classification.CheckedAt, 24*time.Hour) {
+			if attr.Classification.State == "unknown" {
+				return finish("classification-unconfirmed", exit.IP)
+			}
 			return finish("not-residential", exit.IP)
 		}
 		err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
@@ -109,6 +112,9 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if !ready {
 		return waiting{time.Second}
 	}
+	if !validExit(final) && final.Error != "复核期间出口变化" {
+		return finish("exit-probe-failed", final.IP)
+	}
 	if !validExit(final) || final.IP != exit.IP || final.Version != exit.Version {
 		return finish("exit-changed", final.IP)
 	}
@@ -124,12 +130,27 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	})
 }
 
-// Keep the result on the once-only task, including failed assessments. The
-// scheduler uses identity + retirement time as its durable deduplication key.
+// Retain recent outcomes across generations, including the legacy once-only result.
 func recordRecoveryResult(ctx context.Context, tx pgx.Tx, j Job, result, ip string) error {
-	_, err := tx.Exec(ctx, `UPDATE node_explorer_work SET payload=(payload-'startedAt') ||
-	 jsonb_build_object('recoveryResult',$2::text,'checkedAt',$3::text,'ip',$4::text) WHERE id=$1`,
-		j.ID, result, time.Now().UTC().Format(time.RFC3339Nano), ip)
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	history := append([]RecoveryAssessment(nil), j.Payload.RecoveryHistory...)
+	attempts := j.Payload.RecoveryAttempts
+	if len(history) == 0 && j.Payload.RecoveryResult != "" && j.Payload.CheckedAt != "" {
+		history = append(history, RecoveryAssessment{Result: j.Payload.RecoveryResult, IP: j.Payload.IP, CheckedAt: j.Payload.CheckedAt})
+		attempts = max(attempts, 1)
+	}
+	history = append(history, RecoveryAssessment{Result: result, IP: ip, CheckedAt: stamp, Generation: j.Generation})
+	if len(history) > 16 {
+		history = history[len(history)-16:]
+	}
+	raw, err := json.Marshal(history)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE node_explorer_work SET payload=(payload-'startedAt') ||
+	 jsonb_build_object('recoveryResult',$2::text,'checkedAt',$3::text,'ip',$4::text,
+	 'recoveryAttempts',$5::integer,'recoveryHistory',$6::jsonb) WHERE id=$1`,
+		j.ID, result, stamp, ip, attempts+1, raw)
 	return err
 }
 
@@ -172,7 +193,7 @@ func (r *Runner) lifecycle(ctx context.Context, j Job) error {
 		reason := store.RetireRestoreReason
 		switch j.Payload.Action {
 		case "retire":
-			if !live.ConfirmedDead || live.Reachable || live.CheckedAt != j.Payload.CheckedAt || !fresh(live.CheckedAt, 3*time.Minute) {
+			if !retirementConfirmed(live) || live.CheckedAt != j.Payload.CheckedAt || !fresh(live.CheckedAt, 3*time.Minute) {
 				return nil
 			}
 		case "restore":

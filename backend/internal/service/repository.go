@@ -28,18 +28,27 @@ const (
 	KindLifecycle  = "lifecycle"
 )
 
+type RecoveryAssessment struct {
+	Result     string `json:"result"`
+	IP         string `json:"ip,omitempty"`
+	CheckedAt  string `json:"checkedAt"`
+	Generation int64  `json:"generation,omitempty"`
+}
+
 type Payload struct {
-	RecoveryResult string    `json:"recoveryResult,omitempty"`
-	Identity       string    `json:"identity,omitempty"`
-	CheckedAt      string    `json:"checkedAt,omitempty"`
-	IP             string    `json:"ip,omitempty"`
-	ExitVersion    int64     `json:"exitVersion,omitempty"`
-	RetiredAt      string    `json:"retiredAt,omitempty"`
-	Reason         string    `json:"reason,omitempty"`
-	Session        string    `json:"session,omitempty"`
-	ExpectedIP     string    `json:"expectedIP,omitempty"`
-	Action         string    `json:"action,omitempty"`
-	StartedAt      time.Time `json:"startedAt,omitempty,omitzero"`
+	RecoveryAttempts int                  `json:"recoveryAttempts,omitempty"`
+	RecoveryHistory  []RecoveryAssessment `json:"recoveryHistory,omitempty"`
+	RecoveryResult   string               `json:"recoveryResult,omitempty"`
+	Identity         string               `json:"identity,omitempty"`
+	CheckedAt        string               `json:"checkedAt,omitempty"`
+	IP               string               `json:"ip,omitempty"`
+	ExitVersion      int64                `json:"exitVersion,omitempty"`
+	RetiredAt        string               `json:"retiredAt,omitempty"`
+	Reason           string               `json:"reason,omitempty"`
+	Session          string               `json:"session,omitempty"`
+	ExpectedIP       string               `json:"expectedIP,omitempty"`
+	Action           string               `json:"action,omitempty"`
+	StartedAt        time.Time            `json:"startedAt,omitempty,omitzero"`
 }
 
 type Job struct {

@@ -89,8 +89,8 @@ func TestRecoveryResultsSurviveCleanupRestartAndScheduler(t *testing.T) {
 	}
 }
 
-func TestRecoveryFailedAssessmentEndsInsteadOfRecurring(t *testing.T) {
-	for _, scenario := range []string{"probe-failed", "not-residential", "timed-out", "exit-changed", "eligible", "skipped-datacenter-asn"} {
+func TestRecoveryAssessmentPersistsResultBeforeAnyBackoffRetry(t *testing.T) {
+	for _, scenario := range []string{"probe-failed", "not-residential", "classification-unconfirmed", "timed-out", "exit-probe-failed", "exit-changed", "eligible", "skipped-datacenter-asn"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := setup(t)
 			ctx := context.Background()
@@ -108,12 +108,17 @@ func TestRecoveryFailedAssessmentEndsInsteadOfRecurring(t *testing.T) {
 				switch scenario {
 				case "probe-failed":
 					f.exec(t, `UPDATE node_explorer_probe_results SET payload=jsonb_set(payload,'{reachable}','false') WHERE kind='connectivity'`)
+				case "classification-unconfirmed":
+					f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=jsonb_set(payload #- '{classification,evidence}' #- '{classification,types}','{classification,state}','"unknown"')`)
 				case "not-residential":
 					f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=jsonb_set(payload #- '{classification,evidence}' #- '{classification,types}','{classification,state}','"datacenter"')`)
 				case "skipped-datacenter-asn":
 					f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=payload || '{"asn":"AS12876","asnOrganization":"Scaleway SAS"}'::jsonb`)
-				case "eligible", "exit-changed":
+				case "eligible", "exit-changed", "exit-probe-failed":
 					f.evidence(t, session+":verify")
+					if scenario == "exit-probe-failed" {
+						f.exec(t, `UPDATE node_explorer_probe_results SET payload=payload || '{"verified":false,"error":"真实出口核验失败"}'::jsonb WHERE session=$1 AND kind='exit'`, session+":verify")
+					}
 					if scenario == "exit-changed" {
 						f.exec(t, `UPDATE node_explorer_probe_results SET payload=jsonb_set(payload,'{ip}','"8.8.8.8"') WHERE session=$1`, session+":verify")
 					}
