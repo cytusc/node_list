@@ -48,7 +48,9 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3001}:3001"
     tmpfs:
       - /tmp
-      - /app/webman/runtime
+      # 容器以 node(uid 1000) 运行，tmpfs 默认 755 root 不可写会导致 Workerman
+      # 建 runtime/logs 等目录 Permission denied 而崩溃；mode=0777 放行（CI 冒烟同款）。
+      - /app/webman/runtime:mode=0777
   source-ingest:
     <<: *app
     command: [node-worker, -role, source]
