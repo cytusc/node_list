@@ -215,12 +215,21 @@ func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.Conne
 	return true, nil
 }
 func removeSnapshotIdentity(ctx context.Context, tx pgx.Tx, id string) error {
+	return removeSnapshotIdentities(ctx, tx, []string{id})
+}
+
+// Compact all affected snapshots once, including their archived result indices.
+func removeSnapshotIdentities(ctx context.Context, tx pgx.Tx, ids []string) error {
+	removed := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		removed[id] = true
+	}
 	rows, e := tx.Query(ctx, `SELECT s.id,s.payload FROM node_explorer_snapshots s
  LEFT JOIN node_explorer_registry_batches b ON b.snapshot_id=s.id
  LEFT JOIN node_explorer_results_changes c ON c.snapshot_id=s.id
  WHERE b.snapshot_id IS NULL OR b.revision<>coalesce(c.revision,0)
- OR EXISTS(SELECT 1 FROM node_explorer_snapshot_members m WHERE m.snapshot_id=s.id AND m.identity=$1)
- ORDER BY s.id`, id)
+ OR EXISTS(SELECT 1 FROM node_explorer_snapshot_members m WHERE m.snapshot_id=s.id AND m.identity=ANY($1::text[]))
+ ORDER BY s.id`, ids)
 	if e != nil {
 		return e
 	}
@@ -257,7 +266,7 @@ func removeSnapshotIdentity(ctx context.Context, tx pgx.Tx, id string) error {
 			if e = json.Unmarshal(raw, &n); e != nil {
 				return e
 			}
-			if domain.AggregateIdentity(n) != id {
+			if !removed[domain.AggregateIdentity(n)] {
 				kept = append(kept, raw)
 				oldIndices = append(oldIndices, index)
 			}
@@ -293,7 +302,7 @@ func removeSnapshotIdentity(ctx context.Context, tx pgx.Tx, id string) error {
 		// Registry indices change together, avoiding compaction collisions.
 		if _, e = tx.Exec(ctx, `UPDATE node_explorer_node_registry n SET node_index=m.new_index-1
  FROM unnest($2::int[]) WITH ORDINALITY m(old_index,new_index)
- WHERE n.snapshot_id=$1 AND n.node_index=m.old_index AND n.identity<>$3`, s.id, oldIndices, id); e != nil {
+ WHERE n.snapshot_id=$1 AND n.node_index=m.old_index AND NOT(n.identity=ANY($3::text[]))`, s.id, oldIndices, ids); e != nil {
 			return e
 		}
 		payload["nodes"], _ = json.Marshal(kept)

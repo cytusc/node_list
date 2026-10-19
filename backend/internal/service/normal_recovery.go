@@ -40,6 +40,7 @@ func (r *Runner) scheduleNormalRecovery(ctx context.Context) error {
       due_at=greatest(now(),coalesce((payload->>'checkedAt')::timestamptz,(payload->>'retiredAt')::timestamptz)+$1::interval),
       generation=generation+1
       WHERE kind='normal-recovery' AND state='queued' AND NOT(payload ? 'startedAt')
+      AND coalesce(payload->>'recoveryResult','')<>'config-rejected'
       AND due_at>now()+$1::interval`, r.normalRecoveryInterval().String()); err != nil {
 		return err
 	}
@@ -97,12 +98,16 @@ func (r *Runner) scheduleNormalRecovery(ctx context.Context) error {
 				continue
 			}
 			// Keep the result/history and start fresh session proofs at the next interval.
+			retryInterval := interval
+			if c.payload.RecoveryResult == "config-rejected" {
+				retryInterval = max(interval, 6*time.Hour)
+			}
 			_, err = r.Repo.Pool.Exec(ctx, `UPDATE node_explorer_work w SET state='queued',generation=generation+1,
     due_at=$4,payload=payload-'startedAt',lease_token=NULL,lease_until=NULL,attempts=0,error=''
     WHERE id=$1 AND generation=$2 AND state='done' AND payload->>'checkedAt'=$3
     AND EXISTS(SELECT 1 FROM node_explorer_retired_nodes t JOIN node_explorer_node_registry n USING(identity)
     WHERE t.identity=w.payload->>'identity' AND t.retired_at=w.payload->>'retiredAt' AND t.reason=w.payload->>'reason'
-    AND n.available AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id))`, *c.id, *c.generation, c.payload.CheckedAt, stamp.Add(interval))
+    AND n.available AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id))`, *c.id, *c.generation, c.payload.CheckedAt, stamp.Add(retryInterval))
 		}
 		if err != nil {
 			return err

@@ -10,6 +10,13 @@ CREATE TABLE IF NOT EXISTS node_explorer_connectivity (
   identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity),
   checked_at timestamptz NOT NULL, payload jsonb NOT NULL
 );
+-- Select the newest reachable control node without scanning and sorting all proofs.
+CREATE INDEX IF NOT EXISTS node_explorer_connectivity_reference
+  ON node_explorer_connectivity (checked_at DESC,identity)
+  WHERE payload->>'reachable'='true';
+-- JSON expression statistics let the planner choose the ordered index for LIMIT 1.
+CREATE STATISTICS IF NOT EXISTS node_explorer_connectivity_reachable
+  ON (payload->>'reachable') FROM node_explorer_connectivity;
 CREATE TABLE IF NOT EXISTS node_explorer_exits (
   identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity),
   ip text NOT NULL, version bigint NOT NULL DEFAULT 1,

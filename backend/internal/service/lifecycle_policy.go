@@ -79,7 +79,7 @@ func (r *Repository) retryResidentialRecovery(ctx context.Context) error {
 	 WHERE w.kind='recovery' AND w.state='done' AND n.available AND n.historical_residential
 	 AND w.key=n.identity||':'||t.retired_at
 	 AND w.payload->>'retiredAt'=t.retired_at AND w.payload->>'reason'=t.reason
-	 AND w.payload->>'recoveryResult' IN ('probe-failed','exit-probe-failed','exit-changed','timed-out','classification-unconfirmed')
+	 AND w.payload->>'recoveryResult' IN ('probe-failed','exit-probe-failed','exit-changed','timed-out','classification-unconfirmed','config-rejected')
 	 AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
 	 ORDER BY w.due_at,w.id`)
 	if err != nil {
@@ -103,7 +103,11 @@ func (r *Repository) retryResidentialRecovery(ctx context.Context) error {
 			return err
 		}
 		stamp, e := time.Parse(time.RFC3339Nano, v.payload.CheckedAt)
-		if e == nil && automatic(v.payload.Reason) && !now.Before(stamp.Add(recoveryBackoff(v.payload.RecoveryAttempts))) {
+		delay := recoveryBackoff(v.payload.RecoveryAttempts)
+		if v.payload.RecoveryResult == "config-rejected" {
+			delay = 6 * time.Hour
+		}
+		if e == nil && automatic(v.payload.Reason) && !now.Before(stamp.Add(delay)) {
 			ready = append(ready, v)
 		}
 		if len(ready) >= 32 {

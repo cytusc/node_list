@@ -78,6 +78,18 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 		return err
 	}
 	if r.Config.Manager != nil {
+		// A permanently rejected dependency cannot produce a proof. End this
+		// assessment with a diagnostic outcome, without changing node lifecycle.
+		var rejected bool
+		e := r.Repo.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_explorer_work
+ WHERE kind IN ('fast-delay','connectivity','exit') AND key=ANY($1::text[])
+ AND error LIKE 'node_config_rejected:%')`, []string{session, session + ":verify"}).Scan(&rejected)
+		if e != nil {
+			return e
+		}
+		if rejected {
+			return finish("config-rejected", "")
+		}
 		var quick transport.DelayResult
 		ready, e := r.Repo.Probe(ctx, session, KindFast, &quick)
 		if e != nil {
@@ -95,7 +107,7 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	}
 	if normal || r.Config.Manager != nil {
 		if !a {
-			return waiting{time.Second}
+			return dependencyWait(j.Attempts)
 		}
 		if !live.Reachable || live.Error != "" || !fresh(live.CheckedAt, 3*time.Minute) {
 			return finish("probe-failed", "")
@@ -111,7 +123,7 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 		return err
 	}
 	if !a || !b {
-		return waiting{time.Second}
+		return dependencyWait(j.Attempts)
 	}
 	if !live.Reachable || live.Error != "" || !fresh(live.CheckedAt, 3*time.Minute) || !validExit(exit) {
 		return finish("probe-failed", exit.IP)
@@ -145,7 +157,7 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 		if err != nil {
 			return err
 		}
-		return waiting{time.Second}
+		return dependencyWait(j.Attempts)
 	}
 	p.Session = session + ":verify"
 	p.ExpectedIP = exit.IP
@@ -158,7 +170,7 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 		return err
 	}
 	if !ready {
-		return waiting{time.Second}
+		return dependencyWait(j.Attempts)
 	}
 	if !validExit(final) && final.Error != "复核期间出口变化" {
 		return finish("exit-probe-failed", final.IP)

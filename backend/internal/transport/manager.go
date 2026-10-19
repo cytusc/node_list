@@ -25,6 +25,8 @@ const DelayTarget = "https://www.gstatic.com/generate_204"
 const LeaseTTL = 150 * time.Second
 
 var ErrManagerBusy = errors.New("Mihomo capacity paused or busy")
+var ErrConfigRejected = errors.New("node configuration rejected or unsupported")
+var ErrConfigChanged = errors.New("node missing or configuration changed")
 
 type RegistryEntry struct {
 	Identity    string      `json:"identity"`
@@ -350,8 +352,11 @@ func (m *Manager) Acquire(req LeaseRequest) (Lease, error) {
 	l := Lease{ID: token(), Generation: m.generation, ExpiresAt: time.Now().Add(LeaseTTL), Kind: req.Kind}
 	for _, target := range req.Targets {
 		entry, ok := m.entries[target.Identity]
-		if !ok || m.rejected[target.Identity] || entry.Digest != target.Digest || (target.Incarnation != "" && target.Incarnation != entry.Incarnation) {
-			return Lease{}, errors.New("node unavailable or configuration changed")
+		if !ok || entry.Digest != target.Digest || (target.Incarnation != "" && target.Incarnation != entry.Incarnation) {
+			return Lease{}, ErrConfigChanged
+		}
+		if m.rejected[target.Identity] {
+			return Lease{}, ErrConfigRejected
 		}
 		entry.Node = domain.Node{}
 		l.Targets = append(l.Targets, entry)
@@ -480,7 +485,10 @@ func (m *Manager) Delay(ctx context.Context, req LeaseRequest) (result DelayResu
 		return result, e
 	}
 	defer m.Release(l.ID)
-	probe, stop := context.WithTimeout(ctx, 3*time.Second)
+	// Mihomo's DNS/dial setup can exceed its requested 2s delay timeout.
+	// Allow its explicit 503/504 response to arrive; a transport timeout remains
+	// an infrastructure error, never evidence that a node is dead.
+	probe, stop := context.WithTimeout(ctx, 12*time.Second)
 	defer stop()
 	path := "/proxies/" + url.PathEscape(proxyName(req.Targets[0].Identity)) + "/delay?timeout=2000&expected=204&url=" + url.QueryEscape(DelayTarget)
 	raw, status, e := m.controller(probe, http.MethodGet, path, nil)
@@ -523,11 +531,7 @@ func (m *Manager) Handler(secret string) http.Handler {
 		}
 		l, err := m.Acquire(req)
 		if err != nil {
-			status := http.StatusServiceUnavailable
-			if errors.Is(err, ErrManagerBusy) {
-				status = http.StatusTooManyRequests
-			}
-			http.Error(w, "lease unavailable", status)
+			writeManagerError(w, err)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(l)
@@ -548,11 +552,7 @@ func (m *Manager) Handler(secret string) http.Handler {
 		}
 		v, err := m.Delay(r.Context(), req)
 		if err != nil {
-			status := http.StatusServiceUnavailable
-			if errors.Is(err, ErrManagerBusy) {
-				status = http.StatusTooManyRequests
-			}
-			http.Error(w, "delay infrastructure unavailable", status)
+			writeManagerError(w, err)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(v)
@@ -565,4 +565,20 @@ func (m *Manager) Handler(secret string) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		mux.ServeHTTP(w, r)
 	})
+}
+
+// Only fixed diagnostic codes cross the API; controller errors can contain
+// proxy credentials and must never be returned to workers or logs.
+func writeManagerError(w http.ResponseWriter, err error) {
+	status, code := http.StatusServiceUnavailable, "manager_unavailable"
+	switch {
+	case errors.Is(err, ErrManagerBusy):
+		status, code = http.StatusTooManyRequests, "manager_busy"
+	case errors.Is(err, ErrConfigRejected):
+		status, code = http.StatusUnprocessableEntity, "node_config_rejected"
+	case errors.Is(err, ErrConfigChanged):
+		status, code = http.StatusConflict, "node_config_changed"
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"code": code})
 }

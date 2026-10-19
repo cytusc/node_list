@@ -15,6 +15,7 @@ import (
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/cytusc/node_list/backend/internal/taskqueue"
 	"github.com/cytusc/node_list/backend/internal/transport"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -201,6 +202,32 @@ type waiting struct{ delay time.Duration }
 
 func (w waiting) Error() string { return "awaiting dependency" }
 
+const configRejectedMessage = "node_config_rejected: 节点配置损坏或检测器暂不支持，暂停频繁重试"
+
+// Poll coordinators less often as they wait, without spending their execution
+// deadline on queue time. Keep the cap below proof freshness windows.
+func dependencyWait(attempts int) waiting {
+	return waiting{time.Duration(min(max(attempts, 1), 15)) * time.Second}
+}
+
+func taskFailureReason(err error) string {
+	for _, known := range []error{transport.ErrConfigRejected, transport.ErrConfigChanged, transport.ErrManagerUnavailable, context.DeadlineExceeded, context.Canceled} {
+		if errors.Is(err, known) {
+			return known.Error()
+		}
+	}
+	var manager *transport.ManagerHTTPError
+	if errors.As(err, &manager) {
+		return manager.Error()
+	}
+	var database *pgconn.PgError
+	if errors.As(err, &database) {
+		return "PostgreSQL SQLSTATE " + database.Code
+	}
+	// Arbitrary error text may include share links, SQL values or proxy URLs.
+	return fmt.Sprintf("failure type %T", err)
+}
+
 func (r *Runner) consume(ctx context.Context, kind string, high bool) {
 	idleDelay := 250 * time.Millisecond
 	timer := time.NewTimer(time.Hour)
@@ -232,17 +259,24 @@ func (r *Runner) consume(ctx context.Context, kind string, high bool) {
 		delay := time.Duration(min(j.Attempts, 30)) * 10 * time.Second
 		message := "检测暂时失败，等待重试"
 		var pending waiting
-		if errors.Is(err, transport.ErrManagerBusy) {
+		if errors.Is(err, transport.ErrConfigRejected) {
+			delay = 6 * time.Hour
+			message = configRejectedMessage
+			log.Printf("%s: task %s: %s; retry in %s", kind, ref, taskFailureReason(err), delay)
+		} else if errors.Is(err, transport.ErrManagerBusy) {
 			delay = time.Second
 			message = "等待内核执行容量"
 		} else if errors.As(err, &pending) {
 			delay = pending.delay
 			message = "等待前置检测结果"
 		} else {
-			log.Printf("%s: task %s failed; retrying", kind, ref)
+			message += ": " + taskFailureReason(err)
+			log.Printf("%s: task %s failed: %s; retry in %s", kind, ref, taskFailureReason(err), delay)
 		}
 		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = r.Repo.Retry(cleanup, *j, delay, message)
+		if retryErr := r.Repo.Retry(cleanup, *j, delay, message); retryErr != nil {
+			log.Printf("%s: task %s retry persistence failed: %s", kind, ref, taskFailureReason(retryErr))
+		}
 		stop()
 	}
 }

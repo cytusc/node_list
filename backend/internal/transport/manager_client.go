@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -17,6 +18,14 @@ import (
 // ManagerClient has no controller credentials and never writes kernel config.
 type ManagerClient struct{ URL, Token string }
 
+var ErrManagerUnavailable = errors.New("Mihomo manager unavailable")
+
+type ManagerHTTPError struct{ Status int }
+
+func (e *ManagerHTTPError) Error() string {
+	return fmt.Sprintf("Mihomo manager HTTP %d; retry required", e.Status)
+}
+
 func (c *ManagerClient) call(ctx context.Context, method, path string, in, out any) error {
 	raw, err := json.Marshal(in)
 	if err != nil {
@@ -28,16 +37,26 @@ func (c *ManagerClient) call(ctx context.Context, method, path string, in, out a
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return errors.New("Mihomo manager unavailable")
+		return ErrManagerUnavailable
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return ErrManagerBusy
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return errors.New("Mihomo manager refused request; retry required")
+		var v struct {
+			Code string `json:"code"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&v)
+		if resp.StatusCode == http.StatusUnprocessableEntity && v.Code == "node_config_rejected" {
+			return ErrConfigRejected
+		}
+		if resp.StatusCode == http.StatusConflict && v.Code == "node_config_changed" {
+			return ErrConfigChanged
+		}
+		return &ManagerHTTPError{Status: resp.StatusCode}
 	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)

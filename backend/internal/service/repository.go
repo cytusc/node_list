@@ -96,7 +96,8 @@ func schedule(ctx context.Context, tx pgx.Tx, kind, key string, p Payload, prior
 	payload=EXCLUDED.payload,priority=EXCLUDED.priority,due_at=EXCLUDED.due_at,
 	state='queued',generation=node_explorer_work.generation+1,attempts=0,error=''
 	WHERE node_explorer_work.state='done' OR
-	(node_explorer_work.state='queued' AND EXCLUDED.due_at<node_explorer_work.due_at)`, kind, key, b, priority, due)
+	(node_explorer_work.state='queued' AND EXCLUDED.due_at<node_explorer_work.due_at
+	 AND NOT (node_explorer_work.error LIKE 'node_config_rejected:%' AND node_explorer_work.due_at>now()))`, kind, key, b, priority, due)
 	return err
 }
 
