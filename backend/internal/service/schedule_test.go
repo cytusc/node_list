@@ -89,8 +89,8 @@ func TestBatchScheduleRetriesRejectedNodesAfterParserVersionChanges(t *testing.T
 	due := time.Now().Add(-time.Second)
 	work := []scheduledWork{{Kind: KindFast, Key: f.id, Payload: Payload{Identity: f.id}, Due: due}}
 	f.exec(t, `INSERT INTO node_explorer_work(kind,key,payload,state,due_at,attempts,error)
-	 VALUES($1,$2,$3,'queued',now()+interval '4 hours',35,'node_config_rejected: legacy parser error')`,
-		KindFast, f.id, `{"identity":"`+f.id+`"}`)
+	 VALUES($1,$2,jsonb_build_object('identity',$3::text),'queued',now()+interval '4 hours',35,'node_config_rejected: legacy parser error')`,
+		KindFast, f.id, f.id)
 	apply := func() {
 		t.Helper()
 		if err := f.repo.FinishDependencies(ctx, func(tx pgx.Tx) error { return scheduleMany(ctx, tx, work) }); err != nil {
