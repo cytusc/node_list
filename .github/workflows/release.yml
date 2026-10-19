@@ -181,10 +181,10 @@ jobs:
             -e MIHOMO_MANAGER_LISTEN=127.0.0.1:9080 \
             --name mihomo-manager-smoke "$IMAGE_NAME@$IMAGE_DIGEST" node-worker -role mihomo-manager
           for attempt in $(seq 1 20); do
-            if curl --fail --silent http://127.0.0.1:19090/version >/dev/null; then break; fi
+            if curl --fail --silent -H 'Authorization: Bearer smoke-controller-secret' http://127.0.0.1:19090/version >/dev/null; then break; fi
             sleep 1
           done
-          curl --fail http://127.0.0.1:19090/version
+          curl --fail -H 'Authorization: Bearer smoke-controller-secret' http://127.0.0.1:19090/version
           for attempt in $(seq 1 30); do
             if docker exec mihomo-manager-smoke node-worker -role mihomo-manager -health; then break; fi
             sleep 1
