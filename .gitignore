@@ -26,3 +26,6 @@ backend/tools/*.tsv
 !MODULAR_SERVICES.md
 !NODE_CLEANUP.md
 !docs/*.md
+
+!SINGLE_MIHOMO.md
+!SINGLE_MIHOMO_VALIDATION.md

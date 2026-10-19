@@ -13,6 +13,12 @@ import (
 )
 
 func (r *Repository) RunSource(ctx context.Context, st *store.Store) error {
+	return r.withServiceLock(ctx, ServiceName("source"), func(ctx context.Context) error {
+		return r.runSource(ctx, st)
+	})
+}
+
+func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 	ingestor := store.NewPersistentIngestor(st)
 	dir := Env("SUBS_CHECK_DIR", filepath.Join(Root(), "data", "sub"))
 	results := Env("RESULTS_FILE", filepath.Join(dir, "config", "cache", "config", "results.json"))

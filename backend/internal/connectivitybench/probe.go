@@ -53,23 +53,23 @@ func (e httpStatusError) Error() string { return fmt.Sprintf("HTTP %d", int(e)) 
 // Same request contract as transport.ProbeHTTP, with a sanitized status error
 // so benchmark disagreements can distinguish rate limits from tunnel errors.
 func diagnosticHTTP(ctx context.Context, c *http.Client) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://github.com/", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, transport.DelayTarget, nil)
 	if err != nil {
 		return false, err
 	}
-	req.Header.Set("User-Agent", "node-explorer-github-patrol")
+	req.Header.Set("User-Agent", "node-explorer-connectivity")
 	response, err := c.Do(req)
 	if err != nil {
 		return false, err
 	}
 	defer func() { io.Copy(io.Discard, io.LimitReader(response.Body, 4096)); response.Body.Close() }()
-	if response.StatusCode != 200 {
+	if response.StatusCode != http.StatusNoContent {
 		return false, httpStatusError(response.StatusCode)
 	}
 	return true, nil
 }
 
-// Evaluate deliberately follows service.live: GET/200, two attempts, then a
+// Evaluate deliberately follows service.live: GET/204, two attempts, then a
 // fresh direct AND independent reference check. Preparation failures and
 // cancellation never constitute evidence that a node is dead.
 func (p Policy) Evaluate(ctx context.Context, target, reference *transport.Outbound) Verdict {

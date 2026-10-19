@@ -273,7 +273,7 @@ foreach (['node-list:services', 'node-list:collector', 'node-list:source-warning
 Db::statement('DELETE FROM node_explorer_service_status');
 
 $services = $board->services()['services'];
-same(8, count($services), '看板固定 8 个服务');
+same(9, count($services), '看板固定 9 个服务');
 same('api', $services[0]['service'], '按服务名排序');
 // 字段集必须与 Go 的 service.Status 完全一致：多一个键就是契约漂移
 // （内部行里的 updatedAtRfc3339 只供采集器状态用，不能透出去）。

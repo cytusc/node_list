@@ -101,8 +101,9 @@ func (r *Runner) schedule(ctx context.Context) error {
 	// ahead of their due time, completed rows are refreshed, and residential
 	// promotions are applied to queued rows. Skipping fresh nodes would delay
 	// all three, so the scan stays whole; ScheduleInterval bounds its cost.
-	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.identity,n.historical_residential,c.payload,e.payload,a.payload,t.retired_at,t.reason
+	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.identity,n.historical_residential,CASE WHEN $3::boolean AND f.checked_at IS NOT NULL THEN coalesce(c.payload,'{}'::jsonb)||jsonb_build_object('checkedAt',to_char(f.checked_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ELSE c.payload END,e.payload,a.payload,t.retired_at,t.reason
 	FROM node_explorer_node_registry n LEFT JOIN node_explorer_connectivity c USING(identity)
+	LEFT JOIN node_explorer_fast_results f USING(identity)
 	LEFT JOIN node_explorer_exits e USING(identity) LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
 	LEFT JOIN node_explorer_retired_nodes t USING(identity)
 	WHERE n.available AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
@@ -110,7 +111,7 @@ func (r *Runner) schedule(ctx context.Context) error {
 	 AND (t.reason=$2 OR t.reason LIKE 'IPPure:%')
 	 AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='recovery' AND w.key=n.identity||':'||t.retired_at)
  AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='normal-recovery' AND w.key=n.identity||':'||t.retired_at AND w.state<>'done'))
-	 OR ($1::text<>'residential' AND t.identity IS NULL))`, r.Config.Role, store.RetireRestoreReason)
+	 OR ($1::text<>'residential' AND t.identity IS NULL))`, r.Config.Role, store.RetireRestoreReason, r.Config.Manager != nil)
 	if err != nil {
 		return err
 	}
@@ -164,6 +165,9 @@ func (r *Runner) schedule(ctx context.Context) error {
 		}
 		residential := domain.FreshResidential(&attr, exit.IP, now)
 		interval := r.Config.NormalInterval
+		if r.Config.Role == "connectivity" && r.Config.Manager != nil && r.Config.FastInterval > 0 {
+			interval = r.Config.FastInterval
+		}
 		priority := 0
 		if residential || (i.retired != nil && i.historical) {
 			interval = r.Config.ResidentialInterval
@@ -184,7 +188,11 @@ func (r *Runner) schedule(ctx context.Context) error {
 			if live.FailedRounds > 0 && !live.ConfirmedDead {
 				interval = retirementRoundInterval
 			}
-			work = append(work, scheduledWork{Kind: KindLive, Key: i.id, Payload: p, Priority: priority, Due: nextDue(live.CheckedAt, interval)})
+			kind := KindLive
+			if r.Config.Manager != nil {
+				kind = KindFast
+			}
+			work = append(work, scheduledWork{Kind: kind, Key: i.id, Payload: p, Priority: priority, Due: nextDue(live.CheckedAt, interval)})
 		case "ip":
 			work = append(work, scheduledWork{Kind: KindExit, Key: i.id, Payload: p, Priority: priority, Due: nextDue(exit.CheckedAt, interval)})
 			if exit.IP != "" && missingTrafficRatio(attr, now) {

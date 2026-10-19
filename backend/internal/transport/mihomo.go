@@ -32,6 +32,7 @@ var proxyErrorIndex = regexp.MustCompile(`^proxy ([0-9]+):`)
 
 // mihomoConfig is the document sent to PUT /configs.
 type mihomoConfig struct {
+	Authentication     []string         `yaml:"authentication,omitempty"`
 	MixedPort          int              `yaml:"mixed-port"`
 	AllowLan           bool             `yaml:"allow-lan"`
 	BindAddress        string           `yaml:"bind-address"`

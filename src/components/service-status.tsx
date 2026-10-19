@@ -2,6 +2,7 @@ import { ChevronDown } from "lucide-react";
 import type { ServiceStatus as Service } from "@/lib/data";
 
 const serviceNames: Record<string, string> = {
+  "mihomo-manager": "共享测活内核",
   api: "查询与投影",
   "source-ingest": "来源导入",
   "ip-service": "IP 属性",
@@ -90,6 +91,22 @@ export function ServiceStatusPanel({ services }: { services: Service[] }) {
                   </dd>
                 </div>
               </dl>
+              {service.kernel && (
+                <div className="service-status-note">
+                  <span>已加载 {number.format(service.kernel.loaded)} 节点</span>
+                  <span>配置代次 {service.kernel.generation.split(":").at(-1)}</span>
+                  <span>重载 {service.kernel.reloads} 次 · {service.kernel.reloadMillis} 毫秒</span>
+                  <span>快速执行中 {service.kernel.fastRunning}</span>
+                  {service.kernel.quarantined > 0 && <span>配置隔离 {service.kernel.quarantined}</span>}
+                </div>
+              )}
+              {service.fast && (
+                <div className="service-status-note">
+                  {([ ["上一完整分钟", service.fast.minute], ["近 1 小时", service.fast.hour] ] as const).map(([label, count]) => (
+                    <span key={label}>{label}快速测活 {number.format(count.completed)} · 成功 {number.format(count.success)} · 失败 {number.format(count.failed)} · 异常 {number.format(count.abnormal)}</span>
+                  ))}
+                </div>
+              )}
               {((service.activeAssessments ?? 0) > 0 || (service.checkedLastHour ?? 0) > 0 || service.restored > 0 || (service.scheduled ?? 0) > 0 || (service.checked ?? 0) > 0 || (service.skipped ?? 0) > 0 || service.error) && (
                 <div className="service-status-note">
                   {service.restored > 0 && (

@@ -29,6 +29,9 @@ import (
 
 // Outbound is one node's isolated traffic path.
 type Outbound struct {
+	Generation, Incarnation, Digest string
+	ExpiresAt                       time.Time
+	Validate                        func(context.Context) error
 	// Error is a node-specific preparation failure. No traffic is sent.
 	Error error
 	// Client issues HTTP requests through the node.
@@ -515,15 +518,13 @@ func proxyFingerprint(p domain.ProxyConfig) string {
 	return string(raw)
 }
 
-// ProbeHTTP reports whether a node's tunnel can reach a plain HTTPS host.
-// It is the reachability control used by the scheduled patrol: a node that
-// cannot reach the control while the host itself can is genuinely dead.
+// ProbeHTTP requires the same 204 endpoint used by the fast delay API.
 func ProbeHTTP(ctx context.Context, client *http.Client) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://github.com/", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, DelayTarget, nil)
 	if err != nil {
 		return false, err
 	}
-	req.Header.Set("User-Agent", "node-explorer-github-patrol")
+	req.Header.Set("User-Agent", "node-explorer-connectivity")
 	response, err := client.Do(req)
 	if err != nil {
 		return false, err
@@ -532,5 +533,5 @@ func ProbeHTTP(ctx context.Context, client *http.Client) (bool, error) {
 		io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		response.Body.Close()
 	}()
-	return response.StatusCode == 200, nil
+	return response.StatusCode == http.StatusNoContent, nil
 }

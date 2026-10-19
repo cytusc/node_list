@@ -233,3 +233,13 @@ func TestSuspectedFailureGetsEarlyRecheckWithoutRetirement(t *testing.T) {
 		t.Fatal("suspected failure retired")
 	}
 }
+
+func TestConnectivityTargetChangeResetsFailureStreak(t *testing.T) {
+	now := time.Now().UTC()
+	previous := domain.ConnectivityState{ConfirmedDead: true, FailedRounds: 3, FirstFailureAt: now.Add(-10 * time.Minute).Format(time.RFC3339Nano), LastFailureAt: now.Add(-5 * time.Minute).Format(time.RFC3339Nano)}
+	current := domain.ConnectivityState{ConfirmedDead: true, CheckedAt: now.Format(time.RFC3339Nano), ProbeTarget: "https://www.gstatic.com/generate_204"}
+	result := accumulateFailures(previous, current)
+	if result.ConfirmedDead || result.FailedRounds != 1 {
+		t.Fatalf("inherited old endpoint failures: %+v", result)
+	}
+}

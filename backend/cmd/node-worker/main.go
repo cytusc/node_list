@@ -60,5 +60,8 @@ func run() error {
 		return err
 	}
 	defer q.Close()
+	if *role == "mihomo-manager" {
+		return repo.RunMihomoManager(ctx, q)
+	}
 	return (&service.Runner{Repo: repo, Queue: q, Config: c}).Run(ctx)
 }

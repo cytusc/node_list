@@ -14,6 +14,7 @@ import (
 	"github.com/cytusc/node_list/backend/internal/collector"
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/cytusc/node_list/backend/internal/taskqueue"
+	"github.com/cytusc/node_list/backend/internal/transport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -28,7 +29,7 @@ type Runner struct {
 func (r *Runner) kinds() []string {
 	switch r.Config.Role {
 	case "connectivity":
-		return []string{KindLive}
+		return []string{KindFast, KindLive}
 	case "ip":
 		return []string{KindExit, KindAttributes, KindRisk}
 	case "residential":
@@ -47,6 +48,12 @@ func (r *Runner) kinds() []string {
 // lanes carry an explicit per-kind count (Config.LaneConcurrency); probe lanes
 // use the shared lane concurrency.
 func (r *Runner) laneCount(kind string, high bool) int {
+	if kind == KindFast {
+		if high {
+			return 8
+		}
+		return 32
+	}
 	if n, ok := r.Config.LaneConcurrency[kind]; ok && n > 0 {
 		return n
 	}
@@ -57,9 +64,19 @@ func (r *Runner) laneCount(kind string, high bool) int {
 }
 
 func (r *Runner) Run(ctx context.Context) error {
+	if len(r.kinds()) == 0 {
+		return fmt.Errorf("unknown worker role")
+	}
+	return r.Repo.withServiceLock(ctx, ServiceName(r.Config.Role), r.run)
+}
+
+func (r *Runner) run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	r.Repo.NormalRecoveryConcurrency = r.laneCount(KindNormalRecovery, false)
+	if r.Config.Manager != nil {
+		r.Repo.NormalRecoveryConcurrency = 128
+	}
 	kinds := r.kinds()
 	if len(kinds) == 0 {
 		return fmt.Errorf("unknown worker role")
@@ -75,7 +92,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// One session holds cross-process controller ownership for both lanes.
 	var conn *pgxpool.Conn
 	var err error
-	if r.Config.Role == "ip" || r.Config.Role == "connectivity" {
+	if r.Config.Manager == nil && (r.Config.Role == "ip" || r.Config.Role == "connectivity") {
 		if r.Repo.Pool.Config().MaxConns < 2 {
 			return fmt.Errorf("probe services require PGPOOL_MAX >= 2")
 		}
@@ -94,7 +111,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.Config.Role == "ip" {
 		prefix = "IP_SERVICE"
 	}
-	if r.Config.Role == "ip" || r.Config.Role == "connectivity" {
+	if r.Config.Manager == nil && (r.Config.Role == "ip" || r.Config.Role == "connectivity") {
 		for _, lane := range []string{"HIGH", "NORMAL"} {
 			for _, controller := range strings.Split(os.Getenv(prefix+"_"+lane+"_CONTROLLER"), ",") {
 				if controller == "" {
@@ -215,7 +232,10 @@ func (r *Runner) consume(ctx context.Context, kind string, high bool) {
 		delay := time.Duration(min(j.Attempts, 30)) * 10 * time.Second
 		message := "检测暂时失败，等待重试"
 		var pending waiting
-		if errors.As(err, &pending) {
+		if errors.Is(err, transport.ErrManagerBusy) {
+			delay = time.Second
+			message = "等待内核执行容量"
+		} else if errors.As(err, &pending) {
 			delay = pending.delay
 			message = "等待前置检测结果"
 		} else {
@@ -229,6 +249,8 @@ func (r *Runner) consume(ctx context.Context, kind string, high bool) {
 
 func (r *Runner) handle(ctx context.Context, j Job, high bool) error {
 	switch j.Kind {
+	case KindFast:
+		return r.fast(ctx, j, high)
 	case KindLive:
 		return r.live(ctx, j, high)
 	case KindExit:

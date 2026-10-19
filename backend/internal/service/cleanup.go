@@ -67,7 +67,11 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 			return recur(ctx, tx, j, time.Hour)
 		})
 	}
-	if !eligible || time.Since(j.Payload.StartedAt) > 3*time.Minute {
+	expired, e := r.assessmentExpired(ctx, "cleanup:"+j.Ref(), j.Payload.StartedAt)
+	if e != nil {
+		return e
+	}
+	if !eligible || expired {
 		return deferCycle()
 	}
 	session := "cleanup:" + j.Ref()
@@ -82,7 +86,13 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 	if busy {
 		return waiting{30 * time.Second}
 	}
-	if err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error { return once(ctx, tx, KindLive, session, p, 0) }); err != nil {
+	if err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
+		kind := KindLive
+		if r.Config.Manager != nil {
+			kind = KindFast
+		}
+		return once(ctx, tx, kind, session, p, 0)
+	}); err != nil {
 		return err
 	}
 	var proof domain.ConnectivityState
@@ -96,7 +106,33 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 	if proof.Reachable || !proof.ConfirmedDead || !fresh(proof.CheckedAt, time.Minute) {
 		return deferCycle()
 	}
+	ctx, release, paths, err := r.proofFence(ctx, j.Payload)
+	if err != nil {
+		return err
+	}
+	defer release()
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+		// Match deletion/source lock order before locking the registry proof row.
+		if r.Config.Manager != nil {
+			if _, e := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-registry'))`); e != nil {
+				return e
+			}
+		}
+		if e := validatePaths(ctx, tx, paths); e != nil {
+			return e
+		}
+		if r.Config.Manager != nil {
+			if e := r.Config.Manager.Generation(ctx, proof.KernelGeneration); e != nil {
+				return e
+			}
+		}
+		if r.Config.DryRun {
+			_, e := tx.Exec(ctx, `INSERT INTO node_explorer_lifecycle_events(identity,action,dry_run,reason) VALUES($1,'delete',true,'validation mode: deletion suppressed')`, j.Payload.Identity)
+			if e != nil {
+				return e
+			}
+			return recur(ctx, tx, j, time.Hour)
+		}
 		deleted, e := deleteUnavailable(ctx, tx, j, proof)
 		if e != nil {
 			return e

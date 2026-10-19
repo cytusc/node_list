@@ -76,3 +76,16 @@ CREATE INDEX IF NOT EXISTS node_explorer_cleanup_due ON node_explorer_node_regis
 CREATE TABLE IF NOT EXISTS node_explorer_deleted_nodes (
  identity text PRIMARY KEY, deleted_at timestamptz NOT NULL
 );
+
+-- Latest delay observations are retained separately; only fenced 204 success becomes connectivity evidence.
+CREATE TABLE IF NOT EXISTS node_explorer_fast_results (
+ identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity) ON DELETE CASCADE,
+ checked_at timestamptz NOT NULL, payload jsonb NOT NULL
+);
+
+-- Session deadline checks are frequent and must not scan historical work JSON.
+CREATE INDEX IF NOT EXISTS node_explorer_work_capacity_session ON node_explorer_work
+ ((payload->>'session'),kind) WHERE payload ? 'capacityAt';
+-- Admission counts include queued coordinators but only the bounded in-flight set.
+CREATE INDEX IF NOT EXISTS node_explorer_work_admitted ON node_explorer_work (kind,priority)
+ WHERE state<>'done' AND payload ? 'startedAt' AND payload->>'startedAt' NOT LIKE '0001-%';
