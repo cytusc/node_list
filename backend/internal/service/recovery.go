@@ -7,6 +7,7 @@ import (
 
 	"github.com/cytusc/node_list/backend/internal/domain"
 	"github.com/cytusc/node_list/backend/internal/store"
+	"github.com/cytusc/node_list/backend/internal/transport"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -40,7 +41,11 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 			return finish("skipped-datacenter-asn", previous.IP)
 		}
 	}
-	if time.Since(j.Payload.StartedAt) > 3*time.Minute {
+	expired, err := r.assessmentExpired(ctx, "recovery:"+j.Ref(), j.Payload.StartedAt)
+	if err != nil {
+		return err
+	}
+	if expired {
 		return finish("timed-out", "")
 	}
 
@@ -58,6 +63,9 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if normal {
 		kinds = []string{KindLive}
 	}
+	if r.Config.Manager != nil {
+		kinds = []string{KindFast}
+	}
 	err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
 		for _, kind := range kinds {
 			if e := once(ctx, tx, kind, session, p, j.Priority); e != nil {
@@ -69,13 +77,23 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if err != nil {
 		return err
 	}
+	if r.Config.Manager != nil {
+		var quick transport.DelayResult
+		ready, e := r.Repo.Probe(ctx, session, KindFast, &quick)
+		if e != nil {
+			return e
+		}
+		if ready && !quick.Success {
+			return finish("probe-failed", "")
+		}
+	}
 	var live domain.ConnectivityState
 	var exit domain.ExitState
 	a, err := r.Repo.Probe(ctx, session, KindLive, &live)
 	if err != nil {
 		return err
 	}
-	if normal {
+	if normal || r.Config.Manager != nil {
 		if !a {
 			return waiting{time.Second}
 		}
@@ -97,6 +115,11 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	}
 	if !live.Reachable || live.Error != "" || !fresh(live.CheckedAt, 3*time.Minute) || !validExit(exit) {
 		return finish("probe-failed", exit.IP)
+	}
+	if r.Config.Manager != nil {
+		if r.Config.Manager.Generation(ctx, live.KernelGeneration) != nil || r.Config.Manager.Generation(ctx, exit.KernelGeneration) != nil {
+			return finish("stale-kernel-proof", "")
+		}
 	}
 	attr, err := r.Repo.Attributes(ctx, exit.IP)
 	if err != nil {
@@ -203,6 +226,11 @@ func (r *Repository) FinishDependencies(ctx context.Context, fn func(pgx.Tx) err
 // Only this worker changes automatic lifecycle state. The registry row lock
 // serializes it with committed observations; the retirement epoch is a CAS.
 func (r *Runner) lifecycle(ctx context.Context, j Job) error {
+	ctx, release, paths, err := r.proofFence(ctx, j.Payload)
+	if err != nil {
+		return err
+	}
+	defer release()
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
 		ok, e := guard(ctx, tx, j.Payload)
 		if e != nil || !ok {
@@ -218,6 +246,14 @@ func (r *Runner) lifecycle(ctx context.Context, j Job) error {
 			return e
 		}
 		if e = json.Unmarshal(raw, &live); e != nil {
+			return e
+		}
+		if r.Config.Manager != nil {
+			if e = r.Config.Manager.Generation(ctx, live.KernelGeneration); e != nil {
+				return e
+			}
+		}
+		if e = validatePaths(ctx, tx, paths); e != nil {
 			return e
 		}
 		reason := store.RetireRestoreReason
@@ -255,6 +291,14 @@ func (r *Runner) lifecycle(ctx context.Context, j Job) error {
 			}
 			if e = json.Unmarshal(raw, &proof); e != nil {
 				return e
+			}
+			if r.Config.Manager != nil {
+				if e = r.Config.Manager.Generation(ctx, proof.KernelGeneration); e != nil {
+					return e
+				}
+				if e = r.Config.Manager.Generation(ctx, exit.KernelGeneration); e != nil {
+					return e
+				}
 			}
 			if !validExit(proof) || proof.IP != exit.IP || proof.Version != version {
 				return nil

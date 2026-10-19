@@ -14,7 +14,7 @@ func (r *Runner) normalRecoveryInterval() time.Duration {
 	if r.Config.NormalRecoveryInterval > 0 {
 		return r.Config.NormalRecoveryInterval
 	}
-	return 6 * time.Hour
+	return 20 * time.Minute
 }
 
 // Spread an old backlog over five minutes, persisted once per retirement. Fresh
@@ -34,6 +34,16 @@ func normalRecoveryFirstDue(identity, retiredAt string, now time.Time, interval 
 // nodes and explicit nonresidential/hosting outcomes use this isolated queue.
 // A still-running legacy assessment is allowed to finish before handoff.
 func (r *Runner) scheduleNormalRecovery(ctx context.Context) error {
+	// Shortening the interval must also advance untouched persisted jobs. Never
+	// replace a running assessment or its session/generation proofs.
+	if _, err := r.Repo.Pool.Exec(ctx, `UPDATE node_explorer_work SET
+      due_at=greatest(now(),coalesce((payload->>'checkedAt')::timestamptz,(payload->>'retiredAt')::timestamptz)+$1::interval),
+      generation=generation+1
+      WHERE kind='normal-recovery' AND state='queued' AND NOT(payload ? 'startedAt')
+      AND due_at>now()+$1::interval`, r.normalRecoveryInterval().String()); err != nil {
+		return err
+	}
+
 	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.identity,t.retired_at,t.reason,w.id,w.generation,w.state,w.payload
  FROM node_explorer_node_registry n JOIN node_explorer_retired_nodes t USING(identity)
  LEFT JOIN node_explorer_work fast ON fast.kind='recovery' AND fast.key=n.identity||':'||t.retired_at

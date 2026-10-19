@@ -40,7 +40,7 @@ func TestNormalRecoveryDefaultsAndIntervalOverride(t *testing.T) {
 	t.Setenv("NORMAL_RECOVERY_INTERVAL_SECONDS", "")
 	t.Setenv("NORMAL_RECOVERY_CONCURRENCY", "")
 	cfg, err := ConfigFromEnv("normal-recovery")
-	if err != nil || cfg.NormalRecoveryInterval != 6*time.Hour {
+	if err != nil || cfg.NormalRecoveryInterval != 20*time.Minute {
 		t.Fatalf("normal default: %+v %v", cfg, err)
 	}
 	r := Runner{Config: cfg}

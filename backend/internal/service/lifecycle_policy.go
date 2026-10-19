@@ -26,7 +26,7 @@ func accumulateFailures(previous, current domain.ConnectivityState) domain.Conne
 	}
 	last, e := time.Parse(time.RFC3339Nano, previous.LastFailureAt)
 	first, f := time.Parse(time.RFC3339Nano, previous.FirstFailureAt)
-	if previous.Reachable || previous.FailedRounds < 1 || e != nil || f != nil || first.After(last) || last.After(now) || now.Sub(last) > 2*time.Hour {
+	if previous.ProbeTarget != current.ProbeTarget || previous.Reachable || previous.FailedRounds < 1 || e != nil || f != nil || first.After(last) || last.After(now) || now.Sub(last) > 2*time.Hour {
 		current.FailedRounds = 1
 		current.FirstFailureAt, current.LastFailureAt = current.CheckedAt, current.CheckedAt
 	} else {

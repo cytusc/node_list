@@ -175,7 +175,7 @@ func TestNormalRecoveryRoutingAndPersistentCadence(t *testing.T) {
 			if err := f.repo.Pool.QueryRow(context.Background(), `SELECT due_at FROM node_explorer_work WHERE kind='normal-recovery'`).Scan(&due); err != nil {
 				t.Fatal(err)
 			}
-			if due.Before(time.Now().Add(4*time.Hour)) || due.After(time.Now().Add(6*time.Hour)) {
+			if due.Before(time.Now().Add(-time.Second)) || due.After(time.Now().Add(5*time.Minute)) {
 				t.Fatalf("first attempt too early/late: %v", due)
 			}
 			if err := f.runner.schedule(context.Background()); err != nil {
@@ -203,7 +203,7 @@ func TestNormalRecoveryRetriesWithFreshProofsAndNoFastPromotion(t *testing.T) {
 	if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at,generation FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&due, &generation); err != nil {
 		t.Fatal(err)
 	}
-	if due.Before(time.Now().Add(5*time.Hour+59*time.Minute)) || generation != j.Generation+1 {
+	if due.Before(time.Now().Add(19*time.Minute)) || generation != j.Generation+1 {
 		t.Fatalf("wrong retry deadline/generation: %v %d", due, generation)
 	}
 	next, err := f.repo.Claim(ctx, KindNormalRecovery, fmt.Sprintf("%d:%d", j.ID, generation), false)
@@ -364,5 +364,33 @@ func TestNormalRecoveryGatesExitOnFreshSuccessfulConnectivity(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestShorterRecoveryIntervalAdvancesOnlyUnstartedJobs(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.retirement(t)
+	f.exec(t, `UPDATE node_explorer_node_registry SET historical_residential=false`)
+	f.runner.Config.Role = "normal-recovery"
+	f.runner.Config.NormalRecoveryInterval = 6 * time.Hour
+	if err := f.runner.schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.runner.Config.NormalRecoveryInterval = 20 * time.Minute
+	if err := f.runner.schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var due time.Time
+	var generation int64
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at,generation FROM node_explorer_work WHERE kind='normal-recovery'`).Scan(&due, &generation); err != nil || due.After(time.Now().Add(20*time.Minute)) || generation != 2 {
+		t.Fatalf("old cadence retained: %v %d %v", due, generation, err)
+	}
+	f.exec(t, `UPDATE node_explorer_work SET due_at=now()+interval '6 hours',payload=payload||jsonb_build_object('startedAt',now()) WHERE kind='normal-recovery'`)
+	if err := f.runner.schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at,generation FROM node_explorer_work WHERE kind='normal-recovery'`).Scan(&due, &generation); err != nil || due.Before(time.Now().Add(5*time.Hour)) || generation != 2 {
+		t.Fatalf("running session replaced: %v %d %v", due, generation, err)
 	}
 }

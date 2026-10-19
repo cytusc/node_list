@@ -34,7 +34,7 @@ update_one() {
   fi
   local targets=("$service")
   if [[ "$service" == node-explorer ]]; then
-    targets=(node-explorer source-ingest connectivity ip-service residential-recovery normal-recovery node-cleanup node-lifecycle)
+    targets=(node-explorer source-ingest mihomo-manager connectivity ip-service residential-recovery normal-recovery node-cleanup node-lifecycle)
   fi
   echo "Updating $service $old_tag -> $new_tag"
   compose_tag "$variable" "$new_tag" pull "${targets[@]}" || return 1

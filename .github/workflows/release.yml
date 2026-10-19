@@ -64,6 +64,13 @@ jobs:
           test ! -s /tmp/gofmt.out
           go vet ./...
           go test -race ./...
+      - name: Verify real Mihomo routing and timeout capacity
+        working-directory: backend
+        run: |
+          curl -fL --retry 3 https://github.com/MetaCubeX/mihomo/releases/download/v1.19.27/mihomo-linux-amd64-v1.19.27.gz -o /tmp/mihomo.gz
+          gzip -dc /tmp/mihomo.gz > /tmp/mihomo
+          chmod +x /tmp/mihomo
+          MIHOMO_TEST_BINARY=/tmp/mihomo MIHOMO_TIMEOUT_BENCH=1 go test -race ./internal/transport -run TestRealManager -count=1 -v
       - uses: shivammathur/setup-php@v2
         with:
           php-version: "8.4"
@@ -161,12 +168,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         # webman/ 只打包源码：vendor 由镜像的 composer stage 重装，runtime 是运行产物。
         # 生产跑容器镜像，这份 tar 是服务器上的参考副本与部署脚本集合。
-        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz --exclude='webman/vendor' --exclude='webman/runtime' --exclude='webman/composer.phar' dist backend webman legacy package.json package-lock.json Dockerfile compose.yaml compose.subs-check.yaml compose.qilan.yaml deploy README.md MODULAR_SERVICES.md RESIDENTIAL_RECOVERY.md .env.example
+        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz --exclude='webman/vendor' --exclude='webman/runtime' --exclude='webman/composer.phar' dist backend webman legacy package.json package-lock.json Dockerfile SINGLE_MIHOMO.md compose.legacy-mihomo.yaml compose.yaml compose.subs-check.yaml compose.qilan.yaml deploy README.md MODULAR_SERVICES.md RESIDENTIAL_RECOVERY.md .env.example
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n同一镜像运行 API、来源导入、测活、IP 属性、住宅恢复、非住宅恢复、生命周期和七天节点清理八个独立服务。测活和出口探测各默认 8 路并发，使用独立代理；历史住宅临时失败按退避间隔复检，非住宅和机房节点由独立低频服务默认每 6 小时复检。服务状态区分到期待处理和定时等待；页面加入百度统计；无法解析的分享链接记录为连接配置不支持，避免反复重试占用探测能力。升级前阅读 MODULAR_SERVICES.md，并更新 Compose 文件。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
+          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n所有探测服务共享单个 Mihomo 内核；快速测活请求 gstatic 204，普通节点测活与恢复评估默认每 20 分钟调度，住宅复核每 5 分钟。204 成功会更新连通性证明，但节点恢复还要求独立真实出口及适用的属性核验。单实例数据库锁阻止同一后台服务重复运行，原有服务内并发保持不变。升级步骤、CPU 预算和回滚方式见 SINGLE_MIHOMO.md。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
           gh release create "$GITHUB_REF_NAME" "node-explorer-$GITHUB_REF_NAME.tar.gz" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md --verify-tag

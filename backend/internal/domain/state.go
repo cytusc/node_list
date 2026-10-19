@@ -8,24 +8,27 @@ import (
 
 // These observations belong to a connection, not a subscription batch.
 type ConnectivityState struct {
-	FailedRounds   int    `json:"failedRounds,omitempty"`
-	FirstFailureAt string `json:"firstFailureAt,omitempty"`
-	LastFailureAt  string `json:"lastFailureAt,omitempty"`
-	CheckedAt      string `json:"checkedAt"`
-	Reachable      bool   `json:"reachable"`
-	ConfirmedDead  bool   `json:"confirmedDead,omitempty"`
-	Error          string `json:"error,omitempty"`
+	ProbeTarget      string `json:"probeTarget,omitempty"`
+	KernelGeneration string `json:"kernelGeneration,omitempty"`
+	FailedRounds     int    `json:"failedRounds,omitempty"`
+	FirstFailureAt   string `json:"firstFailureAt,omitempty"`
+	LastFailureAt    string `json:"lastFailureAt,omitempty"`
+	CheckedAt        string `json:"checkedAt"`
+	Reachable        bool   `json:"reachable"`
+	ConfirmedDead    bool   `json:"confirmedDead,omitempty"`
+	Error            string `json:"error,omitempty"`
 }
 
 type ExitState struct {
-	IP            string `json:"ip,omitempty"`
-	CheckedAt     string `json:"checkedAt"`
-	Version       int64  `json:"version"`
-	Source        string `json:"source,omitempty"`
-	Country       string `json:"country,omitempty"`
-	AddressFamily int    `json:"addressFamily,omitempty"`
-	Verified      bool   `json:"verified"`
-	Error         string `json:"error,omitempty"`
+	KernelGeneration string `json:"kernelGeneration,omitempty"`
+	IP               string `json:"ip,omitempty"`
+	CheckedAt        string `json:"checkedAt"`
+	Version          int64  `json:"version"`
+	Source           string `json:"source,omitempty"`
+	Country          string `json:"country,omitempty"`
+	AddressFamily    int    `json:"addressFamily,omitempty"`
+	Verified         bool   `json:"verified"`
+	Error            string `json:"error,omitempty"`
 }
 
 type LifecycleState struct {

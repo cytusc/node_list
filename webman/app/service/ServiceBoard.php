@@ -31,7 +31,7 @@ final class ServiceBoard
 {
     /** 看板固定展示的服务与顺序。 */
     public const BOARD_SERVICES = [
-        'api', 'source-ingest', 'connectivity', 'ip-service', 'residential-recovery', 'normal-recovery', 'node-cleanup', 'node-lifecycle',
+        'mihomo-manager', 'api', 'source-ingest', 'connectivity', 'ip-service', 'residential-recovery', 'normal-recovery', 'node-cleanup', 'node-lifecycle',
     ];
 
     private ReadCache $cache;
@@ -49,6 +49,7 @@ final class ServiceBoard
      * ip-service 的三个 kind（exit/attributes/risk）合并统计到同一服务。
      */
     private const KIND_SERVICES = [
+        'fast-delay' => 'connectivity',
         'connectivity' => 'connectivity',
         'exit' => 'ip-service',
         'attributes' => 'ip-service',
@@ -111,6 +112,9 @@ final class ServiceBoard
                 continue; // Go: json:"error,omitempty"
             }
             $out[$key] = $status[$key] ?? null;
+        }
+        foreach (['fast', 'kernel'] as $key) {
+            if (isset($status[$key])) { $out[$key] = $status[$key]; }
         }
         return $out;
     }
@@ -234,7 +238,7 @@ final class ServiceBoard
         foreach ($ordered as $svc) {
             $w = $byService[$svc] ?? self::EMPTY_STATS;
             $h = $hearts[$svc] ?? ['updated_at' => '0001-01-01 00:00:00+00', 'healthy' => false, 'error' => '服务尚未启动'];
-            $out[] = [
+            $out[] = array_merge($h['metrics'] ?? [], [
                 'service' => $svc,
                 'updatedAt' => self::goTime((string)$h['updated_at']),
                 'updatedAtRfc3339' => self::rfc3339((string)$h['updated_at']),
@@ -253,7 +257,7 @@ final class ServiceBoard
                 // not the next scheduled round or future arrivals.
                 'drainEtaSeconds' => $w['checkedLastHour'] > 0
                     ? (int)ceil(($w['queued'] + $w['running']) * 3600 / $w['checkedLastHour']) : null,
-            ];
+            ]);
         }
         return $out;
     }
@@ -323,7 +327,7 @@ final class ServiceBoard
         }
         $rows = Db::table('node_explorer_service_status')
             ->select([
-                'service',
+                'service', 'payload',
                 Db::raw("coalesce(updated_at,'0001-01-01'::timestamptz) AS updated_at"),
                 Db::raw("coalesce(updated_at>now()-interval '90 seconds' AND coalesce(payload->>'error','')='',false) AS healthy"),
                 Db::raw("CASE WHEN updated_at IS NULL THEN '服务尚未启动' WHEN updated_at<=now()-interval '90 seconds' THEN '服务心跳已过期' ELSE coalesce(payload->>'error','') END AS error"),
@@ -337,6 +341,7 @@ final class ServiceBoard
                 'updated_at' => (string)$row->updated_at,
                 'healthy' => self::toBool($row->healthy),
                 'error' => (string)$row->error,
+                'metrics' => array_intersect_key(json_decode((string)($row->payload ?? '{}'), true) ?? [], array_flip(['fast', 'kernel'])),
             ];
         }
         return $out;

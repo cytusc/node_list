@@ -101,8 +101,18 @@ func (r *Runner) live(ctx context.Context, j Job, high bool) error {
 		return err
 	}
 	defer release()
-	v := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	ctx, cancelLease := pathContext(ctx, paths)
+	defer cancelLease()
+	if r.Config.Manager != nil {
+		if _, err = r.Repo.Pool.Exec(ctx, `UPDATE node_explorer_work SET payload=payload||jsonb_build_object('capacityAt',to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) WHERE id=$1 AND generation=$2 AND lease_token=$3 AND NOT(payload ? 'capacityAt')`, j.ID, j.Generation, j.Token); err != nil {
+			return err
+		}
+	}
+	v := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), ProbeTarget: transport.DelayTarget}
 	path := paths[t.Identity]
+	if path != nil {
+		v.KernelGeneration = path.Generation
+	}
 	if path == nil || path.Error != nil {
 		v.Error = "连接配置不支持"
 	} else {
@@ -130,57 +140,65 @@ func (r *Runner) live(ctx context.Context, j Job, high bool) error {
 	}
 	v.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
-		if v.Reachable && v.Error == "" {
-			if err := recordAvailable(ctx, tx, t.Identity, j.Payload.Incarnation, v.CheckedAt); err != nil {
-				return err
-			}
-		}
-		ok, err := guard(ctx, tx, j.Payload)
-		if err != nil || !ok {
+		if err := validatePaths(ctx, tx, paths); err != nil {
 			return err
 		}
-		// guard holds the registry lock, serializing streak updates with lifecycle.
-		var previous domain.ConnectivityState
-		var raw []byte
-		err = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_connectivity WHERE identity=$1`, t.Identity).Scan(&raw)
-		if err != nil && err != pgx.ErrNoRows {
+		return r.saveConnectivity(ctx, tx, j, t, v)
+	})
+}
+
+// Both delay success and failure review persist the same fenced connectivity proof.
+func (r *Runner) saveConnectivity(ctx context.Context, tx pgx.Tx, j Job, t *Target, v domain.ConnectivityState) error {
+	if v.Reachable && v.Error == "" {
+		if err := recordAvailable(ctx, tx, t.Identity, j.Payload.Incarnation, v.CheckedAt); err != nil {
 			return err
 		}
-		if len(raw) > 0 {
-			if err = json.Unmarshal(raw, &previous); err != nil {
-				return err
-			}
-			if old, e := time.Parse(time.RFC3339Nano, previous.CheckedAt); e == nil {
-				stamp, _ := time.Parse(time.RFC3339Nano, v.CheckedAt)
-				if !stamp.After(old) {
-					return nil
-				}
-			}
-		}
-		if j.Payload.Action != "cleanup" {
-			v = accumulateFailures(previous, v)
-		}
-		b, err := json.Marshal(v)
-		if err != nil {
+	}
+	ok, err := guard(ctx, tx, j.Payload)
+	if err != nil || !ok {
+		return err
+	}
+	// guard holds the registry lock, serializing streak updates with lifecycle.
+	var previous domain.ConnectivityState
+	var raw []byte
+	err = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_connectivity WHERE identity=$1`, t.Identity).Scan(&raw)
+	if err != nil && err != pgx.ErrNoRows {
+		return err
+	}
+	if len(raw) > 0 {
+		if err = json.Unmarshal(raw, &previous); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_connectivity(identity,checked_at,payload) VALUES($1,$2,$3)
+		if old, e := time.Parse(time.RFC3339Nano, previous.CheckedAt); e == nil {
+			stamp, _ := time.Parse(time.RFC3339Nano, v.CheckedAt)
+			if !stamp.After(old) {
+				return nil
+			}
+		}
+	}
+	if j.Payload.Action != "cleanup" {
+		v = accumulateFailures(previous, v)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_connectivity(identity,checked_at,payload) VALUES($1,$2,$3)
 		ON CONFLICT(identity) DO UPDATE SET checked_at=EXCLUDED.checked_at,payload=EXCLUDED.payload
 		WHERE node_explorer_connectivity.checked_at<=EXCLUDED.checked_at`, t.Identity, v.CheckedAt, b); err != nil {
-			return err
-		}
-		if err = writeProbe(ctx, tx, j.Payload.Session, KindLive, t.Identity, v); err != nil {
-			return err
-		}
-		if v.ConfirmedDead && t.Retired == nil && j.Payload.Action != "cleanup" {
-			p := j.Payload
-			p.Action = "retire"
-			p.Session = j.Ref()
-			p.CheckedAt = v.CheckedAt
-			return once(ctx, tx, KindLifecycle, "retire:"+j.Ref(), p, j.Priority)
-		}
-		return nil
-	})
+		return err
+	}
+	if err = writeProbe(ctx, tx, j.Payload.Session, KindLive, t.Identity, v); err != nil {
+		return err
+	}
+	if v.ConfirmedDead && t.Retired == nil && j.Payload.Action != "cleanup" {
+		p := j.Payload
+		p.Action = "retire"
+		p.Session = j.Ref()
+		p.CheckedAt = v.CheckedAt
+		return once(ctx, tx, KindLifecycle, "retire:"+j.Ref(), p, j.Priority)
+	}
+	return nil
 }
 
 // StrongExit requires independent HTTPS echoes and rejects host egress. It is
@@ -247,8 +265,13 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 		return err
 	}
 	defer release()
+	ctx, cancelLease := pathContext(ctx, paths)
+	defer cancelLease()
 	v := domain.ExitState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	path := paths[t.Identity]
+	if path != nil {
+		v.KernelGeneration = path.Generation
+	}
 	if path == nil || path.Error != nil {
 		v.Error = "连接配置不支持"
 	} else if j.Payload.Session != "" {
@@ -275,6 +298,9 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	v.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	checkExpectedExit(&v, j.Payload.ExpectedIP)
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+		if err := validatePaths(ctx, tx, paths); err != nil {
+			return err
+		}
 		ok, e := guard(ctx, tx, j.Payload)
 		if e != nil || !ok {
 			return e
@@ -366,11 +392,23 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		}
 		reference = &t.Node
 	}
-	paths, release, err := r.reserve(ctx, []domain.Node{*reference}, false)
+	var paths map[string]*transport.Outbound
+	var release func()
+	if r.Config.Manager != nil {
+		engine := &transport.ManagedEngine{Manager: r.Config.Manager, Kind: "risk", High: high}
+		reserved, done, e := engine.Reserve(ctx, []domain.Node{*reference})
+		err = e
+		release = done
+		paths = map[string]*transport.Outbound{domain.AggregateIdentity(*reference): reserved[0]}
+	} else {
+		paths, release, err = r.reserve(ctx, []domain.Node{*reference}, false)
+	}
 	if err != nil {
 		return err
 	}
 	defer release()
+	ctx, cancelLease := pathContext(ctx, paths)
+	defer cancelLease()
 	path := paths[domain.AggregateIdentity(*reference)]
 	if path == nil || path.Error != nil {
 		return waiting{30 * time.Second}
@@ -390,6 +428,9 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		e.QueryStatus = "success"
 	}
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+		if err := validatePaths(ctx, tx, paths); err != nil {
+			return err
+		}
 		if err := mergeAttributes(ctx, tx, j.Payload.IP, []ipcheck.Evidence{e}, v); err != nil {
 			return err
 		}

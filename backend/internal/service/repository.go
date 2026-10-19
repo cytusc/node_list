@@ -20,6 +20,7 @@ import (
 )
 
 const (
+	KindFast           = "fast-delay"
 	KindLive           = "connectivity"
 	KindExit           = "exit"
 	KindAttributes     = "attributes"
@@ -218,7 +219,7 @@ func (r *Repository) Claim(ctx context.Context, kind, ref string, high bool) (*J
 
 	// Serialize new probe admission with deletion. Existing running leases are
 	// checked again by the deletion transaction before any data is removed.
-	if kind == KindLive || kind == KindExit {
+	if kind == KindFast || kind == KindLive || kind == KindExit {
 		admission, e = r.Pool.Begin(ctx)
 		if e != nil {
 			return nil, e

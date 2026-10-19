@@ -75,6 +75,7 @@ type Config struct {
 	Role                                string
 	NormalRecoveryInterval              time.Duration
 	ResidentialInterval, NormalInterval time.Duration
+	FastInterval                        time.Duration
 	Timeout, RetryDelay                 time.Duration
 	ScheduleInterval                    time.Duration
 	HighConcurrency, NormalConcurrency  int
@@ -84,6 +85,7 @@ type Config struct {
 	LaneConcurrency          map[string]int
 	APIOrigin                string
 	HighRouter, NormalRouter *transport.Router
+	Manager                  *transport.ManagerClient
 	DryRun                   bool
 }
 
@@ -113,12 +115,35 @@ func laneConcurrency(role string) map[string]int {
 }
 
 func ConfigFromEnv(role string) (Config, error) {
-	c := Config{Role: role, NormalRecoveryInterval: Seconds("NORMAL_RECOVERY_INTERVAL_SECONDS", 21600), ResidentialInterval: Seconds("RESIDENTIAL_INTERVAL_SECONDS", 300), NormalInterval: Seconds("NORMAL_INTERVAL_SECONDS", 1800),
+	c := Config{Role: role, NormalRecoveryInterval: Seconds("NORMAL_RECOVERY_INTERVAL_SECONDS", 1200), ResidentialInterval: Seconds("RESIDENTIAL_INTERVAL_SECONDS", 300), NormalInterval: Seconds("NORMAL_INTERVAL_SECONDS", 1800),
 		Timeout: Seconds("PROBE_TIMEOUT_SECONDS", 12), RetryDelay: Seconds("PROBE_RETRY_SECONDS", 10),
 		ScheduleInterval: Seconds("SCHEDULE_INTERVAL_SECONDS", 5),
+		FastInterval:     Seconds("FAST_INTERVAL_SECONDS", 1200),
 		HighConcurrency:  Number("RESIDENTIAL_CONCURRENCY", 2), NormalConcurrency: Number("NORMAL_CONCURRENCY", 2),
 		LaneConcurrency: laneConcurrency(role),
 		APIOrigin:       Env("IPPURE_API_ORIGIN", "https://api.123169.xyz"), DryRun: Env("LIFECYCLE_DRY_RUN", "false") == "true"}
+	if address := os.Getenv("MIHOMO_MANAGER_URL"); address != "" {
+		if os.Getenv("MIHOMO_MANAGER_TOKEN") == "" {
+			return c, fmt.Errorf("MIHOMO_MANAGER_TOKEN is required")
+		}
+		c.Manager = &transport.ManagerClient{URL: address, Token: os.Getenv("MIHOMO_MANAGER_TOKEN")}
+		kind := "strict"
+		if role == "ip" {
+			kind = "exit"
+		}
+		c.HighRouter = transport.NewRouter(&transport.ManagedEngine{Manager: c.Manager, Kind: kind, High: true})
+		c.NormalRouter = transport.NewRouter(&transport.ManagedEngine{Manager: c.Manager, Kind: kind})
+		if role == "connectivity" {
+			c.HighConcurrency = 8
+			c.NormalConcurrency = 8
+		}
+		if role == "ip" {
+			c.HighConcurrency = 8
+			c.NormalConcurrency = 8
+			c.LaneConcurrency[KindRisk] = 2
+		}
+		return c, nil
+	}
 	if role != "connectivity" && role != "ip" {
 		return c, nil
 	}

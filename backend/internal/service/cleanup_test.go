@@ -226,7 +226,7 @@ func TestSuccessfulLiveProbePersistsMonotonicAvailability(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	client := &http.Client{Transport: roundTrip(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+		return &http.Response{StatusCode: 204, Body: io.NopCloser(strings.NewReader(""))}, nil
 	})}
 	f.runner.Config.HighRouter = transport.NewRouter(cleanupEngine{client})
 	f.runner.Config.Timeout = time.Second
