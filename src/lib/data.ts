@@ -52,6 +52,9 @@ export type ServiceStatus = {
   scheduled?: number;
   running: number;
   oldestWaitSeconds: number;
+  activeAssessments?: number;
+  checkedLastHour?: number;
+  drainEtaSeconds?: number | null;
   restored: number;
   checked?: number;
   skipped?: number;

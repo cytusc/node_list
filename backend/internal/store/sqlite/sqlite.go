@@ -156,36 +156,6 @@ func (a *Adapter) All(ctx context.Context) ([]store.SnapshotRow, error) {
 	return out, rows.Err()
 }
 
-// History returns one page of batches and the total count.
-func (a *Adapter) History(ctx context.Context, limit, offset int) ([]store.HistoryItem, int, error) {
-	rows, err := a.db.QueryContext(ctx,
-		`SELECT id, checked_at, imported_at, node_count FROM snapshots
-		ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	items := make([]store.HistoryItem, 0, limit)
-	for rows.Next() {
-		var item store.HistoryItem
-		var checked sql.NullString
-		if err := rows.Scan(&item.ID, &checked, &item.ImportedAt, &item.NodeCount); err != nil {
-			return nil, 0, err
-		}
-		item.CheckedAt = checked.String
-		item.ImportedAt = store.NormalizeTimestamp(item.ImportedAt)
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
-	}
-	var total int
-	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM snapshots`).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	return items, total, nil
-}
-
 // Enrichments returns stored IPPure results.
 func (a *Adapter) Enrichments(ctx context.Context, id *int) ([]store.Enrichment, error) {
 	query := `SELECT snapshot_id, node_index, payload FROM ippure_results`

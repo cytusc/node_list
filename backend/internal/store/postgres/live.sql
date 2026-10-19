@@ -6,6 +6,15 @@ ALTER TABLE node_explorer_node_registry ADD COLUMN IF NOT EXISTS source_at times
 CREATE TABLE IF NOT EXISTS node_explorer_registry_batches (
  snapshot_id integer PRIMARY KEY, revision bigint NOT NULL
 );
+-- Source membership avoids decoding the entire snapshot history per deletion.
+CREATE TABLE IF NOT EXISTS node_explorer_snapshot_members (
+ snapshot_id integer NOT NULL REFERENCES node_explorer_snapshots(id) ON DELETE CASCADE,
+ node_index integer NOT NULL, identity text NOT NULL,
+ PRIMARY KEY(snapshot_id,node_index)
+);
+CREATE INDEX IF NOT EXISTS node_explorer_snapshot_members_identity ON node_explorer_snapshot_members(identity,snapshot_id);
+-- A schema migration runs once; existing cursors need a membership backfill.
+DELETE FROM node_explorer_registry_batches;
 -- Raw current facts remain an ordinary view, so an identity restriction can
 -- reach the base tables before any public node JSON is rendered.
 CREATE OR REPLACE VIEW node_explorer_live_facts AS

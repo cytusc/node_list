@@ -1,4 +1,4 @@
-# Six independently restartable services. PostgreSQL is an existing external service.
+# Eight independently restartable services. PostgreSQL is an existing external service.
 x-environment: &environment
   PGHOST: ${PGHOST:?Set PGHOST in .env}
   PGPORT: ${PGPORT:-5432}
@@ -39,10 +39,18 @@ x-proxy: &proxy
     driver: json-file
     options: { max-size: "10m", max-file: "3" }
 services:
+  # 网页接口：PHP/webman（Workerman）。镜像默认 CMD 就是 php start.php start，
+  # 这里不重复写 command。read_only 下 Workerman 要写 runtime/（pid/status/log），
+  # 用 tmpfs 兜；容器重建即丢，无状态。
   node-explorer:
     <<: *app
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3001}:3001"
+    tmpfs:
+      - /tmp
+      # 容器以 node(uid 1000) 运行，tmpfs 默认 755 root 不可写会导致 Workerman
+      # 建 runtime/logs 等目录 Permission denied 而崩溃；mode=0777 放行（CI 冒烟同款）。
+      - /app/webman/runtime:mode=0777
   source-ingest:
     <<: *app
     command: [node-worker, -role, source]
@@ -67,12 +75,12 @@ services:
       <<: *environment
       CONNECTIVITY_HIGH_CONTROLLER: http://connectivity-high-proxy:9090,http://connectivity-high-proxy-2:9090,http://connectivity-high-proxy-3:9090,http://connectivity-high-proxy-4:9090
       CONNECTIVITY_HIGH_PROXY_URL: http://connectivity-high-proxy:7890,http://connectivity-high-proxy-2:7890,http://connectivity-high-proxy-3:7890,http://connectivity-high-proxy-4:7890
-      CONNECTIVITY_NORMAL_CONTROLLER: http://connectivity-normal-proxy:9090,http://connectivity-normal-proxy-2:9090,http://connectivity-normal-proxy-3:9090,http://connectivity-normal-proxy-4:9090
-      CONNECTIVITY_NORMAL_PROXY_URL: http://connectivity-normal-proxy:7890,http://connectivity-normal-proxy-2:7890,http://connectivity-normal-proxy-3:7890,http://connectivity-normal-proxy-4:7890
+      CONNECTIVITY_NORMAL_CONTROLLER: http://connectivity-normal-proxy:9090,http://connectivity-normal-proxy-2:9090,http://connectivity-normal-proxy-3:9090,http://connectivity-normal-proxy-4:9090,http://connectivity-normal-proxy-5:9090,http://connectivity-normal-proxy-6:9090,http://connectivity-normal-proxy-7:9090,http://connectivity-normal-proxy-8:9090,http://connectivity-normal-proxy-9:9090,http://connectivity-normal-proxy-10:9090,http://connectivity-normal-proxy-11:9090,http://connectivity-normal-proxy-12:9090,http://connectivity-normal-proxy-13:9090,http://connectivity-normal-proxy-14:9090,http://connectivity-normal-proxy-15:9090,http://connectivity-normal-proxy-16:9090,http://connectivity-normal-proxy-17:9090,http://connectivity-normal-proxy-18:9090,http://connectivity-normal-proxy-19:9090,http://connectivity-normal-proxy-20:9090
+      CONNECTIVITY_NORMAL_PROXY_URL: http://connectivity-normal-proxy:7890,http://connectivity-normal-proxy-2:7890,http://connectivity-normal-proxy-3:7890,http://connectivity-normal-proxy-4:7890,http://connectivity-normal-proxy-5:7890,http://connectivity-normal-proxy-6:7890,http://connectivity-normal-proxy-7:7890,http://connectivity-normal-proxy-8:7890,http://connectivity-normal-proxy-9:7890,http://connectivity-normal-proxy-10:7890,http://connectivity-normal-proxy-11:7890,http://connectivity-normal-proxy-12:7890,http://connectivity-normal-proxy-13:7890,http://connectivity-normal-proxy-14:7890,http://connectivity-normal-proxy-15:7890,http://connectivity-normal-proxy-16:7890,http://connectivity-normal-proxy-17:7890,http://connectivity-normal-proxy-18:7890,http://connectivity-normal-proxy-19:7890,http://connectivity-normal-proxy-20:7890
       PROBE_TIMEOUT_SECONDS: ${PROBE_TIMEOUT_SECONDS:-12}
       PROBE_RETRY_SECONDS: ${PROBE_RETRY_SECONDS:-10}
       CONNECTIVITY_HIGH_CONCURRENCY: ${CONNECTIVITY_HIGH_CONCURRENCY:-4}
-      CONNECTIVITY_NORMAL_CONCURRENCY: ${CONNECTIVITY_NORMAL_CONCURRENCY:-4}
+      CONNECTIVITY_NORMAL_CONCURRENCY: ${CONNECTIVITY_NORMAL_CONCURRENCY:-20}
     depends_on:
       task-redis: { condition: service_healthy }
       connectivity-high-proxy: { condition: service_started }
@@ -83,6 +91,22 @@ services:
       connectivity-normal-proxy-2: { condition: service_started }
       connectivity-normal-proxy-3: { condition: service_started }
       connectivity-normal-proxy-4: { condition: service_started }
+      connectivity-normal-proxy-5: { condition: service_started }
+      connectivity-normal-proxy-6: { condition: service_started }
+      connectivity-normal-proxy-7: { condition: service_started }
+      connectivity-normal-proxy-8: { condition: service_started }
+      connectivity-normal-proxy-9: { condition: service_started }
+      connectivity-normal-proxy-10: { condition: service_started }
+      connectivity-normal-proxy-11: { condition: service_started }
+      connectivity-normal-proxy-12: { condition: service_started }
+      connectivity-normal-proxy-13: { condition: service_started }
+      connectivity-normal-proxy-14: { condition: service_started }
+      connectivity-normal-proxy-15: { condition: service_started }
+      connectivity-normal-proxy-16: { condition: service_started }
+      connectivity-normal-proxy-17: { condition: service_started }
+      connectivity-normal-proxy-18: { condition: service_started }
+      connectivity-normal-proxy-19: { condition: service_started }
+      connectivity-normal-proxy-20: { condition: service_started }
     healthcheck:
       test: [CMD, node-worker, -role, connectivity, -health]
       interval: 30s
@@ -128,6 +152,30 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 60s
+  normal-recovery:
+    <<: *worker
+    command: [node-worker, -role, normal-recovery]
+    environment:
+      <<: *environment
+      NORMAL_RECOVERY_CONCURRENCY: ${NORMAL_RECOVERY_CONCURRENCY:-2}
+      NORMAL_RECOVERY_INTERVAL_SECONDS: ${NORMAL_RECOVERY_INTERVAL_SECONDS:-21600}
+      SCHEDULE_INTERVAL_SECONDS: 30
+    healthcheck:
+      test: [CMD, node-worker, -role, normal-recovery, -health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+  node-cleanup:
+    <<: *worker
+    command: [node-worker, -role, node-cleanup]
+    environment:
+      <<: *environment
+      SCHEDULE_INTERVAL_SECONDS: 30
+    healthcheck:
+      test: [CMD, node-worker, -role, node-cleanup, -health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
   node-lifecycle:
     <<: *worker
     command: [node-worker, -role, lifecycle]
@@ -164,6 +212,38 @@ services:
   connectivity-normal-proxy-3:
     <<: *proxy
   connectivity-normal-proxy-4:
+    <<: *proxy
+  connectivity-normal-proxy-5:
+    <<: *proxy
+  connectivity-normal-proxy-6:
+    <<: *proxy
+  connectivity-normal-proxy-7:
+    <<: *proxy
+  connectivity-normal-proxy-8:
+    <<: *proxy
+  connectivity-normal-proxy-9:
+    <<: *proxy
+  connectivity-normal-proxy-10:
+    <<: *proxy
+  connectivity-normal-proxy-11:
+    <<: *proxy
+  connectivity-normal-proxy-12:
+    <<: *proxy
+  connectivity-normal-proxy-13:
+    <<: *proxy
+  connectivity-normal-proxy-14:
+    <<: *proxy
+  connectivity-normal-proxy-15:
+    <<: *proxy
+  connectivity-normal-proxy-16:
+    <<: *proxy
+  connectivity-normal-proxy-17:
+    <<: *proxy
+  connectivity-normal-proxy-18:
+    <<: *proxy
+  connectivity-normal-proxy-19:
+    <<: *proxy
+  connectivity-normal-proxy-20:
     <<: *proxy
   ip-high-proxy:
     <<: *proxy

@@ -8,10 +8,13 @@ import (
 
 // These observations belong to a connection, not a subscription batch.
 type ConnectivityState struct {
-	CheckedAt     string `json:"checkedAt"`
-	Reachable     bool   `json:"reachable"`
-	ConfirmedDead bool   `json:"confirmedDead,omitempty"`
-	Error         string `json:"error,omitempty"`
+	FailedRounds   int    `json:"failedRounds,omitempty"`
+	FirstFailureAt string `json:"firstFailureAt,omitempty"`
+	LastFailureAt  string `json:"lastFailureAt,omitempty"`
+	CheckedAt      string `json:"checkedAt"`
+	Reachable      bool   `json:"reachable"`
+	ConfirmedDead  bool   `json:"confirmedDead,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type ExitState struct {

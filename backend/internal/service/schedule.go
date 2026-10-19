@@ -56,7 +56,7 @@ func scheduleMany(ctx context.Context, tx pgx.Tx, work []scheduledWork) error {
 		priority=CASE WHEN EXCLUDED.kind='risk' AND node_explorer_work.state='queued' THEN greatest(node_explorer_work.priority,EXCLUDED.priority) ELSE EXCLUDED.priority END,
 		due_at=CASE WHEN EXCLUDED.kind='risk' AND node_explorer_work.state='queued' THEN least(node_explorer_work.due_at,EXCLUDED.due_at) ELSE EXCLUDED.due_at END,
 		state='queued',generation=node_explorer_work.generation+1,attempts=0,error=''
-		WHERE EXCLUDED.kind<>'recovery' AND (node_explorer_work.state='done' OR
+		WHERE EXCLUDED.kind NOT IN ('recovery','normal-recovery') AND (node_explorer_work.state='done' OR
 		 (node_explorer_work.state='queued' AND (EXCLUDED.due_at<node_explorer_work.due_at OR
 		 (EXCLUDED.kind='risk' AND EXCLUDED.priority>node_explorer_work.priority))))`, b)
 		if err != nil {
@@ -67,19 +67,32 @@ func scheduleMany(ctx context.Context, tx pgx.Tx, work []scheduledWork) error {
 }
 
 func once(ctx context.Context, tx pgx.Tx, kind, key string, p Payload, priority int) error {
+	return onceDue(ctx, tx, kind, key, p, time.Now(), priority)
+}
+
+func onceDue(ctx context.Context, tx pgx.Tx, kind, key string, p Payload, due time.Time, priority int) error {
 	b, e := json.Marshal(p)
 	if e != nil {
 		return e
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO node_explorer_work(kind,key,payload,priority,due_at) VALUES($1,$2,$3,$4,now()) ON CONFLICT(kind,key) DO NOTHING`, kind, key, b, priority)
+	_, e = tx.Exec(ctx, `INSERT INTO node_explorer_work(kind,key,payload,priority,due_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(kind,key) DO NOTHING`, kind, key, b, priority, due)
 	return e
 }
 
 func (r *Runner) schedule(ctx context.Context) error {
+	if r.Config.Role == "node-cleanup" {
+		return r.scheduleCleanup(ctx)
+	}
+	if r.Config.Role == "normal-recovery" {
+		return r.scheduleNormalRecovery(ctx)
+	}
 	if r.Config.Role != "connectivity" && r.Config.Role != "ip" && r.Config.Role != "residential" {
 		return nil
 	}
 	if r.Config.Role == "residential" {
+		if err := r.Repo.retryResidentialRecovery(ctx); err != nil {
+			return err
+		}
 		if err := r.Repo.skipHostingRecovery(ctx); err != nil {
 			return err
 		}
@@ -93,9 +106,10 @@ func (r *Runner) schedule(ctx context.Context) error {
 	LEFT JOIN node_explorer_exits e USING(identity) LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
 	LEFT JOIN node_explorer_retired_nodes t USING(identity)
 	WHERE n.available AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
-	AND (($1::text='residential' AND t.identity IS NOT NULL
+	AND (($1::text='residential' AND n.historical_residential AND t.identity IS NOT NULL
 	 AND (t.reason=$2 OR t.reason LIKE 'IPPure:%')
-	 AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='recovery' AND w.key=n.identity||':'||t.retired_at))
+	 AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='recovery' AND w.key=n.identity||':'||t.retired_at)
+ AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='normal-recovery' AND w.key=n.identity||':'||t.retired_at AND w.state<>'done'))
 	 OR ($1::text<>'residential' AND t.identity IS NULL))`, r.Config.Role, store.RetireRestoreReason)
 	if err != nil {
 		return err
@@ -161,12 +175,15 @@ func (r *Runner) schedule(ctx context.Context) error {
 				continue
 			}
 			p.RetiredAt, p.Reason = *i.retired, *i.reason
-			// Keep completed tasks as durable markers; each retirement is checked once.
+			// Create one durable marker per retirement; transient retries advance its generation.
 			work = append(work, scheduledWork{Kind: KindRecovery, Key: i.id + ":" + *i.retired, Payload: p, Priority: priority, Due: now, Mode: "once"})
 			continue
 		}
 		switch r.Config.Role {
 		case "connectivity":
+			if live.FailedRounds > 0 && !live.ConfirmedDead {
+				interval = retirementRoundInterval
+			}
 			work = append(work, scheduledWork{Kind: KindLive, Key: i.id, Payload: p, Priority: priority, Due: nextDue(live.CheckedAt, interval)})
 		case "ip":
 			work = append(work, scheduledWork{Kind: KindExit, Key: i.id, Payload: p, Priority: priority, Due: nextDue(exit.CheckedAt, interval)})
@@ -192,9 +209,12 @@ func nextDue(stamp string, interval time.Duration) time.Time {
 // guard rechecks retirement after the network requests and serializes against
 // lifecycle transitions. Manual disable always wins over in-flight probes.
 func guard(ctx context.Context, tx pgx.Tx, p Payload) (bool, error) {
+	if p.Action == "cleanup" {
+		return cleanupGuard(ctx, tx, p)
+	}
 	var id string
-	err := tx.QueryRow(ctx, `SELECT identity FROM node_explorer_node_registry WHERE identity=$1 AND available
-	AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=snapshot_id) FOR UPDATE`, p.Identity).Scan(&id)
+	err := tx.QueryRow(ctx, `SELECT identity FROM node_explorer_node_registry WHERE identity=$1 AND available AND ($2::text='' OR incarnation=$2)
+	AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=snapshot_id) FOR UPDATE`, p.Identity, p.Incarnation).Scan(&id)
 	if err == pgx.ErrNoRows {
 		return false, nil
 	}

@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Each retirement gets one durable assessment. Dependency retries reuse its
-// proofs; completed assessments are never periodically requeued.
+// Each assessment owns fresh proofs. The normal service shares transport checks
+// but does not require residential classification.
 func (r *Runner) recovery(ctx context.Context, j Job) error {
 	t, err := r.Repo.Target(ctx, j.Payload.Identity)
 	if err != nil {
@@ -30,7 +30,8 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if err != nil {
 		return err
 	}
-	if previous != nil && previous.IP != "" {
+	normal := j.Kind == KindNormalRecovery
+	if !normal && previous != nil && previous.IP != "" {
 		attr, err := r.Repo.Attributes(ctx, previous.IP)
 		if err != nil {
 			return err
@@ -45,9 +46,20 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 
 	session := "recovery:" + j.Ref()
 	p := j.Payload
+	p.RecoveryMode = ""
+	if normal {
+		p.RecoveryMode = "normal"
+	}
 	p.Session = session
+	// Nonresidential failures are common: do not spend exit-pool capacity until
+	// this assessment's fresh connectivity proof has passed. Residential recovery
+	// keeps its existing parallel probes for low latency.
+	kinds := []string{KindLive, KindExit}
+	if normal {
+		kinds = []string{KindLive}
+	}
 	err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
-		for _, kind := range []string{KindLive, KindExit} {
+		for _, kind := range kinds {
 			if e := once(ctx, tx, kind, session, p, j.Priority); e != nil {
 				return e
 			}
@@ -63,6 +75,19 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if err != nil {
 		return err
 	}
+	if normal {
+		if !a {
+			return waiting{time.Second}
+		}
+		if !live.Reachable || live.Error != "" || !fresh(live.CheckedAt, 3*time.Minute) {
+			return finish("probe-failed", "")
+		}
+		if err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
+			return once(ctx, tx, KindExit, session, p, j.Priority)
+		}); err != nil {
+			return err
+		}
+	}
 	b, err := r.Repo.Probe(ctx, session, KindExit, &exit)
 	if err != nil {
 		return err
@@ -77,11 +102,14 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if err != nil {
 		return err
 	}
-	if asn := hostingRecoveryASN(attr, exit.IP); asn != "" {
+	if asn := hostingRecoveryASN(attr, exit.IP); !normal && asn != "" {
 		return finish("skipped-datacenter-asn", exit.IP)
 	}
-	if !domain.FreshResidential(attr, exit.IP, time.Now()) {
+	if !normal && !domain.FreshResidential(attr, exit.IP, time.Now()) {
 		if attr != nil && attr.Classification != nil && fresh(attr.Classification.CheckedAt, 24*time.Hour) {
+			if attr.Classification.State == "unknown" {
+				return finish("classification-unconfirmed", exit.IP)
+			}
 			return finish("not-residential", exit.IP)
 		}
 		err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
@@ -109,6 +137,9 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if !ready {
 		return waiting{time.Second}
 	}
+	if !validExit(final) && final.Error != "复核期间出口变化" {
+		return finish("exit-probe-failed", final.IP)
+	}
 	if !validExit(final) || final.IP != exit.IP || final.Version != exit.Version {
 		return finish("exit-changed", final.IP)
 	}
@@ -117,6 +148,11 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	p.ExitVersion = final.Version
 	p.Session = session
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+		if normal {
+			if e := scheduleIP(ctx, tx, final.IP, t.Identity, 0); e != nil {
+				return e
+			}
+		}
 		if e := once(ctx, tx, KindLifecycle, "restore:"+j.Ref(), p, 1); e != nil {
 			return e
 		}
@@ -124,12 +160,27 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	})
 }
 
-// Keep the result on the once-only task, including failed assessments. The
-// scheduler uses identity + retirement time as its durable deduplication key.
+// Retain recent outcomes across generations, including the legacy once-only result.
 func recordRecoveryResult(ctx context.Context, tx pgx.Tx, j Job, result, ip string) error {
-	_, err := tx.Exec(ctx, `UPDATE node_explorer_work SET payload=(payload-'startedAt') ||
-	 jsonb_build_object('recoveryResult',$2::text,'checkedAt',$3::text,'ip',$4::text) WHERE id=$1`,
-		j.ID, result, time.Now().UTC().Format(time.RFC3339Nano), ip)
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	history := append([]RecoveryAssessment(nil), j.Payload.RecoveryHistory...)
+	attempts := j.Payload.RecoveryAttempts
+	if len(history) == 0 && j.Payload.RecoveryResult != "" && j.Payload.CheckedAt != "" {
+		history = append(history, RecoveryAssessment{Result: j.Payload.RecoveryResult, IP: j.Payload.IP, CheckedAt: j.Payload.CheckedAt})
+		attempts = max(attempts, 1)
+	}
+	history = append(history, RecoveryAssessment{Result: result, IP: ip, CheckedAt: stamp, Generation: j.Generation})
+	if len(history) > 16 {
+		history = history[len(history)-16:]
+	}
+	raw, err := json.Marshal(history)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE node_explorer_work SET payload=(payload-'startedAt') ||
+	 jsonb_build_object('recoveryResult',$2::text,'checkedAt',$3::text,'ip',$4::text,
+	 'recoveryAttempts',$5::integer,'recoveryHistory',$6::jsonb) WHERE id=$1`,
+		j.ID, result, stamp, ip, attempts+1, raw)
 	return err
 }
 
@@ -172,7 +223,7 @@ func (r *Runner) lifecycle(ctx context.Context, j Job) error {
 		reason := store.RetireRestoreReason
 		switch j.Payload.Action {
 		case "retire":
-			if !live.ConfirmedDead || live.Reachable || live.CheckedAt != j.Payload.CheckedAt || !fresh(live.CheckedAt, 3*time.Minute) {
+			if !retirementConfirmed(live) || live.CheckedAt != j.Payload.CheckedAt || !fresh(live.CheckedAt, 3*time.Minute) {
 				return nil
 			}
 		case "restore":
@@ -209,6 +260,10 @@ func (r *Runner) lifecycle(ctx context.Context, j Job) error {
 				return nil
 			}
 			e = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_ip_attributes WHERE ip=$1 FOR SHARE`, exit.IP).Scan(&raw)
+			if e == pgx.ErrNoRows && j.Payload.RecoveryMode == "normal" {
+				raw = []byte(`{}`)
+				e = nil
+			}
 			if e == pgx.ErrNoRows {
 				return nil
 			}
@@ -219,7 +274,7 @@ func (r *Runner) lifecycle(ctx context.Context, j Job) error {
 			if e = json.Unmarshal(raw, &attr); e != nil {
 				return e
 			}
-			if hostingRecoveryASN(&attr, exit.IP) != "" || !domain.FreshResidential(&attr, exit.IP, time.Now()) {
+			if j.Payload.RecoveryMode != "normal" && (hostingRecoveryASN(&attr, exit.IP) != "" || !domain.FreshResidential(&attr, exit.IP, time.Now())) {
 				return nil
 			}
 			reason = j.Payload.Reason

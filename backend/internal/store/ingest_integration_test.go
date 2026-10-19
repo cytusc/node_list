@@ -80,9 +80,9 @@ func TestImportFileChangesAndConcurrentImports(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	_, total, err := adapter.History(ctx, 20, 0)
-	if err != nil || total != 4 {
-		t.Fatalf("concurrent import count=%d err=%v", total, err)
+	rows, err := adapter.All(ctx)
+	if err != nil || len(rows) != 4 {
+		t.Fatalf("concurrent import count=%d err=%v", len(rows), err)
 	}
 	// Replacing the inode while retaining size and timestamp must also import.
 	old, _ := os.Stat(path)

@@ -73,6 +73,7 @@ func Root() string {
 
 type Config struct {
 	Role                                string
+	NormalRecoveryInterval              time.Duration
 	ResidentialInterval, NormalInterval time.Duration
 	Timeout, RetryDelay                 time.Duration
 	ScheduleInterval                    time.Duration
@@ -94,6 +95,8 @@ func laneConcurrency(role string) map[string]int {
 	switch role {
 	case "ip":
 		prefix = "IP_SERVICE"
+	case "normal-recovery":
+		prefix = "NORMAL_RECOVERY"
 	case "residential":
 		prefix = "RESIDENTIAL_RECOVERY"
 	case "lifecycle":
@@ -101,14 +104,16 @@ func laneConcurrency(role string) map[string]int {
 	}
 	out := map[string]int{}
 	for _, kind := range []string{KindRisk, KindAttributes, KindLifecycle, KindRecovery} {
-		name := strings.ToUpper(kind)
+		name := strings.ToUpper(strings.ReplaceAll(kind, "-", "_"))
 		out[kind] = Number(prefix+"_"+name+"_CONCURRENCY", Number(name+"_CONCURRENCY", 1))
 	}
+	out[KindNormalRecovery] = Number("NORMAL_RECOVERY_CONCURRENCY", 2)
+	out[KindCleanup] = 1
 	return out
 }
 
 func ConfigFromEnv(role string) (Config, error) {
-	c := Config{Role: role, ResidentialInterval: Seconds("RESIDENTIAL_INTERVAL_SECONDS", 300), NormalInterval: Seconds("NORMAL_INTERVAL_SECONDS", 1800),
+	c := Config{Role: role, NormalRecoveryInterval: Seconds("NORMAL_RECOVERY_INTERVAL_SECONDS", 21600), ResidentialInterval: Seconds("RESIDENTIAL_INTERVAL_SECONDS", 300), NormalInterval: Seconds("NORMAL_INTERVAL_SECONDS", 1800),
 		Timeout: Seconds("PROBE_TIMEOUT_SECONDS", 12), RetryDelay: Seconds("PROBE_RETRY_SECONDS", 10),
 		ScheduleInterval: Seconds("SCHEDULE_INTERVAL_SECONDS", 5),
 		HighConcurrency:  Number("RESIDENTIAL_CONCURRENCY", 2), NormalConcurrency: Number("NORMAL_CONCURRENCY", 2),

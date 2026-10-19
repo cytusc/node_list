@@ -26,11 +26,7 @@ type ChangeReader interface {
 
 // Sync checks a cheap revision and reads only affected batches. Local writes and
 // synchronization share ioMu, so an older database read cannot undo a local save.
-// A read-through store retains nothing, so there is no generation to sync.
 func (s *Store) Sync(ctx context.Context) error {
-	if s.readThrough {
-		return nil
-	}
 	return s.syncFlight.run(ctx, func(ctx context.Context) error {
 		s.ioMu.Lock()
 		defer s.ioMu.Unlock()
@@ -50,12 +46,8 @@ func (s *Store) Sync(ctx context.Context) error {
 }
 
 // ApplyChanges swaps a whole generation under one lock. Decode errors leave the
-// previous generation intact and are reported for retry. A read-through store
-// retains nothing, so there is no generation to swap.
+// previous generation intact and are reported for retry.
 func (s *Store) ApplyChanges(c Changes) error {
-	if s.readThrough {
-		return nil
-	}
 	decoded := make(map[int]*batchedSnapshot, len(c.Batches))
 	for _, row := range c.Batches {
 		batch, err := s.loadBatch(row)

@@ -33,6 +33,10 @@ func (r *Runner) kinds() []string {
 		return []string{KindExit, KindAttributes, KindRisk}
 	case "residential":
 		return []string{KindRecovery}
+	case "normal-recovery":
+		return []string{KindNormalRecovery}
+	case "node-cleanup":
+		return []string{KindCleanup}
 	case "lifecycle":
 		return []string{KindLifecycle}
 	}
@@ -55,6 +59,7 @@ func (r *Runner) laneCount(kind string, high bool) int {
 func (r *Runner) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	r.Repo.NormalRecoveryConcurrency = r.laneCount(KindNormalRecovery, false)
 	kinds := r.kinds()
 	if len(kinds) == 0 {
 		return fmt.Errorf("unknown worker role")
@@ -108,6 +113,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	for _, kind := range kinds {
 		for _, high := range []bool{true, false} {
+			if (kind == KindNormalRecovery || kind == KindCleanup) && high {
+				continue
+			}
 			count := r.laneCount(kind, high)
 			for i := 0; i < count; i++ {
 				wg.Add(1)
@@ -229,8 +237,10 @@ func (r *Runner) handle(ctx context.Context, j Job, high bool) error {
 		return r.attributes(ctx, j)
 	case KindRisk:
 		return r.risk(ctx, j, high)
-	case KindRecovery:
+	case KindRecovery, KindNormalRecovery:
 		return r.recovery(ctx, j)
+	case KindCleanup:
+		return r.cleanup(ctx, j)
 	case KindLifecycle:
 		return r.lifecycle(ctx, j)
 	}

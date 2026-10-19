@@ -1,17 +1,18 @@
 # Node Explorer
 
-React／TypeScript 节点浏览器与 Go 后端，实时展示 subs-check 和 Qilan 节点的当前连通性及出口 IP 属性。支持筛选、分页、详情、列设置和深浅主题。
+React／TypeScript 节点浏览器与 PHP（webman）接口层，实时展示 subs-check 和 Qilan 节点的当前连通性及出口 IP 属性。支持筛选、分页、详情、列设置和深浅主题。
 
-现在由六个独立服务运行：API 查询、来源导入、测活、IP 属性、住宅恢复、节点生命周期。**PostgreSQL 保存业务数据，Redis 分发任务；在用住宅节点默认每 5 分钟检查，自动退役节点仅做一轮恢复核验，合格立即恢复。** 人工禁用不会自动恢复。
+现在由七个独立服务运行：API 查询（PHP/webman，实现见 `webman/`）、来源导入、测活、IP 属性、住宅恢复、非住宅恢复、节点生命周期（后六个是 Go `node-worker`）。**PostgreSQL 保存业务数据，Redis 分发任务；在用住宅节点默认每 5 分钟检查，住宅恢复失败后按退避间隔重试；非住宅节点默认每 6 小时复检，合格立即恢复。** 人工禁用不会自动恢复。
 
 完整的模块职责、任务契约、故障恢复、部署与升级步骤见 [MODULAR_SERVICES.md](MODULAR_SERVICES.md)，住宅判定规则见 [RESIDENTIAL_RECOVERY.md](RESIDENTIAL_RECOVERY.md)。
 
 ## 开发与运行
 
-需要 Node.js 22.13+、Go 1.26+、PostgreSQL 和 Redis。复制 `.env.example` 为 `.env`，填写 PostgreSQL、Redis 及四组专用 Mihomo 地址。
+需要 Node.js 22.13+、Go 1.26+、PHP 8.1+（含 pdo_pgsql／pcntl／sockets／mbstring 扩展）、PostgreSQL 和 Redis。复制 `.env.example` 为 `.env`，填写 PostgreSQL、Redis 及四组专用 Mihomo 地址；接口另需 `cp webman/.env.example webman/.env` 并 `composer install`。
 
 ```bash
 npm ci
+composer install --working-dir=webman
 npm run dev
 ```
 
@@ -25,7 +26,7 @@ go -C backend run ./cmd/node-worker -role residential
 go -C backend run ./cmd/node-worker -role lifecycle
 ```
 
-生产构建使用 `npm run build && npm run build:backend`；`npm start` 启动 API，工作进程用 `backend/node-worker -role <角色>` 独立启动。运行时必须接入 PostgreSQL，不再使用 SQLite。测试夹具仍保留 SQLite，用于验证旧行为。
+生产构建使用 `npm run build && npm run build:worker`；接口用 `npm start`（= `php webman/start.php start`），工作进程用 `node-worker -role <角色>` 独立启动。运行时必须接入 PostgreSQL，不再使用 SQLite。测试夹具仍保留 SQLite，用于验证旧行为。接口测试：`npm run test:api`（离线断言）+ `php webman/tests/integration.php`（连库契约，见 `webman/README.md`）。
 
 ## 容器部署
 
@@ -40,11 +41,11 @@ curl --fail http://127.0.0.1:3001/api/health
 curl --fail http://127.0.0.1:3001/api/services
 ```
 
-默认 `COMPOSE_FILE=compose.yaml:compose.subs-check.yaml`，包含六个应用服务、Redis、四个专用 Mihomo 和上游 subs-check。已有 subs-check 时可只使用 `compose.yaml`。数据库是已有外部服务，不自动新建。只有来源服务挂载订阅目录；所有代理和 Redis 都不发布宿主端口。Web 默认绑定 `127.0.0.1:3001`，可用 `BIND_ADDRESS`／`WEB_PORT` 调整。
+默认 `COMPOSE_FILE=compose.yaml:compose.subs-check.yaml`，包含七个应用服务、Redis、十六个专用 Mihomo 和上游 subs-check。已有 subs-check 时可只使用 `compose.yaml`。数据库是已有外部服务，不自动新建。只有来源服务挂载订阅目录；所有代理和 Redis 都不发布宿主端口。Web 默认绑定 `127.0.0.1:3001`，可用 `BIND_ADDRESS`／`WEB_PORT` 调整。
 
 旧的 PG／IPPure／巡检 overlay 已删除（它们曾是为旧部署保留的空兼容文件，生产自 v1.4.x 起已不在 `COMPOSE_FILE` 中引用）。升级应停止旧巡检与采集进程，更新 Compose 文件，保留数据库与旧 SQLite 卷；SQLite 历史不会自动迁移。详见模块化升级说明。
 
-`deploy/node-list.service`、`deploy/node-list-update.service` 和 timer 可安装到 systemd。`deploy/update.sh` 会同步更新六个应用服务，健康检查失败时回滚对应版本。`NODE_EXPLORER_AUTO_UPDATE=false` 可关闭应用自动更新。
+`deploy/node-list.service`、`deploy/node-list-update.service` 和 timer 可安装到 systemd。`deploy/update.sh` 会同步更新七个应用服务，健康检查失败时回滚对应版本。`NODE_EXPLORER_AUTO_UPDATE=false` 可关闭应用自动更新。
 
 ## 来源与当前状态
 
@@ -60,7 +61,7 @@ Qilan 来源在 `COMPOSE_FILE` 追加 `:compose.qilan.yaml`，设置 `QILAN_SESS
 
 测活只检查 GitHub 连通性。两次失败且宿主直连、另一个近期可用节点的代理对照均成功，才提交自动退役建议；对照不足、配置不支持、控制器故障不会直接退役。IP 服务独立读取出口，按真实出口 IP 合并属性查询，不使用节点服务器地址替代出口。
 
-在用住宅节点测活／出口检查默认 300 秒，普通节点 1800 秒。自动退役节点每次退役只核验一轮，持久化结果后不再重复排期。住宅和普通队列各有专用工作槽位及代理实例；风险接口请求只使用普通 IP 代理。分类与风险成功结果 24 小时后刷新，失败有独立重试。分类按原始来源时间判断有效性，风险接口失败不阻塞其他来源分类与住宅恢复。
+在用住宅节点测活／出口检查默认 300 秒，普通节点 1800 秒。自动退役须连续 3 轮失败、每轮至少相隔 2 分钟；历史住宅节点的临时恢复失败按 5 分钟、15 分钟、1 小时、6 小时退避复测，每轮使用新证据并保留结果。住宅和普通队列各有专用工作槽位及代理实例；风险接口请求只使用普通 IP 代理。分类与风险成功结果 24 小时后刷新，失败有独立重试。分类按原始来源时间判断有效性，风险接口失败不阻塞其他来源分类与住宅恢复。
 
 默认查询 IPPure、IPinfo、IP-API、IPregistry、AbuseIPDB、ipapi.is、IP2Location。每家最多一票，使用类型优先、公司类型后备，失败或无有效类型时弃权。最高票并列时，在并列项中依次优先住宅 IP、商业宽带，剩余平票判为机房 IP；全部弃权为类型未知。来源详情与独立时间保存在 `classification` 中。
 
@@ -73,11 +74,11 @@ Qilan 来源在 `COMPOSE_FILE` 追加 `:compose.qilan.yaml`，设置 `QILAN_SESS
 - `/api/services`：工作进程心跳、队列等待、执行数量及保留期内恢复数。
 - `/api/health`：HTTP API 存活。worker 使用 `node-worker -role <角色> -health`。
 
-后端主要目录：`internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-explorer` 只提供 API，`cmd/node-worker` 按角色启动独立服务（source／connectivity／ip／residential／lifecycle）。切换期的一次性分析命令（idcheck/idscan/linkdiff/sortchk）与旧 patrol 入口已完成使命并删除。
+后端主要目录：`backend/internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-worker` 按角色启动独立服务（source／connectivity／ip／residential／lifecycle）；HTTP 接口已改为 `webman/` 下的 PHP/webman 实现（同一镜像内运行，命令 `php start.php start`）。切换期的一次性分析命令（idcheck/idscan/linkdiff/sortchk）与旧 patrol 入口已完成使命并删除。
 
 `legacy/node-server/` 已归档，仅作为兼容行为基准及旧数据维护参考，不参与运行时调度。`npm test` 运行归档行为测试；`npm run test:backend` 验证 Go。集成测试使用显式 `NODE_EXPLORER_TEST_PG`／`NODE_EXPLORER_TEST_REDIS`，不自动连接生产环境。
 
-GitHub Actions 执行构建、Go race 测试、归档行为测试，并验证 API 和独立生命周期 worker 镜像。容器只包含 Go 二进制和前端资源。发布不会自动执行当前工作区部署。
+GitHub Actions 执行构建、Go race 测试、webman 离线与连库契约测试、归档行为测试，并验证 API 和独立生命周期 worker 镜像。容器包含 PHP 接口运行时（含前端静态资源）与 Go worker 二进制。发布不会自动执行当前工作区部署。
 
 ### 全库出口 IP 属性清洗
 
@@ -92,3 +93,5 @@ bash deploy/ip-type-clean.sh --query-proxy http://audit-proxy:7890 --apply # 全
 在部署主机执行包装脚本；它从应用容器安全读取数据库配置，通过临时容器运行，报告写入宿主机 `ip-type-clean-reports/`。可通过 `IP_TYPE_CLEAN_CONTAINER`、`IP_TYPE_CLEAN_BINARY`、`IP_TYPE_CLEAN_REPORT_DIR` 覆盖默认值。二进制也可直接使用 PostgreSQL 标准环境变量运行。
 
 默认不写数据库；`--apply` 在每个 IP 的事务中锁定当前记录，先将原始 JSON 备份至 `node_explorer_ip_type_clean_backup`（按运行 ID、批次、节点索引唯一），再仅更新 `classification` 和 `attributes`。保留节点、检测时间、风险分数、真实出口及其他字段，避免覆盖并发采集结果。失败重跑会重新读取当前数据，数据库互斥锁阻止两个清洗任务同时运行。JSONL 报告记录每个 IP 的证据、来源缺失和更新数量；终端出现 `COMPLETE` 才表示该次全量处理结束。主标签采用独立来源票数最多的类型；最高票并列时，仅在并列项中按住宅 IP、商业宽带的顺序优先判定，其余平票判为机房 IP，全部弃权时显示“类型未知”，各来源原始类型保留在明细中。
+
+节点七天失效清理与可用时间记录：[NODE_CLEANUP.md](NODE_CLEANUP.md)。

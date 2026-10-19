@@ -3,13 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"npm:dev:backend\" \"vite --host 0.0.0.0\"",
-    "dev:backend": "go -C backend run ./cmd/node-explorer",
+    "dev": "concurrently -k \"npm:dev:api\" \"vite --host 0.0.0.0\"",
+    "dev:api": "php webman/start.php start",
     "build": "tsc -b && vite build",
-    "build:backend": "go -C backend build -o node-explorer ./cmd/node-explorer && go -C backend build -o node-worker ./cmd/node-worker",
-    "start": "./backend/node-explorer",
+    "build:worker": "go -C backend build -o node-worker ./cmd/node-worker",
+    "start": "php webman/start.php start",
     "test": "node --test legacy/node-server/*.test.js",
     "test:backend": "go -C backend vet ./... && go -C backend test -race ./...",
+    "test:api": "php webman/composer.phar install --working-dir=webman --no-interaction && php webman/tests/run.php",
     "test:e2e": "playwright test",
     "dev:worker": "go -C backend run ./cmd/node-worker"
   },
