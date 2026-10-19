@@ -48,8 +48,8 @@ func scheduleMany(ctx context.Context, tx pgx.Tx, work []scheduledWork) error {
 		SELECT d.kind,d.key,d.payload,d.priority,d.due_at
 		FROM jsonb_to_recordset($1::jsonb) AS d(kind text,key text,payload jsonb,priority integer,due_at timestamptz,mode text)
 		LEFT JOIN node_explorer_work w ON w.kind=d.kind AND w.key=d.key
-		WHERE w.id IS NULL OR (d.mode<>'once' AND (w.state='done' OR
-		 (w.state='queued' AND NOT (w.error LIKE 'node_config_rejected:%' AND w.due_at>now())
+		 WHERE w.id IS NULL OR (d.mode<>'once' AND (w.state='done' OR
+			 (w.state='queued' AND NOT (w.error LIKE $2 AND w.due_at>now())
 		 AND (d.due_at<w.due_at OR (d.mode='risk' AND d.priority>w.priority)))))
 		ORDER BY d.kind,d.key
 		ON CONFLICT(kind,key) DO UPDATE SET
@@ -57,10 +57,10 @@ func scheduleMany(ctx context.Context, tx pgx.Tx, work []scheduledWork) error {
 		priority=CASE WHEN EXCLUDED.kind='risk' AND node_explorer_work.state='queued' THEN greatest(node_explorer_work.priority,EXCLUDED.priority) ELSE EXCLUDED.priority END,
 		due_at=CASE WHEN EXCLUDED.kind='risk' AND node_explorer_work.state='queued' THEN least(node_explorer_work.due_at,EXCLUDED.due_at) ELSE EXCLUDED.due_at END,
 		state='queued',generation=node_explorer_work.generation+1,attempts=0,error=''
-		WHERE EXCLUDED.kind NOT IN ('recovery','normal-recovery') AND (node_explorer_work.state='done' OR
-		 (node_explorer_work.state='queued' AND NOT (node_explorer_work.error LIKE 'node_config_rejected:%' AND node_explorer_work.due_at>now())
+		 WHERE EXCLUDED.kind NOT IN ('recovery','normal-recovery') AND (node_explorer_work.state='done' OR
+			 (node_explorer_work.state='queued' AND NOT (node_explorer_work.error LIKE $2 AND node_explorer_work.due_at>now())
 		 AND (EXCLUDED.due_at<node_explorer_work.due_at OR
-		 (EXCLUDED.kind='risk' AND EXCLUDED.priority>node_explorer_work.priority))))`, b)
+		 (EXCLUDED.kind='risk' AND EXCLUDED.priority>node_explorer_work.priority))))`, b, configRejectedPattern())
 		if err != nil {
 			return err
 		}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/collector"
+	"github.com/cytusc/node_list/backend/internal/domain"
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/cytusc/node_list/backend/internal/taskqueue"
 	"github.com/cytusc/node_list/backend/internal/transport"
@@ -202,7 +203,13 @@ type waiting struct{ delay time.Duration }
 
 func (w waiting) Error() string { return "awaiting dependency" }
 
-const configRejectedMessage = "node_config_rejected: 节点配置损坏或检测器暂不支持，暂停频繁重试"
+func configRejectedPattern() string {
+	return fmt.Sprintf("node_config_rejected:share-link-v%d:%%", domain.ShareLinkVersion)
+}
+
+func configRejectedMessage() string {
+	return fmt.Sprintf("node_config_rejected:share-link-v%d: 节点配置损坏或检测器暂不支持，暂停频繁重试", domain.ShareLinkVersion)
+}
 
 // Poll coordinators less often as they wait, without spending their execution
 // deadline on queue time. Keep the cap below proof freshness windows.
@@ -261,7 +268,7 @@ func (r *Runner) consume(ctx context.Context, kind string, high bool) {
 		var pending waiting
 		if errors.Is(err, transport.ErrConfigRejected) {
 			delay = 6 * time.Hour
-			message = configRejectedMessage
+			message = configRejectedMessage()
 			log.Printf("%s: task %s: %s; retry in %s", kind, ref, taskFailureReason(err), delay)
 		} else if errors.Is(err, transport.ErrManagerBusy) {
 			delay = time.Second

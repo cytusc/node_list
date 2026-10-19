@@ -83,6 +83,48 @@ func TestBatchSchedulePreservesUnchangedAndRunningWork(t *testing.T) {
 	}
 }
 
+func TestBatchScheduleRetriesRejectedNodesAfterParserVersionChanges(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	due := time.Now().Add(-time.Second)
+	work := []scheduledWork{{Kind: KindFast, Key: f.id, Payload: Payload{Identity: f.id}, Due: due}}
+	f.exec(t, `INSERT INTO node_explorer_work(kind,key,payload,state,due_at,attempts,error)
+	 VALUES($1,$2,$3,'queued',now()+interval '4 hours',35,'node_config_rejected: legacy parser error')`,
+		KindFast, f.id, `{"identity":"`+f.id+`"}`)
+	apply := func() {
+		t.Helper()
+		if err := f.repo.FinishDependencies(ctx, func(tx pgx.Tx) error { return scheduleMany(ctx, tx, work) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	apply()
+	var state, message string
+	var attempts int
+	var generation int64
+	var actualDue time.Time
+	read := func() {
+		t.Helper()
+		if err := f.repo.Pool.QueryRow(ctx, `SELECT state,attempts,error,generation,due_at FROM node_explorer_work WHERE kind=$1 AND key=$2`, KindFast, f.id).
+			Scan(&state, &attempts, &message, &generation, &actualDue); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read()
+	if state != "queued" || attempts != 0 || message != "" || generation != 2 || actualDue.After(time.Now()) {
+		t.Fatalf("stale parser rejection was not retried immediately: state=%s attempts=%d error=%q generation=%d due=%s", state, attempts, message, generation, actualDue)
+	}
+
+	// A rejection from the current parser still backs off, so a truly malformed
+	// node cannot cause the scheduler to retry it on every pass.
+	f.exec(t, `UPDATE node_explorer_work SET due_at=now()+interval '4 hours',attempts=1,error=$3 WHERE kind=$1 AND key=$2`, KindFast, f.id, configRejectedMessage())
+	work[0].Due = time.Now().Add(-time.Minute)
+	apply()
+	read()
+	if attempts != 1 || message != configRejectedMessage() || generation != 2 || !actualDue.After(time.Now().Add(3*time.Hour)) {
+		t.Fatalf("current parser rejection lost its backoff: attempts=%d error=%q generation=%d due=%s", attempts, message, generation, actualDue)
+	}
+}
+
 func TestBatchScheduleDeduplicatesSharedRiskAndKeepsPriority(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
