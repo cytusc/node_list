@@ -11,21 +11,9 @@ use support\Log;
 use Throwable;
 
 /**
- * 服务看板与采集器状态。
- *
- * 对应 Go 的 service.Repository.statuses()（Status/Statuses 已随接口层删除）：
- *
- *   GET /api/services                 → 7 个服务（10s 缓存，读失败 503）
- *   GET /api/results.ippureCollector  → 只看 ip-service（5s 缓存，读失败降级）
- *
- * api 自己的心跳由 Heartbeat 在 statuses() 入口惰性写入。
- *
- * 数据获取按「构造器取数、PHP 组装」分层，三条单表查询代替一条聚合 SQL：
- *   1. node_explorer_work 按 kind 聚合（FILTER 是 PG 特有，走 Db::raw）；
- *   2. node_explorer_service_status 按服务取心跳（healthy/错误文案在库端算，
- *      避免 PHP 与 DB 时钟漂移影响 90s 窗口判定）；
- *   3. node_explorer_lifecycle_events 的 restore 计数（仅 node-lifecycle 需要时查）。
- * 单表按主键读 sourceWarning 这种更简单的场景交给 Eloquent（见 sourceWarning）。
+ * Service snapshots: durable work, heartbeats, immutable assessment statistics,
+ * and residential retry cooldowns. Cache the observation time with the data so
+ * polling a cached response cannot make an old snapshot appear fresh.
  */
 final class ServiceBoard
 {
@@ -65,22 +53,23 @@ final class ServiceBoard
         'queued' => 0, 'scheduled' => 0, 'running' => 0,
         'checked' => 0, 'skipped' => 0, 'oldestWaitSeconds' => 0.0,
         'activeAssessments' => 0, 'checkedLastHour' => 0,
+        'blocked' => 0, 'expired' => 0, 'cooldown' => 0,
     ];
 
     /**
-     * @return array{services: list<array<string, mixed>>}
+     * @return array{services: list<array<string, mixed>>, observedAt: string}
      * @throws ApiError 503
      */
     public function services(): array
     {
         try {
-            $services = $this->cache->remember(
-                'node-list:services',
+            $snapshot = $this->cache->remember(
+                'node-list:services:v2',
                 (int)config('api.cache.services_seconds', 10),
-                fn (): array => array_map(
-                    self::present(...),
-                    $this->statuses(self::BOARD_SERVICES)
-                )
+                fn (): array => [
+                    'services' => array_map(self::present(...), $this->statuses(self::BOARD_SERVICES)),
+                    'observedAt' => self::goTime((string)Db::selectOne('SELECT now() AS stamp')->stamp),
+                ]
             );
         } catch (ApiError $e) {
             throw $e;
@@ -88,7 +77,7 @@ final class ServiceBoard
             Log::error('service board query failed: ' . $e->getMessage());
             throw ApiError::readFailed();
         }
-        return ['services' => $services];
+        return $snapshot;
     }
 
     /**
@@ -107,7 +96,8 @@ final class ServiceBoard
         $out = [];
         foreach (['service', 'updatedAt', 'healthy', 'error', 'queued', 'scheduled',
                   'running', 'oldestWaitSeconds', 'restored', 'checked', 'skipped',
-                  'activeAssessments', 'checkedLastHour', 'drainEtaSeconds'] as $key) {
+                  'activeAssessments', 'checkedLastHour', 'drainEtaSeconds',
+                  'blocked', 'expired', 'cooldown', 'restoredNodes'] as $key) {
             if ($key === 'error' && ($status[$key] ?? '') === '') {
                 continue; // Go: json:"error,omitempty"
             }
@@ -213,7 +203,9 @@ final class ServiceBoard
 
         $stats = $this->workStats();
         $hearts = $this->heartbeats($services);
-        $restored = in_array('node-lifecycle', $services, true) ? $this->restoredCount() : 0;
+        $restored = in_array('node-lifecycle', $services, true) ? $this->restoredCounts() : ['events' => 0, 'nodes' => 0];
+        $assessments = $this->assessmentStats();
+        $cooldown = in_array('residential-recovery', $services, true) ? $this->cooldownStats() : null;
 
         // kind 统计按 KIND_SERVICES 归并到服务（ip-service 三个 kind 相加）。
         $byService = [];
@@ -225,7 +217,7 @@ final class ServiceBoard
             if (!isset($byService[$svc])) {
                 $byService[$svc] = self::EMPTY_STATS;
             }
-            foreach (['queued', 'scheduled', 'running', 'checked', 'skipped', 'activeAssessments', 'checkedLastHour'] as $k) {
+            foreach (['queued', 'scheduled', 'running', 'checked', 'skipped', 'activeAssessments', 'checkedLastHour', 'blocked', 'expired', 'cooldown'] as $k) {
                 $byService[$svc][$k] += $s[$k];
             }
             // oldest_wait 各 kind 基于 DB 同一 now() 计算，取最大即最旧。
@@ -237,6 +229,21 @@ final class ServiceBoard
         sort($ordered);
         foreach ($ordered as $svc) {
             $w = $byService[$svc] ?? self::EMPTY_STATS;
+            if ($svc === 'residential-recovery' && $cooldown !== null) {
+                $w['scheduled'] += (int)$cooldown->scheduled;
+                $w['queued'] += (int)$cooldown->queued;
+                $w['cooldown'] = (int)$cooldown->scheduled;
+                $w['blocked'] += (int)$cooldown->blocked;
+                $w['oldestWaitSeconds'] = max($w['oldestWaitSeconds'], (float)$cooldown->oldest_wait);
+            }
+            $kind = match ($svc) {
+                'residential-recovery' => 'recovery',
+                'normal-recovery' => 'normal-recovery',
+                default => null,
+            };
+            if ($kind !== null) {
+                $w = array_replace($w, $assessments[$kind] ?? []);
+            }
             $h = $hearts[$svc] ?? ['updated_at' => '0001-01-01 00:00:00+00', 'healthy' => false, 'error' => '服务尚未启动'];
             $out[] = array_merge($h['metrics'] ?? [], [
                 'service' => $svc,
@@ -248,7 +255,11 @@ final class ServiceBoard
                 'scheduled' => (int)$w['scheduled'],
                 'running' => (int)$w['running'],
                 'oldestWaitSeconds' => (float)$w['oldestWaitSeconds'],
-                'restored' => $svc === 'node-lifecycle' ? $restored : 0,
+                'restored' => $svc === 'node-lifecycle' ? $restored['events'] : 0,
+                'restoredNodes' => $svc === 'node-lifecycle' ? $restored['nodes'] : 0,
+                'blocked' => (int)$w['blocked'],
+                'expired' => (int)$w['expired'],
+                'cooldown' => (int)$w['cooldown'],
                 'checked' => (int)$w['checked'],
                 'skipped' => (int)$w['skipped'],
                 'activeAssessments' => (int)$w['activeAssessments'],
@@ -265,8 +276,8 @@ final class ServiceBoard
     /**
      * work 队列按 kind 聚合的统计。
      *
-     * 核验累计数包含已重新排期的结果；最近一小时按核验历史统计，
-     * 不把协调器轮询次数算作核验。活跃核验包含等待前置探测的会话。
+     * 仅统计当前任务；核验结果由 assessmentStats() 独立统计。
+     * 活跃核验包含等待前置探测的会话，执行中仅含有效租约。
      *
      * @return array<string, array{queued:int,scheduled:int,running:int,checked:int,skipped:int,oldestWaitSeconds:float}>
      */
@@ -277,16 +288,10 @@ final class ServiceBoard
                 'kind',
                 Db::raw("count(*) FILTER (WHERE state='queued' AND due_at<=now()) AS queued"),
                 Db::raw("count(*) FILTER (WHERE state='queued' AND due_at>now()) AS scheduled"),
-                Db::raw("count(*) FILTER (WHERE state='running') AS running"),
-                Db::raw("coalesce(sum(greatest(coalesce((payload->>'recoveryAttempts')::integer,0),1)) FILTER (WHERE kind IN ('recovery','normal-recovery') AND payload->>'recoveryResult' IN ('eligible','not-residential','probe-failed','exit-probe-failed','classification-unconfirmed','exit-changed','timed-out')),0) AS checked"),
+                Db::raw("count(*) FILTER (WHERE state='running' AND lease_until>now()) AS running"),
                 Db::raw("count(*) FILTER (WHERE kind IN ('recovery','normal-recovery') AND state<>'done' AND coalesce(payload->>'startedAt','')<>'' AND payload->>'startedAt' NOT LIKE '0001-%') AS active_assessments"),
-                Db::raw("coalesce(sum(CASE WHEN kind IN ('recovery','normal-recovery') THEN
-                    (SELECT count(*) FROM jsonb_array_elements(coalesce(payload->'recoveryHistory',
-                        jsonb_build_array(jsonb_build_object('checkedAt',payload->>'checkedAt','result',payload->>'recoveryResult')))) h
-                     WHERE nullif(h->>'checkedAt','')::timestamptz>now()-interval '1 hour'
-                     AND h->>'result' IN ('eligible','not-residential','probe-failed','exit-probe-failed','classification-unconfirmed','exit-changed','timed-out'))
-                    ELSE 0 END),0) AS checked_hour"),
-                Db::raw("count(*) FILTER (WHERE state='done' AND payload->>'recoveryResult'='skipped-datacenter-asn') AS skipped"),
+                Db::raw("count(*) FILTER (WHERE state<>'done' AND (error LIKE 'node_config_rejected:%' OR payload->>'recoveryResult'='config-rejected')) AS blocked"),
+                Db::raw("count(*) FILTER (WHERE state='running' AND (lease_until IS NULL OR lease_until<=now())) AS expired"),
                 Db::raw("coalesce(greatest(0,extract(epoch FROM now()-min(due_at) FILTER (WHERE state='queued' AND due_at<=now())))::double precision,0) AS oldest_wait"),
             ])
             ->where(function ($q): void {
@@ -301,10 +306,13 @@ final class ServiceBoard
                 'queued' => (int)$row->queued,
                 'scheduled' => (int)$row->scheduled,
                 'running' => (int)$row->running,
-                'checked' => (int)$row->checked,
+                'checked' => 0,
                 'activeAssessments' => (int)$row->active_assessments,
-                'checkedLastHour' => (int)$row->checked_hour,
-                'skipped' => (int)$row->skipped,
+                'checkedLastHour' => 0,
+                'skipped' => 0,
+                'blocked' => (int)$row->blocked,
+                'expired' => (int)$row->expired,
+                'cooldown' => 0,
                 'oldestWaitSeconds' => (float)$row->oldest_wait,
             ];
         }
@@ -347,13 +355,55 @@ final class ServiceBoard
         return $out;
     }
 
-    /** lifecycle restore 计数（对应旧 SQL 里 node-lifecycle 行的子查询）。 */
-    private function restoredCount(): int
+    /** Immutable observed outcomes, independent of a task's current state/result. */
+    private function assessmentStats(): array
     {
-        return (int)Db::table('node_explorer_lifecycle_events')
-            ->where('action', 'restore')
-            ->where('dry_run', false)
-            ->count();
+        $rows = Db::select("SELECT t.kind,
+            coalesce(sum(t.completed) FILTER (WHERE t.result<>'skipped-datacenter-asn'),0) AS checked,
+            coalesce(sum(t.completed) FILTER (WHERE t.result='skipped-datacenter-asn'),0) AS skipped,
+            (SELECT count(*) FROM node_explorer_recovery_events e WHERE e.kind=t.kind
+                AND e.result<>'skipped-datacenter-asn'
+                AND e.checked_at>now()-interval '1 hour' AND e.checked_at<=now()) AS checked_hour
+            FROM node_explorer_recovery_totals t GROUP BY t.kind");
+        $out = [];
+        foreach ($rows as $row) {
+            $out[$row->kind] = ['checked' => (int)$row->checked, 'checkedLastHour' => (int)$row->checked_hour, 'skipped' => (int)$row->skipped];
+        }
+        return $out;
+    }
+
+    /** Residential retries remain done during backoff; include them in waiting. */
+    private function cooldownStats(): object
+    {
+        return Db::selectOne("WITH cooling AS (
+            SELECT nullif(w.payload->>'checkedAt','')::timestamptz + CASE
+                WHEN w.payload->>'recoveryResult'='config-rejected' THEN interval '6 hours'
+                WHEN coalesce((w.payload->>'recoveryAttempts')::integer,0)<=1 THEN interval '5 minutes'
+                WHEN (w.payload->>'recoveryAttempts')::integer=2 THEN interval '15 minutes'
+                WHEN (w.payload->>'recoveryAttempts')::integer=3 THEN interval '1 hour'
+                ELSE interval '6 hours' END AS next_at, w.payload->>'recoveryResult' AS result
+            FROM node_explorer_work w
+            JOIN node_explorer_node_registry n ON n.identity=w.payload->>'identity'
+            JOIN node_explorer_retired_nodes t ON t.identity=n.identity
+            WHERE w.kind='recovery' AND w.state='done' AND n.available AND n.historical_residential
+              AND w.key=n.identity||':'||t.retired_at
+              AND w.payload->>'retiredAt'=t.retired_at AND w.payload->>'reason'=t.reason
+              AND (t.reason=? OR t.reason LIKE 'IPPure:%')
+              AND w.payload->>'recoveryResult' IN ('probe-failed','exit-probe-failed','exit-changed','timed-out','classification-unconfirmed','config-rejected')
+              AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
+        ) SELECT count(*) FILTER (WHERE next_at>now()) AS scheduled,
+            count(*) FILTER (WHERE next_at<=now()) AS queued,
+            count(*) FILTER (WHERE result='config-rejected') AS blocked,
+            coalesce(greatest(0,extract(epoch FROM now()-min(next_at) FILTER (WHERE next_at<=now()))),0) AS oldest_wait
+            FROM cooling", ['Scheduled GitHub patrol: two failed proxy attempts; direct and proxy controls passed']);
+    }
+
+    private function restoredCounts(): array
+    {
+        $row = Db::table('node_explorer_lifecycle_events')
+            ->where('action', 'restore')->where('dry_run', false)
+            ->selectRaw('count(*) AS events, count(DISTINCT identity) AS nodes')->first();
+        return ['events' => (int)$row->events, 'nodes' => (int)$row->nodes];
     }
 
     /**

@@ -212,6 +212,16 @@ func recordRecoveryResult(ctx context.Context, tx pgx.Tx, j Job, result, ip stri
 	if err != nil {
 		return err
 	}
+	// Persist the outcome in the same fenced transaction as completion. Counts
+	// must survive requeue, a different next result, and physical node deletion.
+	if _, err = tx.Exec(ctx, `WITH recorded AS (
+	 INSERT INTO node_explorer_recovery_events(work_id,checked_at,kind,result)
+	 VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING kind,result
+	) INSERT INTO node_explorer_recovery_totals(kind,result,completed)
+	 SELECT kind,result,1 FROM recorded
+	 ON CONFLICT(kind,result) DO UPDATE SET completed=node_explorer_recovery_totals.completed+1`, j.ID, stamp, j.Kind, result); err != nil {
+		return err
+	}
 	_, err = tx.Exec(ctx, `UPDATE node_explorer_work SET payload=(payload-'startedAt') ||
 	 jsonb_build_object('recoveryResult',$2::text,'checkedAt',$3::text,'ip',$4::text,
 	 'recoveryAttempts',$5::integer,'recoveryHistory',$6::jsonb) WHERE id=$1`,

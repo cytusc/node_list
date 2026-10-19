@@ -9,6 +9,7 @@ test("shows missing services and refreshes observations without closing details"
   await page.route("**/api/services", (route) =>
     route.fulfill({
       json: {
+        observedAt: new Date().toISOString(),
         services: [
           {
             service: "connectivity",

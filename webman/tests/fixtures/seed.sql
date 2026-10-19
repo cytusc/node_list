@@ -3,7 +3,7 @@
 -- 时间占位 __NOW2M__ 由 tests/fixtures/load.sh 在导入前替换成真实时间戳
 -- （优选位判定要求连通性/出口证据在 10 分钟内，固定时间会随时间失效）。
 BEGIN;
-TRUNCATE node_explorer_snapshots, node_explorer_retired_nodes, node_explorer_ippure_results, node_explorer_node_registry, node_explorer_connectivity, node_explorer_exits, node_explorer_ip_attributes, node_explorer_work, node_explorer_service_status, node_explorer_lifecycle_events RESTART IDENTITY CASCADE;
+TRUNCATE node_explorer_snapshots, node_explorer_retired_nodes, node_explorer_ippure_results, node_explorer_node_registry, node_explorer_connectivity, node_explorer_exits, node_explorer_ip_attributes, node_explorer_work, node_explorer_recovery_events, node_explorer_recovery_totals, node_explorer_service_status, node_explorer_lifecycle_events RESTART IDENTITY CASCADE;
 INSERT INTO node_explorer_snapshots (id,fingerprint,checked_at,imported_at,node_count,payload) VALUES (1,'fixture-1','2026-10-17T23:00:00Z','2026-10-17T23:00:00Z',0,'{}');
 INSERT INTO node_explorer_snapshots (id,fingerprint,checked_at,imported_at,node_count,payload) VALUES (2,'fixture-2','2026-10-18T00:00:00Z','2026-10-18T00:00:00Z',0,'{}');
 SELECT setval('node_explorer_snapshots_id_seq', 2, true);

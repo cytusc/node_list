@@ -105,6 +105,9 @@ func (r *Repository) pruneSources(ctx context.Context, days int) error {
 
 // Recovery rows are durable verification markers, not expiring probe sessions.
 func (r *Repository) pruneCompletedWork(ctx context.Context) error {
+	if _, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_recovery_events WHERE checked_at<now()-interval '2 hours'`); err != nil {
+		return err
+	}
 	_, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_work WHERE state='done' AND kind NOT IN ('recovery','normal-recovery') AND due_at<now()-interval '2 days'`)
 	return err
 }

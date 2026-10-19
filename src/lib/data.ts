@@ -43,10 +43,23 @@ export type IPPureResult = {
   score?: number;
   label?: string;
 };
-type FastCount = { completed: number; success: number; failed: number; abnormal: number };
+type FastCount = {
+  completed: number;
+  success: number;
+  failed: number;
+  abnormal: number;
+};
 export type ServiceStatus = {
   fast?: { minute: FastCount; hour: FastCount };
-  kernel?: { healthy: boolean; loaded: number; quarantined: number; generation: string; reloads: number; reloadMillis: number; fastRunning: number };
+  kernel?: {
+    healthy: boolean;
+    loaded: number;
+    quarantined: number;
+    generation: string;
+    reloads: number;
+    reloadMillis: number;
+    fastRunning: number;
+  };
   service: string;
   updatedAt: string;
   healthy: boolean;
@@ -61,6 +74,10 @@ export type ServiceStatus = {
   restored: number;
   checked?: number;
   skipped?: number;
+  blocked?: number;
+  expired?: number;
+  cooldown?: number;
+  restoredNodes?: number;
 };
 export type NodeRecord = {
   connectivity?: { checkedAt: string; reachable: boolean; error?: string };

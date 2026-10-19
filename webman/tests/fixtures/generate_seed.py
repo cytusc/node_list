@@ -106,7 +106,7 @@ out.append(
     "TRUNCATE node_explorer_snapshots, node_explorer_retired_nodes, "
     "node_explorer_ippure_results, node_explorer_node_registry, "
     "node_explorer_connectivity, node_explorer_exits, node_explorer_ip_attributes, "
-    "node_explorer_work, node_explorer_service_status, node_explorer_lifecycle_events "
+    "node_explorer_work, node_explorer_recovery_events, node_explorer_recovery_totals, node_explorer_service_status, node_explorer_lifecycle_events "
     "RESTART IDENTITY CASCADE;")
 
 for sid, fp, ca in [(1, "fixture-1", "2026-10-17T23:00:00Z"),

@@ -96,3 +96,40 @@ CREATE INDEX IF NOT EXISTS node_explorer_work_capacity_session ON node_explorer_
 -- Admission counts include queued coordinators but only the bounded in-flight set.
 CREATE INDEX IF NOT EXISTS node_explorer_work_admitted ON node_explorer_work (kind,priority)
  WHERE state<>'done' AND payload ? 'startedAt' AND payload->>'startedAt' NOT LIKE '0001-%';
+
+-- Assessment outcomes outlive the mutable delivery ledger and its 16-item history.
+-- No FK: deleting a node or its work must not erase throughput statistics.
+CREATE TABLE IF NOT EXISTS node_explorer_recovery_events (
+  work_id bigint NOT NULL, checked_at timestamptz NOT NULL,
+  kind text NOT NULL, result text NOT NULL,
+  PRIMARY KEY (work_id,checked_at)
+);
+CREATE INDEX IF NOT EXISTS node_explorer_recovery_events_time
+  ON node_explorer_recovery_events (checked_at,kind);
+CREATE TABLE IF NOT EXISTS node_explorer_recovery_totals (
+  kind text NOT NULL, result text NOT NULL, completed bigint NOT NULL,
+  PRIMARY KEY (kind,result)
+);
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM node_explorer_service_migrations WHERE version=7) THEN
+    -- Import only observed outcomes. Older truncated history cannot be invented.
+    INSERT INTO node_explorer_recovery_events(work_id,checked_at,kind,result)
+    SELECT w.id,(h->>'checkedAt')::timestamptz,w.kind,h->>'result'
+    FROM node_explorer_work w
+    CROSS JOIN LATERAL jsonb_array_elements(CASE
+      WHEN jsonb_array_length(coalesce(w.payload->'recoveryHistory','[]'))>0
+      THEN w.payload->'recoveryHistory'
+      ELSE jsonb_build_array(jsonb_build_object('checkedAt',w.payload->>'checkedAt','result',w.payload->>'recoveryResult'))
+    END) h
+    WHERE w.kind IN ('recovery','normal-recovery')
+      AND coalesce(h->>'checkedAt','')<>'' AND h->>'checkedAt' NOT LIKE '0001-%'
+      AND coalesce(h->>'result','')<>''
+      AND h->>'result'<>'cancelled-historical-backlog'
+    ON CONFLICT DO NOTHING;
+    INSERT INTO node_explorer_recovery_totals(kind,result,completed)
+    SELECT kind,result,count(*) FROM node_explorer_recovery_events GROUP BY kind,result
+    ON CONFLICT(kind,result) DO UPDATE SET completed=EXCLUDED.completed;
+    DELETE FROM node_explorer_recovery_events WHERE checked_at<now()-interval '2 hours';
+  END IF;
+END $$;
