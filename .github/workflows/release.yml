@@ -168,13 +168,23 @@ jobs:
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
+          mkdir -p /tmp/mihomo-manager-smoke
+          printf 'mixed-port: 17890\nallow-lan: true\nbind-address: "127.0.0.1"\nmode: rule\nexternal-controller: 127.0.0.1:19090\nsecret: "smoke-controller-secret"\nauthentication: ["disabled:disabled"]\nrules: ["MATCH,REJECT"]\n' > /tmp/mihomo-manager-smoke.yaml
+          /tmp/mihomo -d /tmp/mihomo-manager-smoke -f /tmp/mihomo-manager-smoke.yaml >/tmp/mihomo-manager-smoke.log 2>&1 &
+          mihomo_pid=$!
+          trap 'docker logs mihomo-manager-smoke 2>/dev/null || true; docker rm -f mihomo-manager-smoke >/dev/null 2>&1 || true; kill "$mihomo_pid" 2>/dev/null || true; wait "$mihomo_pid" 2>/dev/null || true; cat /tmp/mihomo-manager-smoke.log' EXIT
           docker run -d --read-only --tmpfs /tmp --network host \
             -e PGHOST=127.0.0.1 -e PGPORT=5432 -e PGDATABASE=node_explorer_test \
             -e PGUSER=postgres -e PGPASSWORD=test_password -e REDIS_URL=redis://127.0.0.1:6379/0 \
             -e MIHOMO_MANAGER_TOKEN=smoke-manager-token -e MIHOMO_CONTROLLER_SECRET=smoke-controller-secret \
-            -e MIHOMO_CONTROLLER=http://127.0.0.1:9 -e MIHOMO_MANAGER_LISTEN=127.0.0.1:9080 \
+            -e MIHOMO_CONTROLLER=http://127.0.0.1:19090 -e MIHOMO_PROXY_URL=http://127.0.0.1:17890 \
+            -e MIHOMO_MANAGER_LISTEN=127.0.0.1:9080 \
             --name mihomo-manager-smoke "$IMAGE_NAME@$IMAGE_DIGEST" node-worker -role mihomo-manager
-          trap 'docker logs mihomo-manager-smoke; docker rm -f mihomo-manager-smoke' EXIT
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:19090/version >/dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail http://127.0.0.1:19090/version
           for attempt in $(seq 1 30); do
             if docker exec mihomo-manager-smoke node-worker -role mihomo-manager -health; then break; fi
             sleep 1
