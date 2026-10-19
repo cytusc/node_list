@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -108,5 +109,56 @@ func TestFailedOrRacingPublicationDoesNotMarkNewWorkDelivered(t *testing.T) {
 				t.Fatal("work was not immediately republished")
 			}
 		})
+	}
+}
+
+func TestNormalPublicationReservesRunningSlotsAndPrioritizesWaiting(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.repo.NormalRecoveryConcurrency = 2
+	for i := 0; i < 6; i++ {
+		if err := f.repo.Schedule(ctx, KindNormalRecovery, fmt.Sprint(i), Payload{Identity: f.id}, 0, time.Now().Add(-time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := &publicationQueue{}
+	if err := f.repo.Publish(ctx, q, []string{KindNormalRecovery}); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.waves) != 1 || len(q.waves[0]) != 2 {
+		t.Fatalf("wrong initial wave: %+v", q.waves)
+	}
+	first, err := f.repo.Claim(ctx, KindNormalRecovery, q.waves[0][0].Ref, false)
+	if err != nil || first == nil {
+		t.Fatal("first claim", err)
+	}
+	second, err := f.repo.Claim(ctx, KindNormalRecovery, q.waves[0][1].Ref, false)
+	if err != nil || second == nil {
+		t.Fatal("second claim", err)
+	}
+	// Full running lanes must not pop and discard the next unstarted task.
+	if err = f.repo.Publish(ctx, q, []string{KindNormalRecovery}); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.waves) != 1 {
+		t.Fatal("published above full running admission")
+	}
+	if err = f.repo.Retry(ctx, *first, 0, "dependency"); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.repo.Publish(ctx, q, []string{KindNormalRecovery}); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.waves) != 2 || len(q.waves[1]) != 1 || q.waves[1][0].Ref != first.Ref() {
+		t.Fatal("waiting assessment lost its slot")
+	}
+	if err = f.repo.Finish(ctx, *second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.repo.Publish(ctx, q, []string{KindNormalRecovery}); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.waves) != 3 || len(q.waves[2]) != 1 {
+		t.Fatal("new task not immediately published after completion")
 	}
 }

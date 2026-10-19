@@ -227,55 +227,142 @@ func TestNormalRecoveryRetriesWithFreshProofsAndNoFastPromotion(t *testing.T) {
 }
 
 func TestNormalAdmissionIsIndependentAndBoundedAcrossReplicas(t *testing.T) {
-	f := setup(t)
-	ctx := context.Background()
-	p := f.retirement(t)
-	var refs []string
-	for i := 0; i < 8; i++ {
-		if err := f.repo.Schedule(ctx, KindNormalRecovery, fmt.Sprint(i), p, 0, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	rows, err := f.repo.Pool.Query(ctx, `SELECT id::text||':'||generation::text FROM node_explorer_work`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows.Next() {
-		var ref string
-		if err = rows.Scan(&ref); err != nil {
-			t.Fatal(err)
-		}
-		refs = append(refs, ref)
-	}
-	rows.Close()
-	var wg sync.WaitGroup
-	claims := make(chan *Job, len(refs))
-	for _, ref := range refs {
-		wg.Add(1)
-		go func(ref string) {
-			defer wg.Done()
-			j, e := f.repo.Claim(ctx, KindNormalRecovery, ref, false)
-			if e != nil {
-				t.Error(e)
+	for _, limit := range []int{1, 2, 4} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			f := setup(t)
+			ctx := context.Background()
+			f.repo.NormalRecoveryConcurrency = limit
+			replica := &Repository{Pool: f.repo.Pool, NormalRecoveryConcurrency: limit}
+			p := f.retirement(t)
+			var refs []string
+			for i := 0; i < 8; i++ {
+				if err := f.repo.Schedule(ctx, KindNormalRecovery, fmt.Sprint(i), p, 0, time.Now()); err != nil {
+					t.Fatal(err)
+				}
 			}
-			claims <- j
-		}(ref)
+			rows, err := f.repo.Pool.Query(ctx, `SELECT id::text||':'||generation::text FROM node_explorer_work ORDER BY id`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for rows.Next() {
+				var ref string
+				if err = rows.Scan(&ref); err != nil {
+					t.Fatal(err)
+				}
+				refs = append(refs, ref)
+			}
+			rows.Close()
+			var wg sync.WaitGroup
+			claims := make(chan *Job, len(refs))
+			for i, ref := range refs {
+				wg.Add(1)
+				go func(i int, ref string) {
+					defer wg.Done()
+					repo := f.repo
+					if i%2 == 0 {
+						repo = replica
+					}
+					j, e := repo.Claim(ctx, KindNormalRecovery, ref, false)
+					if e != nil {
+						t.Error(e)
+					}
+					claims <- j
+				}(i, ref)
+			}
+			wg.Wait()
+			close(claims)
+			var admitted []*Job
+			for j := range claims {
+				if j != nil {
+					admitted = append(admitted, j)
+				}
+			}
+			if len(admitted) != limit {
+				t.Fatalf("admitted %d want %d", len(admitted), limit)
+			}
+			// Waiting for dependencies still owns a full-assessment slot.
+			if err = f.repo.Retry(ctx, *admitted[0], 0, "dependency"); err != nil {
+				t.Fatal(err)
+			}
+			var extra string
+			if err = f.repo.Pool.QueryRow(ctx, `SELECT id::text||':'||generation::text FROM node_explorer_work WHERE NOT(payload ? 'startedAt') ORDER BY id LIMIT 1`).Scan(&extra); err != nil {
+				t.Fatal(err)
+			}
+			if j, e := replica.Claim(ctx, KindNormalRecovery, extra, false); e != nil || j != nil {
+				t.Fatalf("exceeded waiting admission: %v %v", j, e)
+			}
+			resumed, e := replica.Claim(ctx, KindNormalRecovery, admitted[0].Ref(), false)
+			if e != nil || resumed == nil {
+				t.Fatalf("cannot resume full lane: %v", e)
+			}
+			if e = replica.Finish(ctx, *resumed, nil); e != nil {
+				t.Fatal(e)
+			}
+			if j, e := replica.Claim(ctx, KindNormalRecovery, extra, false); e != nil || j == nil {
+				t.Fatalf("slot not released: %v", e)
+			}
+			if err = f.repo.Schedule(ctx, KindRecovery, "fast", p, 1, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if f.claim(t, KindRecovery).Payload.StartedAt.IsZero() {
+				t.Fatal("normal blocked fast")
+			}
+		})
 	}
-	wg.Wait()
-	close(claims)
-	count := 0
-	for j := range claims {
-		if j != nil {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("admitted %d normal assessments", count)
-	}
-	if err = f.repo.Schedule(ctx, KindRecovery, "fast", p, 1, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if f.claim(t, KindRecovery).Payload.StartedAt.IsZero() {
-		t.Fatal("normal blocked fast")
+}
+
+func TestNormalRecoveryGatesExitOnFreshSuccessfulConnectivity(t *testing.T) {
+	for _, scenario := range []string{"pending", "unreachable", "stale", "error", "success"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := setup(t)
+			ctx := context.Background()
+			j := queueNormal(t, f)
+			session := "recovery:" + j.Ref()
+			if err := f.runner.recovery(ctx, j); !isWaiting(err) {
+				t.Fatalf("initial: %v", err)
+			}
+			var exits int
+			if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE kind='exit'`).Scan(&exits); err != nil || exits != 0 {
+				t.Fatalf("eager exit: %d %v", exits, err)
+			}
+			if scenario == "pending" {
+				return
+			}
+			f.evidence(t, session)
+			f.exec(t, `DELETE FROM node_explorer_probe_results WHERE kind='exit'`)
+			switch scenario {
+			case "unreachable":
+				f.exec(t, `UPDATE node_explorer_probe_results SET payload=jsonb_set(payload,'{reachable}','false')`)
+			case "stale":
+				f.exec(t, `UPDATE node_explorer_probe_results SET payload=jsonb_set(payload,'{checkedAt}','"2000-01-01T00:00:00Z"')`)
+			case "error":
+				f.exec(t, `UPDATE node_explorer_probe_results SET payload=payload || '{"error":"inconclusive"}'`)
+			}
+			err := f.runner.recovery(ctx, j)
+			if scenario != "success" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				var result string
+				if err = f.repo.Pool.QueryRow(ctx, `SELECT payload->>'recoveryResult' FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&result); err != nil || result != "probe-failed" {
+					t.Fatalf("accepted failed connectivity: %s %v", result, err)
+				}
+				if err = f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE kind='exit'`).Scan(&exits); err != nil || exits != 0 {
+					t.Fatalf("failed node requested exit: %d %v", exits, err)
+				}
+				return
+			}
+			if !isWaiting(err) {
+				t.Fatalf("first exit not awaited: %v", err)
+			}
+			f.evidence(t, session)
+			if err = f.runner.recovery(ctx, j); !isWaiting(err) {
+				t.Fatalf("final exit not awaited: %v", err)
+			}
+			f.evidence(t, session+":verify")
+			if err = f.runner.recovery(ctx, j); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

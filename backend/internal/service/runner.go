@@ -59,6 +59,7 @@ func (r *Runner) laneCount(kind string, high bool) int {
 func (r *Runner) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	r.Repo.NormalRecoveryConcurrency = r.laneCount(KindNormalRecovery, false)
 	kinds := r.kinds()
 	if len(kinds) == 0 {
 		return fmt.Errorf("unknown worker role")

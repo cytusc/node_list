@@ -51,8 +51,15 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 		p.RecoveryMode = "normal"
 	}
 	p.Session = session
+	// Nonresidential failures are common: do not spend exit-pool capacity until
+	// this assessment's fresh connectivity proof has passed. Residential recovery
+	// keeps its existing parallel probes for low latency.
+	kinds := []string{KindLive, KindExit}
+	if normal {
+		kinds = []string{KindLive}
+	}
 	err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
-		for _, kind := range []string{KindLive, KindExit} {
+		for _, kind := range kinds {
 			if e := once(ctx, tx, kind, session, p, j.Priority); e != nil {
 				return e
 			}
@@ -67,6 +74,19 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	a, err := r.Repo.Probe(ctx, session, KindLive, &live)
 	if err != nil {
 		return err
+	}
+	if normal {
+		if !a {
+			return waiting{time.Second}
+		}
+		if !live.Reachable || live.Error != "" || !fresh(live.CheckedAt, 3*time.Minute) {
+			return finish("probe-failed", "")
+		}
+		if err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
+			return once(ctx, tx, KindExit, session, p, j.Priority)
+		}); err != nil {
+			return err
+		}
 	}
 	b, err := r.Repo.Probe(ctx, session, KindExit, &exit)
 	if err != nil {

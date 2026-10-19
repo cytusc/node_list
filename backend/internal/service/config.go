@@ -107,7 +107,7 @@ func laneConcurrency(role string) map[string]int {
 		name := strings.ToUpper(strings.ReplaceAll(kind, "-", "_"))
 		out[kind] = Number(prefix+"_"+name+"_CONCURRENCY", Number(name+"_CONCURRENCY", 1))
 	}
-	out[KindNormalRecovery] = 1
+	out[KindNormalRecovery] = Number("NORMAL_RECOVERY_CONCURRENCY", 2)
 	out[KindCleanup] = 1
 	return out
 }

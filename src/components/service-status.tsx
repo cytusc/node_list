@@ -79,8 +79,8 @@ export function ServiceStatusPanel({ services }: { services: Service[] }) {
                 </div>
                 <div>
                   <dt>执行中</dt>
-                  <dd data-active={service.running > 0}>
-                    {number.format(service.running)}
+                  <dd data-active={(service.activeAssessments || service.running) > 0}>
+                    {number.format(service.activeAssessments || service.running)}
                   </dd>
                 </div>
                 <div>
@@ -90,7 +90,7 @@ export function ServiceStatusPanel({ services }: { services: Service[] }) {
                   </dd>
                 </div>
               </dl>
-              {(service.restored > 0 || (service.scheduled ?? 0) > 0 || (service.checked ?? 0) > 0 || (service.skipped ?? 0) > 0 || service.error) && (
+              {((service.activeAssessments ?? 0) > 0 || (service.checkedLastHour ?? 0) > 0 || service.restored > 0 || (service.scheduled ?? 0) > 0 || (service.checked ?? 0) > 0 || (service.skipped ?? 0) > 0 || service.error) && (
                 <div className="service-status-note">
                   {service.restored > 0 && (
                     <span className="service-status-restored">
@@ -101,7 +101,15 @@ export function ServiceStatusPanel({ services }: { services: Service[] }) {
                     <span>定时等待 {number.format(service.scheduled ?? 0)}</span>
                   )}
                   {(service.checked ?? 0) > 0 && (
-                    <span>已完成核验 {number.format(service.checked ?? 0)}</span>
+                    <span>累计核验 {number.format(service.checked ?? 0)}</span>
+                  )}
+                  {(service.checkedLastHour ?? 0) > 0 && (
+                    <span>近 1 小时核验 {number.format(service.checkedLastHour ?? 0)}</span>
+                  )}
+                  {(service.drainEtaSeconds ?? 0) > 0 && (
+                    <span title="按近一小时吞吐估算，仅包含当前到期任务；新增和重试会影响实际时间">
+                      积压预计 {number.format(Math.ceil((service.drainEtaSeconds ?? 0) / 3600))} 小时
+                    </span>
                   )}
                   {(service.skipped ?? 0) > 0 && (
                     <span>机房 ASN 已跳过 {number.format(service.skipped ?? 0)}</span>

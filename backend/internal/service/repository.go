@@ -68,10 +68,20 @@ type Job struct {
 func (j Job) Ref() string { return fmt.Sprintf("%d:%d", j.ID, j.Generation) }
 
 type Repository struct {
-	Pool            *pgxpool.Pool
-	registryMu      sync.Mutex
-	registryVersion int64
-	registryReady   bool
+	Pool                      *pgxpool.Pool
+	NormalRecoveryConcurrency int
+	registryMu                sync.Mutex
+	registryVersion           int64
+	registryReady             bool
+}
+
+// Use the same bound for delivery and full-assessment admission. All replicas of
+// the normal recovery service must use the same setting.
+func (r *Repository) normalRecoveryLimit() int {
+	if r.NormalRecoveryConcurrency > 0 {
+		return r.NormalRecoveryConcurrency
+	}
+	return 2
 }
 
 // schedule is used inside the same transaction as the fact that creates work.
@@ -102,16 +112,23 @@ func (r *Repository) Schedule(ctx context.Context, kind, key string, p Payload, 
 }
 
 func (r *Repository) Publish(ctx context.Context, q taskqueue.Queue, kinds []string) error {
-	rows, err := r.Pool.Query(ctx, `SELECT id,generation,kind,priority,due_at FROM (
+	rows, err := r.Pool.Query(ctx, `WITH occupied AS (
+ SELECT kind,(priority>0) AS high,count(*) AS running FROM node_explorer_work
+ WHERE kind=ANY($1) AND kind IN ('normal-recovery','node-cleanup','recovery')
+ AND state='running' AND lease_until>=now() GROUP BY kind,(priority>0)
+)
+ SELECT pending.id,pending.generation,pending.kind,pending.priority,pending.due_at FROM (
 	SELECT id,generation,kind,priority,due_at,published_at,published_generation,published_due_at,published_priority,
 	row_number() OVER(PARTITION BY kind,(priority>0) ORDER BY CASE WHEN kind IN ('recovery','normal-recovery','node-cleanup') AND payload ? 'startedAt' THEN 0 ELSE 1 END,due_at,id) AS lane_position FROM node_explorer_work
 	WHERE kind=ANY($1) AND ((state='queued' AND due_at<=now()+interval '10 seconds')
 	OR (state='running' AND lease_until<now()))) pending
-	WHERE lane_position<=CASE WHEN kind IN ('normal-recovery','node-cleanup') THEN 1 WHEN kind='recovery' THEN 2 ELSE 1000 END
+ LEFT JOIN occupied ON occupied.kind=pending.kind AND occupied.high=(pending.priority>0)
+	WHERE lane_position<=CASE WHEN pending.kind='normal-recovery' THEN $2 WHEN pending.kind='node-cleanup' THEN 1 WHEN pending.kind='recovery' THEN 2 ELSE 1000 END
+ - coalesce(occupied.running,0)
 	AND (published_at IS NULL OR published_at<now()-interval '30 seconds'
 	 OR published_generation IS DISTINCT FROM generation OR published_due_at IS DISTINCT FROM due_at
 	 OR published_priority IS DISTINCT FROM priority)
-	ORDER BY priority DESC,due_at,id`, kinds)
+	ORDER BY pending.priority DESC,pending.due_at,pending.id`, kinds, r.normalRecoveryLimit())
 	if err != nil {
 		return err
 	}
@@ -234,8 +251,8 @@ func (r *Repository) Claim(ctx context.Context, kind, ref string, high bool) (*J
 	AND (priority>0)=$5 AND due_at<=now() AND (state='queued' OR (state='running' AND lease_until<now()))
  AND (kind NOT IN ('recovery','normal-recovery','node-cleanup') OR (payload ? 'startedAt' AND payload->>'startedAt' NOT LIKE '0001-%') OR
  (SELECT count(*) FROM node_explorer_work active WHERE active.kind=node_explorer_work.kind AND (active.priority>0)=$5
- AND active.state<>'done' AND active.payload ? 'startedAt' AND active.payload->>'startedAt' NOT LIKE '0001-%')<CASE WHEN kind IN ('normal-recovery','node-cleanup') THEN 1 ELSE 2 END)
-	RETURNING key,payload,priority,attempts,due_at`, id, generation, kind, j.Token, high).Scan(&j.Key, &raw, &j.Priority, &j.Attempts, &j.Due)
+ AND active.state<>'done' AND active.payload ? 'startedAt' AND active.payload->>'startedAt' NOT LIKE '0001-%')<CASE WHEN kind='normal-recovery' THEN $6 WHEN kind='node-cleanup' THEN 1 ELSE 2 END)
+	RETURNING key,payload,priority,attempts,due_at`, id, generation, kind, j.Token, high, r.normalRecoveryLimit()).Scan(&j.Key, &raw, &j.Priority, &j.Attempts, &j.Due)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

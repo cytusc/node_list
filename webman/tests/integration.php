@@ -282,7 +282,8 @@ same('api', $services[0]['service'], '按服务名排序');
 $ingest = array_column($services, null, 'service')['source-ingest'];
 same(
     ['service', 'updatedAt', 'healthy', 'error', 'queued', 'scheduled', 'running',
-     'oldestWaitSeconds', 'restored', 'checked', 'skipped'],
+     'oldestWaitSeconds', 'restored', 'checked', 'skipped',
+     'activeAssessments', 'checkedLastHour', 'drainEtaSeconds'],
     array_keys($ingest),
     '服务状态字段与 Go 的 Status 结构一致'
 );
@@ -311,6 +312,21 @@ $split = array_column($board->statuses(['normal-recovery', 'residential-recovery
 same(1, $split['normal-recovery']['scheduled'], '非住宅恢复独立统计定时等待');
 same(1, $split['normal-recovery']['checked'], '非住宅恢复独立统计完成结果');
 same(2, $split['residential-recovery']['checked'], '住宅核验包含出口失败和分类未确认');
+// A finished assessment remains counted after requeue, polling does not count.
+Db::statement("INSERT INTO node_explorer_work(kind,key,state,due_at,attempts,payload) VALUES
+ ('normal-recovery','board-low-requeued','queued',now()+interval '6 hours',99,
+ jsonb_build_object('recoveryResult','probe-failed','recoveryAttempts',3,'checkedAt',now(),
+ 'recoveryHistory',jsonb_build_array(
+ jsonb_build_object('result','probe-failed','checkedAt',now()-interval '20 minutes'),
+ jsonb_build_object('result','probe-failed','checkedAt',now()-interval '10 minutes'),
+ jsonb_build_object('result','probe-failed','checkedAt',now())))),
+ ('normal-recovery','board-low-active','queued',now()-interval '10 seconds',20,
+ jsonb_build_object('startedAt',now()))");
+$metrics = $board->statuses(['normal-recovery'])[0];
+same(4, $metrics['checked'], '累计核验包含已重新排期的三轮结果');
+same(3, $metrics['checkedLastHour'], '滚动吞吐按历史次数计算，忽略轮询次数');
+same(1, $metrics['activeAssessments'], '等待依赖的会话仍计入核验中');
+same(1200, $metrics['drainEtaSeconds'], '预计排空时间只计算到期任务');
 Db::statement("DELETE FROM node_explorer_work WHERE key LIKE 'board-%'");
 
 // 心跳过期 → 明确文案，且不再健康。先灌一行再改旧：source-ingest 没有

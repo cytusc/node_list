@@ -63,6 +63,7 @@ final class ServiceBoard
     private const EMPTY_STATS = [
         'queued' => 0, 'scheduled' => 0, 'running' => 0,
         'checked' => 0, 'skipped' => 0, 'oldestWaitSeconds' => 0.0,
+        'activeAssessments' => 0, 'checkedLastHour' => 0,
     ];
 
     /**
@@ -104,7 +105,8 @@ final class ServiceBoard
     {
         $out = [];
         foreach (['service', 'updatedAt', 'healthy', 'error', 'queued', 'scheduled',
-                  'running', 'oldestWaitSeconds', 'restored', 'checked', 'skipped'] as $key) {
+                  'running', 'oldestWaitSeconds', 'restored', 'checked', 'skipped',
+                  'activeAssessments', 'checkedLastHour', 'drainEtaSeconds'] as $key) {
             if ($key === 'error' && ($status[$key] ?? '') === '') {
                 continue; // Go: json:"error,omitempty"
             }
@@ -219,7 +221,7 @@ final class ServiceBoard
             if (!isset($byService[$svc])) {
                 $byService[$svc] = self::EMPTY_STATS;
             }
-            foreach (['queued', 'scheduled', 'running', 'checked', 'skipped'] as $k) {
+            foreach (['queued', 'scheduled', 'running', 'checked', 'skipped', 'activeAssessments', 'checkedLastHour'] as $k) {
                 $byService[$svc][$k] += $s[$k];
             }
             // oldest_wait 各 kind 基于 DB 同一 now() 计算，取最大即最旧。
@@ -245,6 +247,12 @@ final class ServiceBoard
                 'restored' => $svc === 'node-lifecycle' ? $restored : 0,
                 'checked' => (int)$w['checked'],
                 'skipped' => (int)$w['skipped'],
+                'activeAssessments' => (int)$w['activeAssessments'],
+                'checkedLastHour' => (int)$w['checkedLastHour'],
+                // This estimates only already-due work using the rolling hour,
+                // not the next scheduled round or future arrivals.
+                'drainEtaSeconds' => $w['checkedLastHour'] > 0
+                    ? (int)ceil(($w['queued'] + $w['running']) * 3600 / $w['checkedLastHour']) : null,
             ];
         }
         return $out;
@@ -253,9 +261,8 @@ final class ServiceBoard
     /**
      * work 队列按 kind 聚合的统计。
      *
-     * 对应旧聚合 SQL 的 work CTE：WHERE 条件（state<>'done' OR kind='recovery'）
-     * 用构造器表达，FILTER 聚合是 PG 特有语法走 Db::raw。done 行只可能出现在
-     * recovery kind 下，checked/skipped 的语义与旧 SQL 完全一致。
+     * 核验累计数包含已重新排期的结果；最近一小时按核验历史统计，
+     * 不把协调器轮询次数算作核验。活跃核验包含等待前置探测的会话。
      *
      * @return array<string, array{queued:int,scheduled:int,running:int,checked:int,skipped:int,oldestWaitSeconds:float}>
      */
@@ -267,7 +274,14 @@ final class ServiceBoard
                 Db::raw("count(*) FILTER (WHERE state='queued' AND due_at<=now()) AS queued"),
                 Db::raw("count(*) FILTER (WHERE state='queued' AND due_at>now()) AS scheduled"),
                 Db::raw("count(*) FILTER (WHERE state='running') AS running"),
-                Db::raw("count(*) FILTER (WHERE state='done' AND payload->>'recoveryResult' IN ('eligible','not-residential','probe-failed','exit-probe-failed','classification-unconfirmed','exit-changed','timed-out')) AS checked"),
+                Db::raw("coalesce(sum(greatest(coalesce((payload->>'recoveryAttempts')::integer,0),1)) FILTER (WHERE kind IN ('recovery','normal-recovery') AND payload->>'recoveryResult' IN ('eligible','not-residential','probe-failed','exit-probe-failed','classification-unconfirmed','exit-changed','timed-out')),0) AS checked"),
+                Db::raw("count(*) FILTER (WHERE kind IN ('recovery','normal-recovery') AND state<>'done' AND coalesce(payload->>'startedAt','')<>'' AND payload->>'startedAt' NOT LIKE '0001-%') AS active_assessments"),
+                Db::raw("coalesce(sum(CASE WHEN kind IN ('recovery','normal-recovery') THEN
+                    (SELECT count(*) FROM jsonb_array_elements(coalesce(payload->'recoveryHistory',
+                        jsonb_build_array(jsonb_build_object('checkedAt',payload->>'checkedAt','result',payload->>'recoveryResult')))) h
+                     WHERE nullif(h->>'checkedAt','')::timestamptz>now()-interval '1 hour'
+                     AND h->>'result' IN ('eligible','not-residential','probe-failed','exit-probe-failed','classification-unconfirmed','exit-changed','timed-out'))
+                    ELSE 0 END),0) AS checked_hour"),
                 Db::raw("count(*) FILTER (WHERE state='done' AND payload->>'recoveryResult'='skipped-datacenter-asn') AS skipped"),
                 Db::raw("coalesce(greatest(0,extract(epoch FROM now()-min(due_at) FILTER (WHERE state='queued' AND due_at<=now())))::double precision,0) AS oldest_wait"),
             ])
@@ -284,6 +298,8 @@ final class ServiceBoard
                 'scheduled' => (int)$row->scheduled,
                 'running' => (int)$row->running,
                 'checked' => (int)$row->checked,
+                'activeAssessments' => (int)$row->active_assessments,
+                'checkedLastHour' => (int)$row->checked_hour,
                 'skipped' => (int)$row->skipped,
                 'oldestWaitSeconds' => (float)$row->oldest_wait,
             ];
