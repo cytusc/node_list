@@ -22,25 +22,39 @@ type MalformedCleanupReport struct {
 }
 
 // malformedReason is deliberately narrower than ShareLinkProxy: unsupported
-// transports, missing optional/default parameters and unknown formats survive.
+// optional/default parameters and unknown formats survive.
 func malformedReason(n domain.Node) string {
+	rawLink := strings.TrimSpace(n.RawLink)
+	if len(n.RawConfig) == 0 && rawLink == "" {
+		return "missing-full-config"
+	}
 	var protocol, uuid string
 	var port any
 	if len(n.RawConfig) > 0 {
 		protocol, _ = n.RawConfig["type"].(string)
+		if protocol == "" {
+			protocol = strings.ToLower(n.Type)
+		}
 		uuid, _ = n.RawConfig["uuid"].(string)
 		port = n.RawConfig["port"]
 		if (protocol == "hysteria" || protocol == "hysteria2") && n.RawConfig["ports"] != nil {
 			port = nil // An alternate port-hopping range can override this field.
 		}
+		if isSupportedConnectionType(protocol) {
+			server, _ := n.RawConfig["server"].(string)
+			missingPort := port == nil || fmt.Sprint(port) == ""
+			if strings.TrimSpace(server) == "" || (missingPort && n.RawConfig["ports"] == nil) {
+				return "missing-required-connection-field"
+			}
+		}
 		if protocol == "tuic" && n.RawConfig["token"] != nil {
 			uuid = "" // TUIC v4 uses token authentication.
 		}
-	} else if strings.HasPrefix(n.RawLink, "vmess://") {
+	} else if strings.HasPrefix(rawLink, "vmess://") {
 		var raw []byte
 		var err error
 		for _, encoding := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.StdEncoding} {
-			raw, err = encoding.DecodeString(strings.TrimPrefix(n.RawLink, "vmess://"))
+			raw, err = encoding.DecodeString(strings.TrimPrefix(rawLink, "vmess://"))
 			if err == nil {
 				break
 			}
@@ -50,8 +64,8 @@ func malformedReason(n domain.Node) string {
 			return ""
 		}
 		protocol, uuid, port = "vmess", stringValue(v["id"]), v["port"]
-	} else if n.RawLink != "" {
-		u, err := url.Parse(strings.ReplaceAll(n.RawLink, "&amp;", "&"))
+	} else if rawLink != "" {
+		u, err := url.Parse(strings.ReplaceAll(rawLink, "&amp;", "&"))
 		if err != nil {
 			return ""
 		}
@@ -68,7 +82,7 @@ func malformedReason(n domain.Node) string {
 			}
 		}
 	} else {
-		return "" // An incomplete projection is not evidence about its source.
+		return "" // Unknown formats remain for review.
 	}
 	switch protocol {
 	case "vmess", "tuic", "vless", "ss", "ssr", "trojan", "hysteria", "hysteria2", "hy2", "socks", "socks5", "http", "https":
@@ -102,6 +116,15 @@ func malformedReason(n domain.Node) string {
 	return ""
 }
 
+func isSupportedConnectionType(protocol string) bool {
+	switch protocol {
+	case "vmess", "tuic", "vless", "ss", "ssr", "trojan", "hysteria", "hysteria2", "hy2", "socks", "socks5", "http", "https":
+		return true
+	default:
+		return false
+	}
+}
+
 func stringValue(v any) string { s, _ := v.(string); return s }
 
 // CleanMalformedNodes is an explicit administrative operation, never scheduled.
@@ -129,8 +152,12 @@ func CleanMalformedNodes(ctx context.Context, pool *pgxpool.Pool, apply bool, ba
 	}
 	rows, err := tx.Query(ctx, `SELECT n.identity,n.node,
  EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.payload->>'identity'=n.identity AND w.state='running' AND w.lease_until>now())
- FROM node_explorer_node_registry n WHERE EXISTS(SELECT 1 FROM node_explorer_work w
- WHERE w.payload->>'identity'=n.identity AND w.error LIKE 'node_config_rejected:%') ORDER BY n.identity`)
+	 FROM node_explorer_node_registry n WHERE
+	 ((coalesce(n.node->>'subTag','')='Qilan' AND n.node->>'type' IN ('vless','ss','vmess','trojan')
+	   AND btrim(coalesce(n.node->>'rawLink',''))=''
+	   AND (jsonb_typeof(n.node->'rawConfig') IS DISTINCT FROM 'object' OR n.node->'rawConfig'='{}'::jsonb))
+	 OR EXISTS(SELECT 1 FROM node_explorer_work w
+	 WHERE w.payload->>'identity'=n.identity AND w.error LIKE 'node_config_rejected:%')) ORDER BY n.identity`)
 	if err != nil {
 		return report, err
 	}

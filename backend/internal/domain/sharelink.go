@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -13,7 +14,7 @@ import (
 // ShareLinkVersion bumps whenever the converter changes. Persisted failures
 // tagged with an older version re-enter the queue so a fixed parser retries
 // nodes that previously looked unsupported.
-const ShareLinkVersion = 3
+const ShareLinkVersion = 4
 
 // ErrShareLink is returned for any link this converter cannot express as a
 // usable outbound. The message never includes the link itself: share links
@@ -32,6 +33,29 @@ func decodeBase64(value string) (string, error) {
 	}
 	b, err := base64.RawStdEncoding.DecodeString(value)
 	return string(b), err
+}
+
+func validECHConfig(value string) bool {
+	decoded, err := decodeBase64(value)
+	if err != nil || len(decoded) < 6 {
+		return false
+	}
+	b := []byte(decoded)
+	if int(binary.BigEndian.Uint16(b[:2])) != len(b)-2 {
+		return false
+	}
+	for offset := 2; offset < len(b); {
+		if len(b)-offset < 4 {
+			return false
+		}
+		entrySize := int(binary.BigEndian.Uint16(b[offset+2 : offset+4]))
+		offset += 4
+		if entrySize == 0 || entrySize > len(b)-offset {
+			return false
+		}
+		offset += entrySize
+	}
+	return true
 }
 
 func flagValue(v string) bool {
@@ -553,7 +577,11 @@ func applyTLSSettings(proxy ProxyConfig, get func(string) string, enabled bool) 
 		proxy["fingerprint"] = v
 	}
 	if v := get("ech"); v != "" {
-		proxy["__ech"] = true
+		if !validECHConfig(v) {
+			proxy["__bad-ech"] = true
+		} else {
+			proxy["ech-opts"] = map[string]any{"enable": true, "config": v}
+		}
 	}
 	if get("security") == "reality" {
 		if get("pbk") == "" {
@@ -570,7 +598,7 @@ func applyTLSSettings(proxy ProxyConfig, get func(string) string, enabled bool) 
 // validateProxy rejects configurations that cannot be dialled and any value
 // carrying control characters, which would corrupt a Mihomo YAML document.
 func validateProxy(proxy ProxyConfig) (ProxyConfig, error) {
-	if proxy["__ech"] != nil || proxy["__bad-reality"] != nil {
+	if proxy["__bad-reality"] != nil || proxy["__bad-ech"] != nil {
 		return nil, ErrShareLink
 	}
 	server, _ := proxy["server"].(string)
