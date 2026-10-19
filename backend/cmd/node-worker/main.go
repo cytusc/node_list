@@ -51,6 +51,14 @@ func run() error {
 		st := store.New(a, nil)
 		return repo.RunSource(ctx, st)
 	}
+	if *role == "mihomo-manager" {
+		q, err := taskqueue.New(ctx, os.Getenv("REDIS_URL"), os.Getenv("REDIS_NAMESPACE"))
+		if err != nil {
+			return err
+		}
+		defer q.Close()
+		return repo.RunMihomoManager(ctx, q)
+	}
 	c, err := service.ConfigFromEnv(*role)
 	if err != nil {
 		return err
@@ -60,8 +68,5 @@ func run() error {
 		return err
 	}
 	defer q.Close()
-	if *role == "mihomo-manager" {
-		return repo.RunMihomoManager(ctx, q)
-	}
 	return (&service.Runner{Repo: repo, Queue: q, Config: c}).Run(ctx)
 }
