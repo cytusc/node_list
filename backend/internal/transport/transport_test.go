@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,65 @@ func TestMihomoJSONIntegerTransportOptions(t *testing.T) {
 	defer server.Close()
 	var proxy domain.ProxyConfig
 	if err := json.Unmarshal([]byte(`{"type":"vless","server":"example.com","port":443,"xhttp-opts":{"sc-max-each-post-bytes":1000000}}`), &proxy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConfigureProxyBatch(context.Background(), MihomoConfig{Controller: server.URL, ProxyURL: "http://127.0.0.1:17890"}, []domain.ProxyConfig{proxy}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMihomoUsesQilanECHResolverPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Payload string `json:"payload"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var config struct {
+			DNS struct {
+				Enable                      bool                `yaml:"enable"`
+				NameServer                  []string            `yaml:"nameserver"`
+				ProxyServerNameserver       []string            `yaml:"proxy-server-nameserver"`
+				ProxyServerNameserverPolicy map[string][]string `yaml:"proxy-server-nameserver-policy"`
+			} `yaml:"dns"`
+			Proxies []map[string]any `yaml:"proxies"`
+		}
+		if err := yaml.Unmarshal([]byte(body.Payload), &config); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !config.DNS.Enable || len(config.DNS.NameServer) == 0 {
+			t.Errorf("DNS resolver config missing: %#v", config.DNS)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		wantResolver := "https://dns.alidns.com/dns-query"
+		if len(config.DNS.ProxyServerNameserver) != 1 || config.DNS.ProxyServerNameserver[0] != wantResolver {
+			t.Errorf("ECH resolver was not configured: %#v", config.DNS.ProxyServerNameserver)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if got := config.DNS.ProxyServerNameserverPolicy["cloudflare-ech.com"]; len(got) != 1 || got[0] != wantResolver {
+			t.Errorf("ECH query name is not routed through its source resolver: %#v", config.DNS.ProxyServerNameserverPolicy)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, leaked := config.Proxies[0]["__ech-resolver"]; leaked {
+			t.Error("internal resolver metadata leaked into the outbound config")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	link := "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls&ech=" +
+		url.QueryEscape("cloudflare-ech.com+https://dns.alidns.com/dns-query")
+	proxy, err := domain.ShareLinkProxy(link, "Node")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ConfigureProxyBatch(context.Background(), MihomoConfig{Controller: server.URL, ProxyURL: "http://127.0.0.1:17890"}, []domain.ProxyConfig{proxy}); err != nil {

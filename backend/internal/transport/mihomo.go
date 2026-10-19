@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ var proxyErrorIndex = regexp.MustCompile(`^proxy ([0-9]+):`)
 
 // mihomoConfig is the document sent to PUT /configs.
 type mihomoConfig struct {
+	DNS                *mihomoDNS       `yaml:"dns,omitempty"`
 	Authentication     []string         `yaml:"authentication,omitempty"`
 	MixedPort          int              `yaml:"mixed-port"`
 	AllowLan           bool             `yaml:"allow-lan"`
@@ -44,12 +46,71 @@ type mihomoConfig struct {
 	Rules              []string         `yaml:"rules"`
 }
 
+type mihomoDNS struct {
+	Enable                      bool                `yaml:"enable"`
+	NameServer                  []string            `yaml:"nameserver"`
+	ProxyServerNameserver       []string            `yaml:"proxy-server-nameserver"`
+	ProxyServerNameserverPolicy map[string][]string `yaml:"proxy-server-nameserver-policy,omitempty"`
+}
+
 type mihomoListener struct {
 	Name   string `yaml:"name"`
 	Type   string `yaml:"type"`
 	Port   int    `yaml:"port"`
 	Listen string `yaml:"listen"`
 	Proxy  string `yaml:"proxy"`
+}
+
+// applyECHDNS extracts the resolver metadata retained by the Qilan share-link
+// parser and routes each ECH query name through the resolver supplied with
+// that link. Mihomo only supports ECH resolver configuration at the DNS level.
+func applyECHDNS(config *mihomoConfig, proxies []domain.ProxyConfig) []map[string]any {
+	var echDNS mihomoDNS
+	echDNS.Enable = true
+	echDNS.NameServer = []string{"system"}
+	resolverSet := make(map[string]struct{})
+	policySet := make(map[string]map[string]struct{})
+	namedProxies := make([]map[string]any, 0, len(proxies))
+	for _, proxy := range proxies {
+		named := make(map[string]any, len(proxy)+1)
+		for k, v := range proxy {
+			if k == "__ech-resolver" {
+				resolver, _ := v.(string)
+				if resolver != "" {
+					resolverSet[resolver] = struct{}{}
+					if opts, ok := proxy["ech-opts"].(map[string]any); ok {
+						queryName, _ := opts["query-server-name"].(string)
+						if queryName != "" {
+							if policySet[queryName] == nil {
+								policySet[queryName] = make(map[string]struct{})
+							}
+							policySet[queryName][resolver] = struct{}{}
+						}
+					}
+				}
+				continue
+			}
+			named[k] = v
+		}
+		namedProxies = append(namedProxies, named)
+	}
+	if len(resolverSet) == 0 {
+		config.DNS = nil
+		return namedProxies
+	}
+	for resolver := range resolverSet {
+		echDNS.ProxyServerNameserver = append(echDNS.ProxyServerNameserver, resolver)
+	}
+	sort.Strings(echDNS.ProxyServerNameserver)
+	echDNS.ProxyServerNameserverPolicy = make(map[string][]string, len(policySet))
+	for queryName, servers := range policySet {
+		for resolver := range servers {
+			echDNS.ProxyServerNameserverPolicy[queryName] = append(echDNS.ProxyServerNameserverPolicy[queryName], resolver)
+		}
+		sort.Strings(echDNS.ProxyServerNameserverPolicy[queryName])
+	}
+	config.DNS = &echDNS
+	return namedProxies
 }
 
 // ConfigureProxyBatch loads a wave's proxies into one Mihomo instance and
@@ -97,13 +158,10 @@ func ConfigureProxyBatch(ctx context.Context, instance MihomoConfig, proxies []d
 		Rules:              []string{"MATCH,REJECT"},
 	}
 	urls := make([]string, len(proxies))
-	for i, proxy := range proxies {
-		named := make(map[string]any, len(proxy)+1)
-		for k, v := range proxy {
-			named[k] = v
-		}
+	config.Proxies = applyECHDNS(&config, proxies)
+	for i := range proxies {
+		named := config.Proxies[i]
 		named["name"] = fmt.Sprintf("ippure-%d", i)
-		config.Proxies = append(config.Proxies, named)
 		listenPort := port + i + 1
 		config.Listeners = append(config.Listeners, mihomoListener{
 			Name:   fmt.Sprintf("ippure-%d", i),

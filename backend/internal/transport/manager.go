@@ -232,13 +232,14 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 				check := config
 				check.Proxies = nil
 				check.Authentication = []string{"disabled:" + token()}
+				batchProxies := make([]domain.ProxyConfig, 0, len(batch))
 				for _, entry := range batch {
-					p := domain.ProxyConfig{}
-					for k, v := range outboundConfig(entry.Node) {
-						p[k] = v
-					}
+					batchProxies = append(batchProxies, outboundConfig(entry.Node))
+				}
+				check.Proxies = applyECHDNS(&check, batchProxies)
+				for i, entry := range batch {
+					p := check.Proxies[i]
 					p["name"] = proxyName(entry.Identity)
-					check.Proxies = append(check.Proxies, p)
 				}
 				document, e := marshalMihomoConfig(check)
 				if e != nil {
@@ -261,20 +262,20 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 	var payload []byte
 	for {
 		config.Proxies = nil
+		proxyConfigs := make([]domain.ProxyConfig, 0, len(valid))
 		config.Authentication = nil
 		config.Rules = nil
 		for _, entry := range valid {
 			name := proxyName(entry.Identity)
 			password := token()
 			credentials[entry.Identity] = password
-			p := map[string]any{}
-			for k, v := range outboundConfig(entry.Node) {
-				p[k] = v
-			}
-			p["name"] = name
-			config.Proxies = append(config.Proxies, p)
+			proxyConfigs = append(proxyConfigs, outboundConfig(entry.Node))
 			config.Authentication = append(config.Authentication, name+":"+password)
 			config.Rules = append(config.Rules, "IN-USER,"+name+","+name)
+		}
+		config.Proxies = applyECHDNS(&config, proxyConfigs)
+		for i, entry := range valid {
+			config.Proxies[i]["name"] = proxyName(entry.Identity)
 		}
 		if len(config.Authentication) == 0 {
 			config.Authentication = []string{"disabled:" + token()}

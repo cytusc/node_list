@@ -15,7 +15,7 @@ import (
 // ShareLinkVersion bumps whenever the converter changes. Persisted failures
 // tagged with an older version re-enter the queue so a fixed parser retries
 // nodes that previously looked unsupported.
-const ShareLinkVersion = 5
+const ShareLinkVersion = 6
 
 // ErrShareLink is returned for any link this converter cannot express as a
 // usable outbound. The message never includes the link itself: share links
@@ -60,38 +60,37 @@ func validECHConfig(value string) bool {
 }
 
 // parseECHSetting accepts either an ECHConfigList or the Qilan DNS form
-// "query-name+resolver-url". Mihomo resolves the ECH HTTPS record using its
-// configured proxy-server resolver; query-server-name selects the queried
-// name while the resolver URL is a source-side hint that Mihomo cannot scope
-// to an individual outbound.
-func parseECHSetting(value string) (config, queryServerName string, ok bool) {
+// "query-name+resolver-url". Mihomo resolves ECH HTTPS records through its
+// proxy-server resolver, so callers must retain resolver for the generated
+// top-level proxy-server-nameserver-policy.
+func parseECHSetting(value string) (config, queryServerName, resolver string, ok bool) {
 	if validECHConfig(value) {
-		return value, "", true
+		return value, "", "", true
 	}
 	queryServerName, resolver, found := strings.Cut(strings.TrimSpace(value), "+")
 	if !found || queryServerName == "" || strings.ContainsAny(queryServerName, "/:@?# \t\r\n") {
-		return "", "", false
+		return "", "", "", false
 	}
 	if net.ParseIP(queryServerName) != nil || !strings.Contains(queryServerName, ".") {
-		return "", "", false
+		return "", "", "", false
 	}
 	u, err := url.Parse(resolver)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
-		return "", "", false
+		return "", "", "", false
 	}
 	switch u.Scheme {
 	case "udp", "tcp":
 		if u.Path != "" || u.RawQuery != "" {
-			return "", "", false
+			return "", "", "", false
 		}
 	case "https":
 		if u.RawQuery != "" {
-			return "", "", false
+			return "", "", "", false
 		}
 	default:
-		return "", "", false
+		return "", "", "", false
 	}
-	return "", queryServerName, true
+	return "", queryServerName, u.String(), true
 }
 
 func flagValue(v string) bool {
@@ -620,13 +619,14 @@ func applyTLSSettings(proxy ProxyConfig, get func(string) string, enabled bool) 
 		proxy["fingerprint"] = v
 	}
 	if v := get("ech"); v != "" {
-		config, queryServerName, ok := parseECHSetting(v)
+		config, queryServerName, resolver, ok := parseECHSetting(v)
 		if !ok {
 			proxy["__bad-ech"] = true
 		} else if config != "" {
 			proxy["ech-opts"] = map[string]any{"enable": true, "config": config}
 		} else {
 			proxy["ech-opts"] = map[string]any{"enable": true, "query-server-name": queryServerName}
+			proxy["__ech-resolver"] = resolver
 		}
 	}
 	if get("security") == "reality" {

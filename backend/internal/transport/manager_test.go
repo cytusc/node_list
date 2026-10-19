@@ -27,6 +27,46 @@ func entry(id string) RegistryEntry {
 	n := domain.Node{Type: "http", Server: "127.0.0.1", Port: "80", RawConfig: domain.ProxyConfig{"type": "http", "server": "127.0.0.1", "port": 80}}
 	return RegistryEntry{Identity: id, Incarnation: "inc-" + id, Node: n, Digest: ConfigDigest(n)}
 }
+
+func TestManagerSyncIncludesQilanECHResolverPolicy(t *testing.T) {
+	var config mihomoConfig
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if err := yaml.Unmarshal([]byte(body["payload"]), &config); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	proxy, err := domain.ShareLinkProxy("vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls&ech="+url.QueryEscape("cloudflare-ech.com+https://dns.alidns.com/dns-query"), "ech-probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := domain.Node{Type: "vless", Server: "example.com", Port: "443", RawConfig: proxy}
+	registryEntry := RegistryEntry{Identity: "qilan-ech", Incarnation: "qilan-ech-test", Node: node, Digest: ConfigDigest(node)}
+	m := NewManager(MihomoConfig{Controller: server.URL, ProxyURL: "http://127.0.0.1:7890"})
+	if err := m.Sync(context.Background(), []RegistryEntry{registryEntry}); err != nil {
+		t.Fatal(err)
+	}
+	wantResolver := "https://dns.alidns.com/dns-query"
+	if config.DNS == nil || !config.DNS.Enable || len(config.DNS.ProxyServerNameserver) != 1 || config.DNS.ProxyServerNameserver[0] != wantResolver {
+		t.Fatalf("Manager.Sync omitted Qilan's ECH resolver: %#v", config.DNS)
+	}
+	if got := config.DNS.ProxyServerNameserverPolicy["cloudflare-ech.com"]; len(got) != 1 || got[0] != wantResolver {
+		t.Fatalf("ECH query is not routed through its source resolver: %#v", config.DNS.ProxyServerNameserverPolicy)
+	}
+	if _, leaked := config.Proxies[0]["__ech-resolver"]; leaked {
+		t.Fatal("internal resolver metadata leaked into the outbound config")
+	}
+}
+
 func fakeManager(t *testing.T) (*Manager, *atomic.Bool, *atomic.Int32) {
 	t.Helper()
 	failed := &atomic.Bool{}
@@ -295,6 +335,20 @@ func TestRealManagerRouteIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestRealManagerAcceptsQilanECHResolverConfig(t *testing.T) {
+	m := realManager(t)
+	proxy, err := domain.ShareLinkProxy("vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls&ech="+url.QueryEscape("cloudflare-ech.com+https://dns.alidns.com/dns-query"), "ech-probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := domain.Node{Type: "vless", Server: "example.com", Port: "443", RawConfig: proxy}
+	entry := RegistryEntry{Identity: "qilan-ech", Incarnation: "qilan-ech-test", Node: node, Digest: ConfigDigest(node)}
+	if err := m.Sync(context.Background(), []RegistryEntry{entry}); err != nil {
+		t.Fatalf("Mihomo rejected the generated Qilan ECH DNS config: %v", err)
+	}
+}
+
 func TestRealManagerThousandTimeouts(t *testing.T) {
 	if os.Getenv("MIHOMO_TIMEOUT_BENCH") != "1" {
 		t.Skip("set MIHOMO_TIMEOUT_BENCH=1 for the 1000-node, 2-second timeout acceptance test")

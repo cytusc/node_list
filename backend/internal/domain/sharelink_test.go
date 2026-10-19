@@ -55,6 +55,9 @@ func TestVLESSLinkMapsQilanECHDNSSettings(t *testing.T) {
 			if _, exists := opts["config"]; exists {
 				t.Fatalf("DNS ECH setting must not be mistaken for a base64 config: %#v", opts)
 			}
+			if resolver := proxy["__ech-resolver"]; resolver != strings.SplitN(ech, "+", 2)[1] {
+				t.Fatalf("ECH resolver URL was not retained for Mihomo DNS setup: %#v", resolver)
+			}
 		})
 	}
 }
