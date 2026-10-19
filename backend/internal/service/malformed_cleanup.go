@@ -30,6 +30,7 @@ func malformedReason(n domain.Node) string {
 	}
 	var protocol, uuid string
 	var port any
+	missingRequired := ""
 	if len(n.RawConfig) > 0 {
 		protocol, _ = n.RawConfig["type"].(string)
 		if protocol == "" {
@@ -49,6 +50,14 @@ func malformedReason(n domain.Node) string {
 		}
 		if protocol == "tuic" && n.RawConfig["token"] != nil {
 			uuid = "" // TUIC v4 uses token authentication.
+		}
+		if protocol == "vless" && strings.TrimSpace(uuid) == "" {
+			missingRequired = "missing-required-authentication"
+		}
+		if protocol == "vless" {
+			if reality, ok := n.RawConfig["reality-opts"].(map[string]any); ok && strings.TrimSpace(stringValue(reality["public-key"])) == "" {
+				missingRequired = "missing-reality-public-key"
+			}
 		}
 	} else if strings.HasPrefix(rawLink, "vmess://") {
 		var raw []byte
@@ -71,6 +80,14 @@ func malformedReason(n domain.Node) string {
 		}
 		protocol = strings.ToLower(u.Scheme)
 		port = u.Port()
+		if protocol == "vless" {
+			if u.User == nil || strings.TrimSpace(u.User.Username()) == "" {
+				missingRequired = "missing-required-authentication"
+			}
+			if u.Query().Get("security") == "reality" && strings.TrimSpace(u.Query().Get("pbk")) == "" {
+				missingRequired = "missing-reality-public-key"
+			}
+		}
 		if (protocol == "hy2" || protocol == "hysteria2") && u.Query().Get("mport") != "" {
 			port = nil
 		}
@@ -88,6 +105,9 @@ func malformedReason(n domain.Node) string {
 	case "vmess", "tuic", "vless", "ss", "ssr", "trojan", "hysteria", "hysteria2", "hy2", "socks", "socks5", "http", "https":
 	default:
 		return ""
+	}
+	if missingRequired != "" {
+		return missingRequired
 	}
 	if port != nil && fmt.Sprint(port) != "" {
 		v, err := strconv.ParseFloat(fmt.Sprint(port), 64)

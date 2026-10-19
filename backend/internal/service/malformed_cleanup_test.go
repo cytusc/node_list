@@ -40,6 +40,33 @@ func TestMalformedReasonFindsRequiredFieldsMissingFromKnownConfig(t *testing.T) 
 	}
 }
 
+func TestMalformedReasonFindsMissingVLESSAuthenticationAndRealityKey(t *testing.T) {
+	for name, node := range map[string]domain.Node{
+		"UUID": {
+			Type: "vless", RawLink: "vless://@edge.example:443?security=tls",
+		},
+		"Reality public key": {
+			Type: "vless", RawLink: "vless://123e4567-e89b-12d3-a456-426614174000@edge.example:443?security=reality&type=grpc",
+		},
+		"RawConfig UUID": {
+			RawConfig: domain.ProxyConfig{"type": "vless", "server": "edge.example", "port": 443},
+		},
+		"RawConfig Reality public key": {
+			RawConfig: domain.ProxyConfig{
+				"type": "vless", "server": "edge.example", "port": 443,
+				"uuid":         "123e4567-e89b-12d3-a456-426614174000",
+				"reality-opts": map[string]any{"short-id": "abcd"},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := malformedReason(node); got == "" {
+				t.Fatal("configuration missing a required authentication field was accepted")
+			}
+		})
+	}
+}
+
 func TestMalformedReasonPreservesCompleteConfigAndAlternatePortRange(t *testing.T) {
 	for _, config := range []domain.ProxyConfig{
 		{"type": "vless", "server": "edge.example", "port": 443, "uuid": "123e4567-e89b-12d3-a456-426614174000"},

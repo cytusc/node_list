@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/base64"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -33,6 +34,39 @@ func TestVLESSLinkMapsECHConfig(t *testing.T) {
 	opts, ok := proxy["ech-opts"].(map[string]any)
 	if !ok || opts["enable"] != true || opts["config"] != ech {
 		t.Fatalf("ECH options were not preserved in Mihomo format: %#v", proxy["ech-opts"])
+	}
+}
+
+func TestVLESSLinkMapsQilanECHDNSSettings(t *testing.T) {
+	for _, ech := range []string{
+		"ip.gs+udp://8.8.8.8",
+		"cloudflare-ech.com+https://dns.alidns.com/dns-query",
+	} {
+		t.Run(ech, func(t *testing.T) {
+			link := "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls&ech=" + url.QueryEscape(ech)
+			proxy, err := ShareLinkProxy(link, "Node")
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts, ok := proxy["ech-opts"].(map[string]any)
+			if !ok || opts["enable"] != true || opts["query-server-name"] != strings.SplitN(ech, "+", 2)[0] {
+				t.Fatalf("ECH DNS query options were not mapped to Mihomo: %#v", proxy["ech-opts"])
+			}
+			if _, exists := opts["config"]; exists {
+				t.Fatalf("DNS ECH setting must not be mistaken for a base64 config: %#v", opts)
+			}
+		})
+	}
+}
+
+func TestVLESSLinkIgnoresQilanTransportTagSuffix(t *testing.T) {
+	link := "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=reality&pbk=public-key&sid=abcd&type=tcp%23%F0%9F%92%A195%40oneclickvpnkeys"
+	proxy, err := ShareLinkProxy(link, "Node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := proxy["network"]; exists {
+		t.Fatalf("default TCP network should not be overridden by a tag suffix: %#v", proxy["network"])
 	}
 }
 

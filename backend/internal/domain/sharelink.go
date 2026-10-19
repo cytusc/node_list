@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -14,7 +15,7 @@ import (
 // ShareLinkVersion bumps whenever the converter changes. Persisted failures
 // tagged with an older version re-enter the queue so a fixed parser retries
 // nodes that previously looked unsupported.
-const ShareLinkVersion = 4
+const ShareLinkVersion = 5
 
 // ErrShareLink is returned for any link this converter cannot express as a
 // usable outbound. The message never includes the link itself: share links
@@ -56,6 +57,41 @@ func validECHConfig(value string) bool {
 		offset += entrySize
 	}
 	return true
+}
+
+// parseECHSetting accepts either an ECHConfigList or the Qilan DNS form
+// "query-name+resolver-url". Mihomo resolves the ECH HTTPS record using its
+// configured proxy-server resolver; query-server-name selects the queried
+// name while the resolver URL is a source-side hint that Mihomo cannot scope
+// to an individual outbound.
+func parseECHSetting(value string) (config, queryServerName string, ok bool) {
+	if validECHConfig(value) {
+		return value, "", true
+	}
+	queryServerName, resolver, found := strings.Cut(strings.TrimSpace(value), "+")
+	if !found || queryServerName == "" || strings.ContainsAny(queryServerName, "/:@?# \t\r\n") {
+		return "", "", false
+	}
+	if net.ParseIP(queryServerName) != nil || !strings.Contains(queryServerName, ".") {
+		return "", "", false
+	}
+	u, err := url.Parse(resolver)
+	if err != nil || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return "", "", false
+	}
+	switch u.Scheme {
+	case "udp", "tcp":
+		if u.Path != "" || u.RawQuery != "" {
+			return "", "", false
+		}
+	case "https":
+		if u.RawQuery != "" {
+			return "", "", false
+		}
+	default:
+		return "", "", false
+	}
+	return "", queryServerName, true
 }
 
 func flagValue(v string) bool {
@@ -188,6 +224,8 @@ func vmessProxy(link, name string) (ProxyConfig, error) {
 			return str(config["fp"])
 		case "alpn":
 			return str(config["alpn"])
+		case "ech":
+			return str(config["ech"])
 		case "allowInsecure":
 			for _, k := range []string{"allowInsecure", "insecure", "skip-cert-verify"} {
 				if v, ok := config[k]; ok && truthy(v) {
@@ -440,6 +478,11 @@ func parsePlugin(v string) (pluginResult, error) {
 // with the wrong transport.
 func applyTransport(proxy ProxyConfig, get func(string) string) error {
 	network := get("type")
+	// Some Qilan links append the display tag to a URL-escaped transport value
+	// (for example, type=tcp%23tag). It is URI fragment metadata, not a network.
+	if prefix, _, found := strings.Cut(network, "#"); found {
+		network = strings.TrimSpace(prefix)
+	}
 	if network == "" {
 		network = "tcp"
 	}
@@ -577,10 +620,13 @@ func applyTLSSettings(proxy ProxyConfig, get func(string) string, enabled bool) 
 		proxy["fingerprint"] = v
 	}
 	if v := get("ech"); v != "" {
-		if !validECHConfig(v) {
+		config, queryServerName, ok := parseECHSetting(v)
+		if !ok {
 			proxy["__bad-ech"] = true
+		} else if config != "" {
+			proxy["ech-opts"] = map[string]any{"enable": true, "config": config}
 		} else {
-			proxy["ech-opts"] = map[string]any{"enable": true, "config": v}
+			proxy["ech-opts"] = map[string]any{"enable": true, "query-server-name": queryServerName}
 		}
 	}
 	if get("security") == "reality" {
