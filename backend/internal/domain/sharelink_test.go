@@ -153,7 +153,17 @@ func TestTUICLinkCredentialShapes(t *testing.T) {
 		{
 			name: "compact uuid",
 			link: "tuic://123e4567e89b12d3a456426614174000:secret@2001:db8::1:443",
-			want: ProxyConfig{"uuid": "123e4567-e89b-12d3-a456-426614174000", "password": "secret"},
+			want: ProxyConfig{"uuid": "123e4567-e89b-12d3-a456-426614174000", "password": "secret", "server": "2001:db8::1", "port": 443},
+		},
+		{
+			name: "bracketed ipv6",
+			link: "tuic://123e4567e89b12d3a456426614174000:secret@[2001:db8::1]:443",
+			want: ProxyConfig{"uuid": "123e4567-e89b-12d3-a456-426614174000", "password": "secret", "server": "2001:db8::1", "port": 443},
+		},
+		{
+			name: "bare ipv6 without port",
+			link: "tuic://123e4567e89b12d3a456426614174000:secret@2001:db8::1",
+			want: ProxyConfig{"uuid": "123e4567-e89b-12d3-a456-426614174000", "password": "secret", "server": "2001:db8::1", "port": 443},
 		},
 		{
 			name: "plain username and password",

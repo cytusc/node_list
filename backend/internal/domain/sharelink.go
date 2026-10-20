@@ -315,8 +315,81 @@ func ssrProxy(link, name string) (ProxyConfig, error) {
 	return validateProxy(proxy)
 }
 
+// bracketBareIPv6Authority rewrites an authority whose host is an unbracketed
+// IPv6 literal into bracketed form. net/url rejects bare multiple-colon hosts
+// ("://user:pw@2001:db8::1:443"); how lenient it is about that shape drifts
+// across Go releases, so subscription links written without brackets must be
+// normalized before parsing. The rewrite only fires when the tail segment is
+// a decimal port and the remainder parses as IPv6, or when the whole tail
+// parses as a bare IPv6 literal; anything else is returned untouched for
+// url.Parse to judge.
+func bracketBareIPv6Authority(link string) (string, error) {
+	rest, ok := strings.CutPrefix(link, "//")
+	if !ok {
+		i := strings.Index(link, "://")
+		if i < 0 {
+			return link, nil
+		}
+		rest = link[i+3:]
+	}
+	prefix := link[:len(link)-len(rest)]
+	// The authority ends at the first '/', '?' or '#'.
+	end := len(rest)
+	for _, sep := range []string{"/", "?", "#"} {
+		if i := strings.Index(rest, sep); i >= 0 && i < end {
+			end = i
+		}
+	}
+	authority := rest[:end]
+	at := strings.LastIndex(authority, "@")
+	hostPart := authority
+	if at >= 0 {
+		hostPart = authority[at+1:]
+	}
+	if hostPart == "" || strings.HasPrefix(hostPart, "[") || !strings.Contains(hostPart, ":") {
+		return link, nil
+	}
+	var host, port string
+	if colon := strings.LastIndex(hostPart, ":"); colon >= 0 {
+		suffix := hostPart[colon+1:]
+		switch {
+		case strings.Contains(hostPart[:colon], ":") && (suffix == "" || isAllDigits(suffix)) && net.ParseIP(hostPart[:colon]) != nil:
+			// Tail is a port on an IPv6 literal ("2001:db8::1:443").
+			host, port = hostPart[:colon], suffix
+		case net.ParseIP(hostPart) != nil:
+			// The whole remnant is a bare IPv6 literal with no port.
+			host = hostPart
+		default:
+			return link, nil
+		}
+	} else {
+		return link, nil
+	}
+	newHost := "[" + host + "]"
+	if port != "" {
+		newHost += ":" + port
+	}
+	return prefix + authority[:at+1] + newHost + rest[end:], nil
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func urlProxy(link, name string) (ProxyConfig, error) {
-	u, err := url.Parse(strings.ReplaceAll(link, "&amp;", "&"))
+	normalized, err := bracketBareIPv6Authority(strings.ReplaceAll(link, "&amp;", "&"))
+	if err != nil {
+		return nil, ErrShareLink
+	}
+	u, err := url.Parse(normalized)
 	if err != nil {
 		return nil, ErrShareLink
 	}
@@ -454,6 +527,9 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 		// tuic v5 always dials over TLS (QUIC); the parameter is unconditional
 		// on the scheme, not on stray query keys.
 		applyTLSSettings(proxy, get, true)
+		if u.Port() == "" {
+			proxy["port"] = 443
+		}
 		for _, key := range []string{"congestion-controller", "udp-relay-mode"} {
 			if v := get(key); v != "" {
 				proxy[key] = v
