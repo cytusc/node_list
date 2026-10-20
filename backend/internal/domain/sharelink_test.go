@@ -24,6 +24,33 @@ func TestShadowsocksLinkEncodings(t *testing.T) {
 	}
 }
 
+func TestURLUserinfoIsDecodedExactlyOnce(t *testing.T) {
+	for _, test := range []struct {
+		name, link, wantType, key, want string
+	}{
+		{
+			name:     "trojan percent credentials",
+			link:     "trojan://p%252F%25word@example.com:443?security=tls",
+			wantType: "trojan", key: "password", want: "p%2F%word",
+		},
+		{
+			name:     "shadowsocks percent credentials",
+			link:     "ss://aes-128-gcm:p%252F%25word@example.com:443",
+			wantType: "ss", key: "password", want: "p%2F%word",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			proxy, err := ShareLinkProxy(test.link, "Node")
+			if err != nil {
+				t.Fatalf("valid escaped credentials were rejected: %v", err)
+			}
+			if proxy["type"] != test.wantType || proxy[test.key] != test.want {
+				t.Fatalf("userinfo was not preserved after one URL decode: %#v", proxy)
+			}
+		})
+	}
+}
+
 func TestVLESSLinkMapsECHConfig(t *testing.T) {
 	ech := "AEn+DQBFKwAgACABWIHUGj4u+PIggYXcR5JF0gYk3dCRioBW8uJq9H4mKAAIAAEAAQABAANAEnB1YmxpYy50bHMtZWNoLmRldgAA"
 	link := "vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?encryption=none&security=tls&type=ws&ech=" + url.QueryEscape(ech)

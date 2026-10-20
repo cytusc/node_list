@@ -242,7 +242,16 @@ func (r *Repository) Claim(ctx context.Context, kind, ref string, high bool) (*J
 			return nil, e
 		}
 		if !exists {
-			return nil, nil
+			// Deleted nodes cannot be probed. Complete only this claimable
+			// generation so publication does not recycle orphaned work forever.
+			// Keep the same lane, due-time and lease fences as normal admission.
+			if _, e = admission.Exec(ctx, `UPDATE node_explorer_work
+			SET state='done',lease_token=NULL,lease_until=NULL,error=''
+			WHERE id=$1 AND generation=$2 AND kind=$3 AND (priority>0)=$4
+			AND due_at<=now() AND (state='queued' OR (state='running' AND lease_until<now()))`, id, generation, kind, high); e != nil {
+				return nil, e
+			}
+			return nil, admission.Commit(ctx)
 		}
 		query = admission.QueryRow
 	}

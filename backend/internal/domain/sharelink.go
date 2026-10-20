@@ -15,7 +15,7 @@ import (
 // ShareLinkVersion bumps whenever the converter changes. Persisted failures
 // tagged with an older version re-enter the queue so a fixed parser retries
 // nodes that previously looked unsupported.
-const ShareLinkVersion = 6
+const ShareLinkVersion = 7
 
 // ErrShareLink is returned for any link this converter cannot express as a
 // usable outbound. The message never includes the link itself: share links
@@ -309,9 +309,12 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 	case "socks":
 		typeName = "socks5"
 	}
-	user, _ := url.QueryUnescape(u.User.Username())
+	// net/url has already percent-decoded URL userinfo. Decoding it again
+	// corrupts credentials containing a literal percent (for example, `%25`)
+	// and can reject otherwise valid subscription links.
+	user := u.User.Username()
 	secret, _ := u.User.Password()
-	password, _ := url.QueryUnescape(secret)
+	password := secret
 	get := func(key string) string { return u.Query().Get(key) }
 
 	proxy := ProxyConfig{
