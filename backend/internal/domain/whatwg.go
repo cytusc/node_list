@@ -144,7 +144,7 @@ func whatwgSerialize(link string) (string, bool) {
 	b.WriteString(hostOut)
 	b.WriteString(escapeWhatWG(pathRaw, pathSafe))
 	if hasQuery {
-		if query := encodeURLQuery(queryRaw); query != "" {
+		if query := encodeURLQuery(queryRaw, host); query != "" {
 			b.WriteByte('?')
 			b.WriteString(query)
 		}
@@ -194,9 +194,17 @@ type queryPair struct {
 }
 
 // encodeURLQuery parses a query string with the application/x-www-form-urlencoded
-// rules, sorts the pairs by key and renders them again. Sorting always triggers
-// a re-serialisation in JavaScript, so the original escaping is not preserved.
-func encodeURLQuery(raw string) string {
+// rules, drops no-op parameters, sorts the pairs by key and renders them again.
+// Sorting always triggers a re-serialisation in JavaScript, so the original
+// escaping is not preserved.
+//
+// No-op filtering mirrors ShareLinkConnection's vmess map normalisation:
+// parameters whose value is absent, empty, "none", "auto", "0" or "-" describe
+// the same connection as omitting them, and a sni equal to the authority host
+// duplicates information the URL already carries. Security-relevant values
+// ("tls", "reality", real fingerprints) never fall inside the no-op set, so
+// they are preserved verbatim.
+func encodeURLQuery(raw, host string) string {
 	pairs := []queryPair{}
 	for raw != "" {
 		part := raw
@@ -217,6 +225,7 @@ func encodeURLQuery(raw string) string {
 			value: decodeURLEncoded(value),
 		})
 	}
+	pairs = dropNoOpPairs(pairs, host)
 	if len(pairs) == 0 {
 		return ""
 	}
@@ -309,4 +318,42 @@ func escapeWhatWG(value string, safe string) string {
 		b.WriteByte(upperHex[c&0xf])
 	}
 	return b.String()
+}
+
+// noOpQueryValues collects the spellings that mean "absent" for every
+// transport parameter a share link may carry. None of them can distinguish
+// connections, so they are dropped before hashing.
+var noOpQueryValues = map[string]bool{
+	"":     true,
+	"none": true,
+	"auto": true,
+	"0":    true,
+	"-":    true,
+	"---":  true,
+}
+
+// dropNoOpPairs removes parameters whose value is a no-op spelling, plus a
+// redundant sni that repeats the transport host header carried in the host
+// parameter. Keep the list narrow: a real credential or transport difference
+// must still produce a distinct identity.
+func dropNoOpPairs(pairs []queryPair, host string) []queryPair {
+	// The transport host header, if any, is itself the dedup target for sni.
+	hostParam := host
+	for _, pair := range pairs {
+		if pair.key == "host" && pair.value != "" {
+			hostParam = pair.value
+			break
+		}
+	}
+	kept := pairs[:0]
+	for _, pair := range pairs {
+		if noOpQueryValues[pair.value] {
+			continue
+		}
+		if pair.key == "sni" && hostParam != "" && strings.EqualFold(pair.value, hostParam) {
+			continue
+		}
+		kept = append(kept, pair)
+	}
+	return kept
 }

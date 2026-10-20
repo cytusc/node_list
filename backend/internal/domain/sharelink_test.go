@@ -257,3 +257,59 @@ func TestTUICLinkCredentialShapes(t *testing.T) {
 		})
 	}
 }
+
+// TestVlessLinkIdentityFoldsNoOpQuerySpelling verifies that vless variants
+// differing only in no-op query spellings collapse to one identity. Found on
+// production: the same endpoint surfaced 5 rows because sources spelled
+// security=none, packetEncoding=none, headerType=none and a sni duplicating
+// the host header inconsistently.
+func TestVlessLinkIdentityFoldsNoOpQuerySpelling(t *testing.T) {
+	links := []string{
+		"vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform106.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform106&host=platform106.halalkhor.info&packetEncoding=none&sni=platform106.halalkhor.info#BR",
+		"vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform106.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform106&host=platform106.halalkhor.info&packetEncoding=none#JP",
+		"vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform106.golnamakcert.top:80?sni=platform106.halalkhor.info&type=ws&host=platform106.halalkhor.info&path=/platform106#unknown",
+		"vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform106.golnamakcert.top:80?type=ws&host=platform106.halalkhor.info&path=/platform106",
+		"vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform106.golnamakcert.top:80?&type=ws&headerType=none&host=platform106.halalkhor.info&path=/platform106#unknown",
+	}
+	seen := map[string]bool{}
+	for _, link := range links {
+		conn, ok := ShareLinkConnection(link)
+		if !ok {
+			t.Fatalf("link failed to connect: %s", link)
+		}
+		seen[conn] = true
+	}
+	if len(seen) != 1 {
+		t.Fatalf("expected no-op vless variants to fold to 1 identity, got %d", len(seen))
+	}
+}
+
+// TestVlessLinkIdentityKeepsRealQueryDifferences guards the folding rules:
+// security and header values that actually change the connection, a sni
+// distinct from the transport host, and non-no-op values must retain
+// separate identities.
+func TestVlessLinkIdentityKeepsRealQueryDifferences(t *testing.T) {
+	base := "vless://uuid@example.com:443?"
+	cases := []struct {
+		name string
+		a, b string
+	}{
+		{"security tls vs none", "security=tls&type=ws", "security=none&type=ws"},
+		{"sni differs from host", "type=ws&host=h1.example.com&sni=s1.example.com", "type=ws&host=h1.example.com"},
+		{"fingerprint preserved", "security=tls&fp=chrome&type=ws", "security=tls&type=ws"},
+		{"flow preserved", "flow=xtls-rprx-vision&type=ws", "type=ws"},
+		{"path differs", "type=ws&path=/a", "type=ws&path=/b"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			connA, okA := ShareLinkConnection(base + test.a)
+			connB, okB := ShareLinkConnection(base + test.b)
+			if !okA || !okB {
+				t.Fatalf("parse failed: %v %v", okA, okB)
+			}
+			if connA == connB {
+				t.Fatalf("real difference collapsed: %s vs %s", connA, connB)
+			}
+		})
+	}
+}
