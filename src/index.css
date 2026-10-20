@@ -162,75 +162,191 @@
   padding: 10px 20px;
   color: var(--muted-foreground);
 }
-.service-status-table {
-  table-layout: fixed;
-  font-size: 12px;
+.service-status-grid
+{
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px 20px 6px;
 }
-.service-status-table > thead {
-  background: color-mix(in srgb, var(--muted) 65%, var(--card));
+.service-metric-card
+{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
-.service-status-table > thead th {
-  height: 34px;
+.service-metric-head
+{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--muted-foreground);
   font-size: 11px;
-  font-weight: 400;
 }
-.service-status-table > thead th:first-child {
-  width: 35%;
-}
-.service-status-table > thead th:nth-child(2) {
-  width: 12%;
-}
-.service-status-table > thead th:last-child {
-  width: 48px;
-}
-.service-status-table > thead th:first-child,
-.service-status-table > tbody > tr > td:first-child {
-  padding-left: 20px;
-}
-.service-status-table > tbody > tr > td {
-  padding-top: 14px;
-  padding-bottom: 14px;
-}
-.service-status-name {
-  font-weight: 500;
-}
-.service-status-table .service-identity-cell {
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-.service-numeric {
-  text-align: right;
+.service-metric-value
+{
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.3;
   font-variant-numeric: tabular-nums;
 }
-.service-row-warning {
-  max-width: 45ch;
-  margin: 5px 0 0;
-  color: var(--service-warning);
-  font-size: 11px;
-  line-height: 1.6;
-}
-.service-status-row[data-health="error"] .service-row-warning {
-  color: var(--destructive);
-}
-.service-status-row[data-health="stale"] .service-row-warning {
+.service-metric-unit
+{
+  font-size: 10px;
+  font-weight: 400;
   color: var(--muted-foreground);
 }
-.service-detail-chevron {
+.service-metric-note
+{
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.service-metric-card[data-tone="healthy"] { border-color: color-mix(in srgb, var(--service-good) 20%, transparent); }
+.service-metric-card[data-tone="warning"] { border-color: color-mix(in srgb, var(--service-warning) 25%, transparent); }
+.service-metric-card[data-tone="error"] { border-color: color-mix(in srgb, var(--destructive) 30%, transparent); }
+.service-metric-card[data-tone="error"] .service-metric-value
+{
+  color: var(--destructive);
+}
+.service-metric-card[data-tone="warning"] .service-metric-value
+{
+  color: var(--service-warning);
+}
+.service-metric-card[data-tone="healthy"] .service-metric-head
+{
+  color: var(--service-good);
+}
+.service-metric-card[data-tone="stale"]
+{
+  opacity: 0.65;
+}
+.service-alert-list
+{
+  display: grid;
+  gap: 6px;
+  padding: 12px 20px 4px;
+}
+.service-alert-card
+{
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(70px, auto) minmax(0, 1fr) 13px;
+  align-items: center;
+  gap: 10px;
+  height: auto;
+  justify-content: flex-start;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  text-align: left;
+}
+.service-alert-card:hover
+{
+  background: var(--accent);
+}
+.service-alert-name
+{
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.service-alert-reason
+{
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.service-alert-card[data-health="warning"] .service-alert-reason
+{
+  color: var(--service-warning);
+}
+.service-alert-card[data-health="error"] .service-alert-reason
+{
+  color: var(--destructive);
+}
+.service-alert-card[data-health="stale"] .service-alert-reason
+{
+  color: var(--muted-foreground);
+}
+.service-alert-chevron
+{
+  color: var(--muted-foreground);
   transition: transform 160ms ease;
 }
-.service-detail-chevron[data-open="true"] {
+.service-alert-chevron[data-open="true"]
+{
   transform: rotate(90deg);
 }
-.service-detail-row {
-  background: color-mix(in srgb, var(--muted) 50%, var(--card));
+.service-service-detail
+{
+  border-left: 3px solid var(--border);
+  padding: 2px 0 10px 14px;
+  margin: 4px 0 0 4px;
 }
-.service-detail-row:hover {
-  background: color-mix(in srgb, var(--muted) 50%, var(--card));
+.service-alert-item[data-health="error"] .service-service-detail
+{
+  border-left-color: var(--destructive);
 }
-.service-status-table > tbody > .service-detail-row > td {
-  white-space: normal;
-  padding: 0 20px 18px;
+.service-alert-item[data-health="warning"] .service-service-detail
+{
+  border-left-color: var(--service-warning);
+}
+.service-health-block
+{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px 14px;
+}
+.service-health-label
+{
+  color: var(--muted-foreground);
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 4px;
+}
+.service-health-pill
+{
+  color: var(--service-good);
+  font-size: 11px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--service-good) 18%, transparent);
+  background: color-mix(in srgb, var(--service-good) 5%, transparent);
+  gap: 6px;
+}
+.service-health-pill:hover
+{
+  color: var(--service-good);
+  background: color-mix(in srgb, var(--service-good) 12%, transparent);
+}
+.service-service-detail.service-health-detail
+{
+  flex-basis: 100%;
+  margin-left: 0;
+}
+.service-health-empty
+{
+  color: var(--muted-foreground);
+  font-size: 11px;
 }
 .service-detail-content {
   padding-top: 4px;
@@ -350,48 +466,37 @@
   .service-refresh {
     order: 5;
   }
-  .service-wide-cell {
-    display: none;
+  .service-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 10px 12px 4px;
   }
-  .service-status-table > thead,
-  .service-status-table > tbody {
-    display: block;
+  .service-status-grid .service-metric-card:nth-child(-n+2) {
+    grid-column: span 2;
   }
-  .service-status-table > thead > tr,
-  .service-status-table > tbody > .service-status-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 66px 50px 44px 28px;
-    align-items: center;
+  .service-alert-list {
+    padding: 10px 12px 2px;
   }
-  .service-status-table > thead th {
-    width: auto !important;
-    display: block;
+  .service-alert-card {
+    grid-template-columns: minmax(0, 1fr) 20px;
+    grid-template-areas:
+      "name chevron"
+      "reason chevron";
   }
-  .service-status-table > thead .service-wide-cell {
-    display: none;
+  .service-alert-name {
+    grid-area: name;
   }
-  .service-status-table > tbody > .service-detail-row,
-  .service-status-table > tbody > .service-detail-row > td {
-    display: block;
+  .service-alert-reason {
+    grid-area: reason;
+    -webkit-line-clamp: 3;
   }
-  .service-status-table > thead th:first-child,
-  .service-status-table > tbody > tr > td:first-child {
+  .service-alert-chevron {
+    grid-area: chevron;
+  }
+  .service-service-detail {
     padding-left: 12px;
   }
-  .service-status-table th,
-  .service-status-table td {
-    padding-left: 4px;
-    padding-right: 4px;
-  }
-  .service-status-table th {
-    font-size: 10px;
-  }
-  .service-status-table > tbody > tr > td {
-    padding-top: 12px;
-    padding-bottom: 12px;
-  }
-  .service-status-table > tbody > .service-detail-row > td {
-    padding: 0 12px 16px;
+  .service-health-block {
+    padding: 8px 12px 12px;
   }
   .service-status-context {
     padding: 8px 12px;

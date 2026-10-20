@@ -6,7 +6,9 @@ import {
   ChevronDown,
   ChevronRight,
   Clock3,
+  Inbox,
   Info,
+  Loader,
   RefreshCw,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -89,6 +91,7 @@ function warnings(service: Service) {
 }
 const hasWorkQueue = (s: Service) =>
   !["api", "source-ingest", "mihomo-manager"].includes(s.service);
+type Tone = "healthy" | "warning" | "error" | "stale";
 function Metric({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="service-detail-metric">
@@ -141,6 +144,10 @@ function ServiceDetails({ service }: { service: Service }) {
           <Metric
             label="隔离节点"
             value={number.format(service.kernel.quarantined)}
+          />
+          <Metric
+            label="快速检测中"
+            value={number.format(service.kernel.fastRunning)}
           />
           <Metric
             label="配置代次"
@@ -208,10 +215,13 @@ function ServiceDetails({ service }: { service: Service }) {
       )}
       <dl className="service-detail-metrics service-detail-secondary">
         {hasWorkQueue(service) && (
-          <Metric
-            label="定时等待"
-            value={number.format(service.scheduled ?? 0)}
-          />
+          <>
+            <Metric label="执行中" value={number.format(service.running)} />
+            <Metric
+              label="定时等待"
+              value={number.format(service.scheduled ?? 0)}
+            />
+          </>
         )}
         {(service.cooldown ?? 0) > 0 && (
           <Metric
@@ -238,7 +248,36 @@ function ServiceDetails({ service }: { service: Service }) {
     </div>
   );
 }
-
+function MetricCard({
+  icon,
+  label,
+  value,
+  note,
+  tone,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: React.ReactNode;
+  note?: React.ReactNode;
+  tone?: Tone;
+}) {
+  return (
+    <div className="service-metric-card" data-tone={tone}>
+      <span className="service-metric-head">
+        {icon}
+        {label}
+      </span>
+      <span className="service-metric-value">
+        {value}
+        <span className="service-metric-unit">项</span>
+      </span>
+      {note && <span className="service-metric-note">{note}</span>}
+    </div>
+  );
+}
+function nonceStateTone(state: Tone) {
+  return state === "healthy" ? undefined : state;
+}
 export function ServiceStatusPanel({
   services,
   observedAt,
@@ -264,7 +303,7 @@ export function ServiceStatusPanel({
     Boolean(error) ||
     !Number.isFinite(snapshotTime) ||
     now - snapshotTime > 45000;
-  const stateOf = (service: Service) => {
+  const stateOf = (service: Service): Tone => {
     if (stale) return "stale";
     if (
       !service.healthy ||
@@ -284,6 +323,28 @@ export function ServiceStatusPanel({
   );
   const ordered = [...services].sort(
     (a, b) => serviceOrder.indexOf(a.service) - serviceOrder.indexOf(b.service),
+  );
+  const work = ordered.filter(hasWorkQueue);
+  const attending = ordered.filter((service) => stateOf(service) === "stale");
+  const alerted = ordered.filter(
+    (service) => stateOf(service) === "warning" || stateOf(service) === "error",
+  );
+  const healthy = ordered.filter((service) => stateOf(service) === "healthy");
+  const totalQueued = work.reduce((sum, service) => sum + service.queued, 0);
+  const totalScheduled = work.reduce(
+    (sum, service) => sum + (service.scheduled ?? 0),
+    0,
+  );
+  const maxWait = work.reduce(
+    (max, service) => Math.max(max, service.oldestWaitSeconds),
+    0,
+  );
+  const totalRunning = ordered.reduce(
+    (sum, service) =>
+      hasWorkQueue(service) || service.kernel
+        ? sum + (service.kernel ? service.kernel.fastRunning : service.running)
+        : sum,
+    0,
   );
   const hasSnapshot = services.length > 0;
   const toggle = (name: string) =>
@@ -399,7 +460,7 @@ export function ServiceStatusPanel({
             >
               <p className="mb-2 font-medium">任务与服务分别统计</p>
               <p>
-                到期待处理：已经到执行时间的排队任务。定时等待：尚未到期的任务，包含恢复冷却。
+                到期待处理：已经到执行时间的排队任务。定时等待：尚未到期的任务，包含恢复冷却。最长等待是所有服务中最久未处理的一个。
               </p>
               <p className="mt-2">
                 执行中：持有有效执行租约的任务；共享内核展示实际快速检测数。核验中会话另列在恢复服务详情。
@@ -414,133 +475,148 @@ export function ServiceStatusPanel({
           <div className="service-status-empty">
             {loading ? (
               <>
-                <Skeleton className="h-8 w-full" />
-                <Skeleton className="h-8 w-full" />
-                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-14 w-full" />
+                <Skeleton className="h-14 w-full" />
+                <Skeleton className="h-14 w-full" />
               </>
             ) : (
               "尚未取得服务状态，请刷新重试。"
             )}
           </div>
         ) : (
-          <Table className="service-status-table" aria-label="服务运行状态">
-            <TableHeader>
-              <TableRow>
-                <TableHead>服务</TableHead>
-                <TableHead>运行状态</TableHead>
-                <TableHead className="service-numeric">
-                  <span className="hidden sm:inline">到期</span>待处理
-                </TableHead>
-                <TableHead className="service-numeric service-wide-cell">
-                  定时等待
-                </TableHead>
-                <TableHead className="service-numeric">执行中</TableHead>
-                <TableHead className="service-numeric service-wide-cell">
-                  最长等待
-                </TableHead>
-                <TableHead className="w-10">
-                  <span className="sr-only">详情</span>
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {ordered.map((service) => {
-                const state = stateOf(service);
-                const name = serviceNames[service.service] || service.service;
-                const notes = [
-                  ...(service.error ? [service.error] : []),
-                  ...warnings(service),
-                ];
-                if (state === "error" && !notes.length)
-                  notes.push("服务心跳已过期");
-                const showDetails = expanded.has(service.service);
-                const running = service.kernel
-                  ? service.kernel.fastRunning
-                  : service.running;
-                return (
-                  <Fragment key={service.service}>
-                    <TableRow
-                      className="service-status-row"
+          <>
+            <div className="service-status-grid">
+              <MetricCard
+                icon={<Check className="size-3" />}
+                label="运行服务"
+                value={number.format(counts.healthy)}
+                note={`共 ${services.length} 项，${attending.length || alerted.length === 0 ? "无异常负载" : ""}${
+                  alerted.length > 0 ? `${alerted.length} 项需关注` : ""
+                }`}
+                tone={stale ? "stale" : "healthy"}
+              />
+              <MetricCard
+                icon={<AlertTriangle className="size-3" />}
+                label="告警与异常"
+                value={number.format(counts.warning + counts.error)}
+                note={`告警 ${counts.warning} 项 · 异常 ${counts.error} 项`}
+                tone={stale ? "stale" : nonceStateTone(
+                  counts.error > 0
+                    ? "error"
+                    : counts.warning > 0
+                      ? "warning"
+                      : "healthy",
+                )}
+              />
+              <MetricCard
+                icon={<Loader className="size-3" />}
+                label="执行中任务"
+                value={number.format(totalRunning)}
+                note="租约持有中的任务与内核快速检测数"
+              />
+              <MetricCard
+                icon={<Inbox className="size-3" />}
+                label="待处理队列"
+                value={number.format(totalQueued)}
+                note={`定时等待 ${number.format(totalScheduled)} · 最长等待 ${waitLabel(maxWait)}`}
+              />
+            </div>
+            {alerted.length > 0 && (
+              <div className="service-alert-list">
+                {alerted.map((service) => {
+                  const state = stateOf(service);
+                  const name =
+                    serviceNames[service.service] || service.service;
+                  const notes = [
+                    ...(service.error ? [service.error] : []),
+                    ...warnings(service),
+                  ];
+                  if (state === "error" && !notes.length)
+                    notes.push("服务心跳已过期");
+                  return (
+                    <div
+                      key={service.service}
+                      className="service-alert-item"
                       data-health={state}
                     >
-                      <TableCell className="service-identity-cell">
-                        <span className="service-status-name">{name}</span>
-                        {notes.length > 0 && (
-                          <p className="service-row-warning">
-                            {notes.join("；")}
-                          </p>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="outline"
-                          className={`service-tone-${state}`}
-                        >
+                      <Button
+                        variant="ghost"
+                        className="service-alert-card"
+                        data-health={state}
+                        aria-expanded={expanded.has(service.service)}
+                        aria-controls={`service-detail-${service.service}`}
+                        aria-label={`${expanded.has(service.service) ? "收起" : "查看"}${name}详情`}
+                        onClick={() => toggle(service.service)}
+                      >
+                        <span className="service-alert-name">
                           <span className="service-status-dot" />
-                          {
-                            {
-                              healthy: "运行",
-                              warning: "告警",
-                              error: "异常",
-                              stale: "待更新",
-                            }[state]
-                          }
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="service-numeric">
-                        {hasWorkQueue(service)
-                          ? number.format(service.queued)
-                          : "—"}
-                      </TableCell>
-                      <TableCell className="service-numeric service-wide-cell">
-                        {hasWorkQueue(service)
-                          ? number.format(service.scheduled ?? 0)
-                          : "—"}
-                      </TableCell>
-                      <TableCell className="service-numeric">
-                        {hasWorkQueue(service) || service.kernel
-                          ? number.format(running)
-                          : "—"}
-                      </TableCell>
-                      <TableCell className="service-numeric service-wide-cell">
-                        {waitLabel(service.oldestWaitSeconds)}
-                      </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label={`${showDetails ? "收起" : "查看"}${name}详情`}
-                          aria-expanded={showDetails}
-                          aria-controls={`service-detail-${service.service}`}
-                          onClick={() => toggle(service.service)}
-                        >
-                          <ChevronRight
-                            className="service-detail-chevron"
-                            data-open={showDetails}
-                          />
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                    {showDetails && (
-                      <TableRow className="service-detail-row">
-                        <TableCell
-                          colSpan={7}
+                          {name}
+                        </span>
+                        <span className="service-alert-reason">
+                          {notes.length ? notes.join("；") : "等待下一次刷新"}
+                        </span>
+                        <ChevronRight
+                          className="service-alert-chevron"
+                          data-open={expanded.has(service.service)}
+                        />
+                      </Button>
+                      {expanded.has(service.service) && (
+                        <div
                           id={`service-detail-${service.service}`}
+                          className="service-service-detail"
                         >
                           <ServiceDetails service={service} />
-                        </TableCell>
-                      </TableRow>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <div className="service-health-block">
+              <span className="service-health-label">
+                <Check className="size-3.5" />
+                运行正常
+              </span>
+              {healthy.map((service) => {
+                const name =
+                  serviceNames[service.service] || service.service;
+                return (
+                  <Fragment key={service.service}>
+                    <Button
+                      variant="ghost"
+                      className="service-health-pill"
+                      aria-expanded={expanded.has(service.service)}
+                      aria-controls={`service-detail-${service.service}`}
+                      aria-label={`${expanded.has(service.service) ? "收起" : "查看"}${name}详情`}
+                      onClick={() => toggle(service.service)}
+                    >
+                      <span className="service-status-dot" />
+                      {name}
+                    </Button>
+                    {expanded.has(service.service) && (
+                      <div
+                        id={`service-detail-${service.service}`}
+                        className="service-service-detail service-health-detail"
+                      >
+                        <ServiceDetails service={service} />
+                      </div>
                     )}
                   </Fragment>
                 );
               })}
-            </TableBody>
-          </Table>
+              {healthy.length === 0 && (
+                <span className="service-health-empty">
+                  暂无全部健康的服务
+                </span>
+              )}
+            </div>
+          </>
         )}
         <div className="service-status-footer">
           <span className="service-status-dot" />每 15 秒刷新
           <span className="service-footer-hint">
-            告警与异常可在对应服务行查看
+            点按服务名称可展开该服务的指标明细
           </span>
         </div>
       </CollapsibleContent>

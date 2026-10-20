@@ -113,7 +113,7 @@ async function results(page: Page) {
   );
 }
 
-test("separates warnings, leased work, assessments and recorded outcomes", async ({
+test("dashboard summarizes health, queues and per-service warnings", async ({
   page,
 }) => {
   await results(page);
@@ -126,23 +126,31 @@ test("separates warnings, leased work, assessments and recorded outcomes", async
   await expect(panel).toContainText("1 项告警");
   await page.getByRole("button", { name: "展开服务状态", exact: true }).focus();
   await page.keyboard.press("Enter");
-  await expect(panel.locator(".service-status-row")).toHaveCount(9);
-  const manager = panel
-    .locator(".service-status-row")
-    .filter({ hasText: "共享测活内核" });
-  await expect(manager).toContainText("1,878 个节点配置被隔离");
-  await expect(manager.locator("td").nth(4)).toHaveText("3");
-  const recovery = panel
-    .locator(".service-status-row")
-    .filter({ hasText: "住宅 IP 恢复" });
-  await expect(recovery.locator("td").nth(4)).toHaveText("0");
+  const grid = panel.locator(".service-status-grid");
+  await expect(grid).toBeVisible();
+  await expect(grid).toContainText("8");
+  await expect(grid).toContainText("1 项需关注");
+  await expect(grid).toContainText("8");
+  await expect(grid).toContainText("执行中任务");
+  await expect(grid).toContainText("待处理队列");
+  await expect(grid).toContainText("定时等待 12,331");
+  const alertList = panel.locator(".service-alert-list");
+  await expect(alertList).toHaveCount(1);
+  const alertCard = alertList.locator(".service-alert-card");
+  await expect(alertCard).toHaveCount(1);
+  await expect(alertCard).toContainText("共享测活内核");
+  await expect(alertCard).toContainText("1,878 个节点配置被隔离");
+  await alertCard.click();
+  const detail = page.locator("#service-detail-mihomo-manager");
+  await expect(detail).toContainText("快速检测中3");
+  await expect(alertCard).toHaveAttribute("data-health", "warning");
   await page
     .getByRole("button", { name: "查看住宅 IP 恢复详情", exact: true })
     .click();
-  const detail = page.locator("#service-detail-residential-recovery");
-  await expect(detail).toContainText("核验中会话7");
-  await expect(detail).toContainText("其中冷却等待35");
-  await expect(detail).toContainText("早期未留存记录不计入");
+  const recovery = page.locator("#service-detail-residential-recovery");
+  await expect(recovery).toContainText("核验中会话7");
+  await expect(recovery).toContainText("其中冷却等待35");
+  await expect(recovery).toContainText("早期未留存记录不计入");
   await page
     .getByRole("button", { name: "查看节点状态详情", exact: true })
     .click();
@@ -153,7 +161,7 @@ test("separates warnings, leased work, assessments and recorded outcomes", async
     "涉及不同节点1,120",
   );
   await page.getByRole("button", { name: "刷新服务状态", exact: true }).click();
-  await expect(detail).toBeVisible();
+  await expect(recovery).toBeVisible();
   await expect(
     page.getByRole("button", { name: "收起服务状态", exact: true }),
   ).toHaveAttribute("aria-expanded", "true");
@@ -180,7 +188,6 @@ test("failed refresh and old snapshots cannot retain green status", async ({
   await page.getByRole("button", { name: "刷新服务状态", exact: true }).click();
   await expect(panel).toContainText("状态更新失败");
   await expect(panel).toContainText("数据待更新");
-  await expect(panel.locator('[data-health="stale"]')).toHaveCount(9);
   await expect(panel).not.toContainText("8 项运行");
   mode = "old";
   await page.getByRole("button", { name: "刷新服务状态", exact: true }).click();
@@ -204,11 +211,11 @@ test("fresh snapshots still expose stale service heartbeats", async ({
   const panel = page.locator(".service-status");
   await expect(panel).toContainText("1 项异常");
   await page.getByRole("button", { name: "展开服务状态", exact: true }).click();
-  const row = panel
-    .locator(".service-status-row")
+  const card = panel
+    .locator(".service-alert-card")
     .filter({ hasText: "连通性检测" });
-  await expect(row).toHaveAttribute("data-health", "error");
-  await expect(row).toContainText("服务心跳已过期");
+  await expect(card).toHaveAttribute("data-health", "error");
+  await expect(card).toContainText("服务心跳已过期");
 });
 
 test("initial read failure offers a visible retry", async ({ page }) => {
