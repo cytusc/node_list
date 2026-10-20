@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -161,7 +162,13 @@ func (n Node) PortString() string {
 //
 // Share links carry their own credentials, so the link alone identifies the
 // connection. Clash configurations are canonicalised to ignore cosmetic
-// differences between equivalent subscriptions.
+// differences between equivalent subscriptions. vmess share links are
+// normalised by normalizeVmessConnection: two spellings of the same connection
+// collapse into one identity. This intentionally changed the hash input for
+// affected vmess links relative to the pre-normalisation build; identities
+// re-converge on the next full registry rebuild, and the legacy oracle at
+// legacy/node-server/node-sources.js keeps the unnormalised form (accepted
+// drift, Go is authoritative since modularisation).
 func AggregateIdentity(n Node) string {
 	if len(n.RawConfig) == 0 && n.RawLink != "" {
 		if id, ok := shareLinkIdentity(n.RawLink); ok {
@@ -201,6 +208,14 @@ func shareLinkIdentity(link string) (string, bool) {
 // ShareLinkConnection renders the canonical connection string that
 // AggregateIdentity hashes for a share link. It exists so the parity checker
 // can diff the hashing input itself instead of only the digest.
+//
+// vmess links are further normalised by normalizeVmessConnection: upstream
+// aggregators emit the same effective connection with different spellings of
+// no-op fields (numeric vs string port, absent vs empty transport fields,
+// "---"/"auto" noise). The oracle at legacy/node-server/node-sources.js does
+// not normalise these; Go is the authoritative implementation since the
+// modularisation, so already-stored identities converge on the next full
+// registry rebuild while variants collapse into one row.
 func ShareLinkConnection(link string) (string, bool) {
 	if strings.HasPrefix(link, "vmess://") {
 		raw, err := decodeBase64(link[len("vmess://"):])
@@ -214,6 +229,7 @@ func ShareLinkConnection(link string) (string, bool) {
 		// Display name and remarks describe a check, not a connection.
 		delete(config, "ps")
 		delete(config, "name")
+		normalizeVmessConnection(config)
 		b, err := canonicalJSON(config)
 		if err != nil {
 			return "", false
@@ -221,6 +237,77 @@ func ShareLinkConnection(link string) (string, bool) {
 		return string(b), true
 	}
 	return whatwgSerialize(link)
+}
+
+// vmessNoOpFields lists optional link fields whose absent, empty, default
+// ("none"/"auto"), zero and false spellings all mean the same connection.
+var vmessNoOpFields = []string{
+	"sni", "host", "path", "fp", "alpn", "scy", "insecure",
+	"skip-cert-verify", "headerType", "packetEncoding", "type",
+}
+
+// normalizeVmessConnection mutates the decoded vmess config in place, merging
+// spellings that describe the same connection before it is hashed:
+//
+//   - numeric vs string scalars are unified on the numeric form for fields
+//     that are semantically numeric (port, aid, v);
+//   - no-op optional fields carrying unset values are removed;
+//   - tls ""/"none"/false and udp false are removed; net "tcp"/"raw" is
+//     removed, matching connectionConfig's default-folding rules.
+//
+// Everything else is preserved verbatim, so a real credential or transport
+// difference still produces a distinct identity.
+func normalizeVmessConnection(config map[string]any) {
+	if config == nil {
+		return
+	}
+	// Numeric/string unification for semantically numeric fields.
+	for _, field := range []string{"port", "aid", "v"} {
+		switch t := config[field].(type) {
+		case string:
+			if n, err := strconv.ParseFloat(t, 64); err == nil {
+				if b, err := marshalJSON(n); err == nil {
+					config[field] = json.RawMessage(b)
+				}
+			}
+		}
+	}
+	for _, field := range vmessNoOpFields {
+		switch t := config[field].(type) {
+		case string:
+			if t == "" || t == "none" || t == "auto" || t == "---" || t == "0" {
+				delete(config, field)
+			}
+		case bool:
+			if !t {
+				delete(config, field)
+			}
+		case float64:
+			if t == 0 {
+				delete(config, field)
+			}
+		case nil:
+			delete(config, field)
+		}
+	}
+	switch t := config["tls"].(type) {
+	case bool:
+		if !t {
+			delete(config, "tls")
+		}
+	case string:
+		if t == "" || t == "none" {
+			delete(config, "tls")
+		}
+	case nil:
+		delete(config, "tls")
+	}
+	if v, ok := config["udp"].(bool); ok && !v {
+		delete(config, "udp")
+	}
+	if s, ok := config["net"].(string); ok && (s == "tcp" || s == "raw") {
+		delete(config, "net")
+	}
 }
 
 // ConnectionConfig is the exported form of connectionConfig, used by the

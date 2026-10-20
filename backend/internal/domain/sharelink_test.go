@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/url"
 	"strings"
 	"testing"
@@ -135,6 +136,64 @@ func TestShareLinkTLSEnabledExplicitPerScheme(t *testing.T) {
 		}
 		if proxy["tls"] != true {
 			t.Fatalf("scheme-TLS outbound lost TLS: %#v", proxy)
+		}
+	}
+}
+
+func TestVmessLinkIdentityNormalizesNoOpSpellings(t *testing.T) {
+	link := func(config string) string {
+		return "vmess://" + base64.StdEncoding.EncodeToString([]byte(config))
+	}
+	// Same connection, different spellings: numeric vs string scalars, unset
+	// vs empty/none/auto no-op fields, "---" garbage instead of "none".
+	variants := []map[string]any{
+		{"add": "x.example", "port": 18000, "id": "u1", "net": "tcp", "v": 2},
+		{"add": "x.example", "port": "18000", "id": "u1", "net": "tcp", "v": "2"},
+		{"add": "x.example", "port": "18000", "id": "u1", "net": "raw", "v": "2", "sni": "", "host": "", "path": "", "fp": "", "alpn": "", "scy": "", "type": "---"},
+	}
+	seen := map[string]bool{}
+	for _, v := range variants {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connection, ok := ShareLinkConnection(link(string(b)))
+		if !ok {
+			t.Fatalf("variant not parseable: %s", b)
+		}
+		seen[connection] = true
+	}
+	if len(seen) != 1 {
+		t.Fatalf("variants collapsed to %d connections, want 1:\n%v", len(seen), seen)
+	}
+}
+
+func TestVmessLinkIdentityKeepsRealDifferences(t *testing.T) {
+	link := func(config map[string]any) string {
+		b, err := json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return "vmess://" + base64.StdEncoding.EncodeToString(b)
+	}
+	base := map[string]any{"add": "x.example", "port": 18000, "id": "u1", "net": "tcp", "v": 2}
+	// A credential/transport difference must remain distinct.
+	distinct := []map[string]any{
+		{"add": "x.example", "port": 18001, "id": "u1", "net": "tcp", "v": 2},
+		{"add": "x.example", "port": 18000, "id": "u2", "net": "tcp", "v": 2},
+		{"add": "x.example", "port": 18000, "id": "u1", "net": "ws", "path": "/a", "v": 2},
+	}
+	baseConn, ok := ShareLinkConnection(link(base))
+	if !ok {
+		t.Fatal("base not parseable")
+	}
+	for _, d := range distinct {
+		conn, ok := ShareLinkConnection(link(d))
+		if !ok {
+			t.Fatalf("distinct variant not parseable: %+v", d)
+		}
+		if conn == baseConn {
+			t.Fatalf("real difference collapsed: %+v", d)
 		}
 	}
 }
