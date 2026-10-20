@@ -126,6 +126,25 @@ func normalizeUUID(v string) (string, error) {
 	return v, nil
 }
 
+// normalizeTUICCredential accepts both tuic v5 credential shapes: a UUID
+// token written as userinfo, or a plain username paired with a password. A
+// bare username without any password stays rejected: the outbound would
+// authenticate with an empty secret.
+func normalizeTUICCredential(proxy ProxyConfig, user, password string) error {
+	id, err := normalizeUUID(user)
+	if err == nil {
+		proxy["uuid"] = id
+		proxy["password"] = password
+		return nil
+	}
+	if password == "" {
+		return ErrShareLink
+	}
+	proxy["username"] = user
+	proxy["password"] = password
+	return nil
+}
+
 func isHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -340,7 +359,7 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 		if v := get("packetEncoding"); v != "" {
 			proxy["packet-encoding"] = v
 		}
-		applyTLSSettings(proxy, get, get("security") == "tls" || get("security") == "reality")
+		applyTLSSettings(proxy, get, urlTLSEnabled(get))
 		if err := applyTransport(proxy, get); err != nil {
 			return nil, err
 		}
@@ -353,6 +372,9 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 		if proxy["password"] == "" {
 			return nil, ErrShareLink
 		}
+		// TLS-only schemes, expressed explicitly: these outbounds fail without
+		// TLS, so the link's own transport never downgrades them. A reality
+		// security parameter is still validated inside applyTLSSettings.
 		applyTLSSettings(proxy, get, true)
 		if typeName == "trojan" {
 			if err := applyTransport(proxy, get); err != nil {
@@ -421,12 +443,16 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 			proxy["port"] = 443
 		}
 	case "tuic":
-		id, err := normalizeUUID(user)
-		if err != nil {
-			return nil, ErrShareLink
+		// tuic v5 accepts two credential shapes: a UUID token (the common
+		// canonical form) and a plain username with a password. Accept both;
+		// a bare username without a password is still invalid because the
+		// outbound would authenticate with an empty secret. Both shapes run
+		// the same TLS and transport option mapping below.
+		if err := normalizeTUICCredential(proxy, user, password); err != nil {
+			return nil, err
 		}
-		proxy["uuid"] = id
-		proxy["password"] = password
+		// tuic v5 always dials over TLS (QUIC); the parameter is unconditional
+		// on the scheme, not on stray query keys.
 		applyTLSSettings(proxy, get, true)
 		for _, key := range []string{"congestion-controller", "udp-relay-mode"} {
 			if v := get(key); v != "" {
@@ -596,6 +622,15 @@ func first(get func(string) string, keys ...string) string {
 
 func firstOr(get func(string) string, keys ...string) string {
 	return first(get, keys...)
+}
+
+// urlTLSEnabled derives TLS from the link's own security parameter. Trojan,
+// anytls, hysteria2 and tuic are TLS-only by scheme, so their callers pass
+// true unconditionally; only vmess (JSON tls field) and vless (security
+// query) need derivation.
+func urlTLSEnabled(get func(string) string) bool {
+	security := get("security")
+	return security == "tls" || security == "reality"
 }
 
 func applyTLSSettings(proxy ProxyConfig, get func(string) string, enabled bool) {

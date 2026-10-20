@@ -394,3 +394,320 @@ func TestShorterRecoveryIntervalAdvancesOnlyUnstartedJobs(t *testing.T) {
 		t.Fatalf("running session replaced: %v %d %v", due, generation, err)
 	}
 }
+
+func TestRetryIntervalForTiersFailures(t *testing.T) {
+	base := 20 * time.Minute
+	cases := []struct {
+		name     string
+		result   string
+		attempts int
+		want     time.Duration
+	}{
+		{"first retry", "probe-failed", 1, base},
+		{"second retry", "probe-failed", 2, 2 * time.Hour},
+		{"third retry", "probe-failed", 3, 12 * time.Hour},
+		{"fourth retry", "probe-failed", 4, 24 * time.Hour},
+		{"fifth retry", "probe-failed", 5, 24 * time.Hour},
+		{"stays stuck at ceiling", "probe-failed", 20, 24 * time.Hour},
+		{"config rejection unchanged", "config-rejected", 1, max(base, 6*time.Hour)},
+		{"config rejection high attempt", "config-rejected", 30, max(base, 6*time.Hour)},
+		{"dead verdict is terminal", "config-rejected-dead", 1, time.Duration(1 << 62)},
+		{"other outcomes ride the ladder", "timed-out", 2, 2 * time.Hour},
+		{"unknown outcome rides the ladder", "", 2, 2 * time.Hour},
+		{"attempts below one never shorten", "probe-failed", 0, base},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryIntervalFor(tc.result, tc.attempts, base); got != tc.want {
+				t.Fatalf("retryIntervalFor(%q,%d) = %v want %v", tc.result, tc.attempts, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalRecoveryBacksOffRepeatedFailures(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	j := queueNormal(t, f)
+	// Two recorded failures must push the next attempt to a two-hour deadline.
+	// Attempts are zeroed by re-queueing, so simulate the persisted ladder by
+	// replaying recordRecoveryResult twice across two generations.
+	if err := f.repo.Finish(ctx, j, func(tx pgx.Tx) error { return recordRecoveryResult(ctx, tx, j, "probe-failed", "") }); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.runner.schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var generation int64
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT generation FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	ref := fmt.Sprintf("%d:%d", j.ID, generation)
+	f.exec(t, `UPDATE node_explorer_work SET due_at=now() WHERE id=$1`, j.ID)
+	next, err := f.repo.Claim(ctx, KindNormalRecovery, ref, false)
+	if err != nil || next == nil {
+		t.Fatalf("claim retry generation: %v %v", next, err)
+	}
+	if err := f.repo.Finish(ctx, *next, func(tx pgx.Tx) error { return recordRecoveryResult(ctx, tx, *next, "probe-failed", "") }); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.runner.schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var due time.Time
+	var attempts int
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at,(payload->>'recoveryAttempts')::int FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&due, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts not accumulated: %d", attempts)
+	}
+	if due.Before(time.Now().Add(1*time.Hour+59*time.Minute)) || due.After(time.Now().Add(2*time.Hour+time.Minute)) {
+		t.Fatalf("second failure did not back off to two hours: %v", due)
+	}
+	// The prefetch advance must leave tiered deadlines alone.
+	if err := f.runner.schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var after time.Time
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if !due.Equal(after) {
+		t.Fatalf("prefetch moved a tiered deadline: %v -> %v", due, after)
+	}
+}
+
+func TestPruneCompletedNormalRecoveryWork(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	marker := func(key, payload string, due string) int64 {
+		t.Helper()
+		var id int64
+		if err := f.repo.Pool.QueryRow(ctx, `INSERT INTO node_explorer_work(kind,key,payload,state,due_at)
+		VALUES('normal-recovery',$1,$2,'done',$3::timestamptz) RETURNING id`, key, payload, due).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	// A fresh completed marker must survive: the staged cadence still reads it.
+	fresh := marker("prune:fresh", `{"identity":"i-fresh","checkedAt":"`+time.Now().UTC().Format(time.RFC3339Nano)+`","recoveryResult":"probe-failed","recoveryAttempts":1}`, "now()")
+	// An old completed marker is residue: its retirement either still qualifies
+	// (and schedule starts a fresh assessment) or nothing references it.
+	old := marker("prune:old", `{"identity":"i-old","checkedAt":"`+time.Now().UTC().Add(-45*24*time.Hour).Format(time.RFC3339Nano)+`","recoveryResult":"probe-failed","recoveryAttempts":3}`, "now()")
+	// A legacy row with no checkedAt falls back to its due_at timestamp.
+	var legacy int64
+	if err := f.repo.Pool.QueryRow(ctx, `INSERT INTO node_explorer_work(kind,key,payload,state,due_at)
+	VALUES('normal-recovery','prune:legacy','{"identity":"i-legacy","recoveryResult":"probe-failed"}','done',now()-interval '45 days') RETURNING id`).Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	// An unfinished queued row must never be deleted regardless of age.
+	var pending int64
+	if err := f.repo.Pool.QueryRow(ctx, `INSERT INTO node_explorer_work(kind,key,payload,state,due_at)
+	VALUES('normal-recovery','prune:pending','{"identity":"i-pending"}','queued',now()-interval '45 days') RETURNING id`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	// A different kind keeps the legacy two-day bucket, untouched by this path.
+	var other int64
+	if err := f.repo.Pool.QueryRow(ctx, `INSERT INTO node_explorer_work(kind,key,payload,state,due_at)
+	VALUES('recovery','prune:other','{"identity":"i-other"}','done',now()-interval '45 days') RETURNING id`).Scan(&other); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.repo.pruneCompletedWork(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var present int
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE id=ANY($1::bigint[])`, []int64{fresh, pending, other}).Scan(&present); err != nil || present != 3 {
+		t.Fatalf("prune kept wrong rows: %d %v", present, err)
+	}
+	var gone int
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE id=ANY($1::bigint[])`, []int64{old, legacy}).Scan(&gone); err != nil || gone != 0 {
+		t.Fatalf("stale markers survived: %d %v", gone, err)
+	}
+}
+
+func TestConfigRejectedDeadLetterAfterThreeRounds(t *testing.T) {
+	cases := []struct {
+		attempts int
+		want     string
+	}{
+		{0, "config-rejected"},
+		{1, "config-rejected"},
+		{2, "config-rejected"},
+		{3, "config-rejected-dead"},
+		{9, "config-rejected-dead"},
+	}
+	for _, tc := range cases {
+		if got := configRejectedResult(tc.attempts); got != tc.want {
+			t.Fatalf("configRejectedResult(%d) = %q want %q", tc.attempts, got, tc.want)
+		}
+	}
+}
+
+func TestNormalRecoveryDeadLetterStopsRescheduling(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	j := queueNormal(t, f)
+	// Simulate four completed config-rejected assessment rounds the way the
+	// manager path records them: attempts counts completed rejected rounds, so
+	// the verdict flips to the terminal dead state on the fourth assessment.
+	for round := 0; round < 4; round++ {
+		got := configRejectedResult(j.Payload.RecoveryAttempts)
+		if err := f.repo.Finish(ctx, j, func(tx pgx.Tx) error {
+			return recordRecoveryResult(ctx, tx, j, got, "")
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var result string
+		if err := f.repo.Pool.QueryRow(ctx, `SELECT payload->>'recoveryResult' FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&result); err != nil {
+			t.Fatal(err)
+		}
+		want := "config-rejected"
+		if round == 3 {
+			want = "config-rejected-dead"
+		}
+		var attempts int
+		if err := f.repo.Pool.QueryRow(ctx, `SELECT coalesce((payload->>'recoveryAttempts')::int,0) FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&attempts); err != nil {
+			t.Fatal(err)
+		}
+		if attempts != round+1 {
+			t.Fatalf("round %d attempts=%d want %d", round, attempts, round+1)
+		}
+		if result != want {
+			t.Fatalf("round %d recorded %q want %q (attempts %d)", round, result, want, attempts)
+		}
+		// The manager-backed retry ladder persists the verdict via requeue;
+		// emulate it without restoring the session payload.
+		f.exec(t, `UPDATE node_explorer_work SET state='queued',generation=generation+1,due_at=now(),
+   payload=payload-'startedAt',lease_token=NULL,lease_until=NULL,attempts=0,error='' WHERE id=$1`, j.ID)
+		if round < 3 {
+			var ref string
+			if err := f.repo.Pool.QueryRow(ctx, `SELECT id::text||':'||generation::text FROM node_explorer_work WHERE state='queued' ORDER BY id LIMIT 1`).Scan(&ref); err != nil {
+				t.Fatal(err)
+			}
+			next, err := f.repo.Claim(ctx, KindNormalRecovery, ref, false)
+			if err != nil || next == nil {
+				t.Fatal("requeue lost the job", err)
+			}
+			j = *next
+		}
+	}
+	// The scheduler must stop reviving a dead-lettered assessment and must not
+	// error out; the stale queued marker from the emulated retry stays dormant.
+	f.runner.Config.Role = "normal-recovery"
+	if err := f.runner.schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var running int
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work w
+ JOIN node_explorer_retired_nodes tr ON tr.identity=w.payload->>'identity' AND tr.retired_at=w.payload->>'retiredAt'
+ WHERE w.kind='normal-recovery' AND w.state='queued' AND coalesce(w.payload->>'recoveryResult','')<>'config-rejected-dead'`).Scan(&running); err != nil {
+		t.Fatal(err)
+	}
+	if running != 0 {
+		t.Fatalf("dead letter revived by scheduler: %d active rows", running)
+	}
+}
+
+func TestNormalRecoverySkipsWhenFastProbeRecentlyFailed(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  string
+		age      time.Duration
+		gate     bool // gate should fire and finish without manager traffic
+		skipTail bool // second state path (browser-fingerprint sponsor)
+	}{
+		{"genuine failure", `{"success":false,"delay":0,"checkedAt":"2025-01-01T00:00:00Z"}`, 10 * time.Minute, true, false},
+		{"abnormal environment", `{"checkedAt":"2025-01-01T00:00:00Z","abnormal":true}`, 10 * time.Minute, true, false},
+		{"stale failure outside window", `{"success":false,"delay":0,"checkedAt":"2025-01-01T00:00:00Z"}`, 2 * time.Hour, false, false},
+		{"recent success", `{"success":true,"delay":120,"checkedAt":"2025-01-01T00:00:00Z"}`, 10 * time.Minute, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setup(t)
+			j := queueNormal(t, f)
+			identity := f.id
+			f.exec(t, `INSERT INTO node_explorer_fast_results(identity, checked_at, payload) VALUES($1, now()-$2::interval, $3::jsonb)
+			 ON CONFLICT(identity) DO UPDATE SET checked_at=EXCLUDED.checked_at, payload=EXCLUDED.payload`,
+				identity, tc.age, tc.payload)
+			ctx := context.Background()
+			err := f.runner.recovery(ctx, j)
+			gated := tc.gate
+			if gated {
+				if err != nil {
+					t.Fatalf("should finish directly on fresh fast failure: %v", err)
+				}
+				var result string
+				if err = f.repo.Pool.QueryRow(ctx, `SELECT payload->>'recoveryResult' FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&result); err != nil {
+					t.Fatal(err)
+				}
+				if result != "probe-failed" {
+					t.Fatalf("expected probe-failed skip, got %s", result)
+				}
+				// No manager work must be spawned: no fast session row for this round.
+				var n int
+				if err = f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE kind='fast-delay' AND payload->>'session' LIKE 'recovery:%'`).Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				if n != 0 {
+					t.Fatalf("skip must not start manager sessions: %d", n)
+				}
+				return
+			}
+			if !isWaiting(err) {
+				t.Fatalf("non-failing fast results must not short-circuit: %v", err)
+			}
+			session := "recovery:" + j.Ref()
+			f.evidence(t, session)
+			f.evidence(t, session+":verify")
+			if err = f.runner.recovery(ctx, j); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestNormalRecoverySkipGateGuards(t *testing.T) {
+	// In the normal lane the only verdict ahead of the fresh-failure gate is
+	// the expired-session fence: it must still win with timed-out.
+	t.Run("expired beats skip", func(t *testing.T) {
+		f := setup(t)
+		j := queueNormal(t, f)
+		f.exec(t, `INSERT INTO node_explorer_fast_results(identity, checked_at, payload) VALUES($1, now(), $2::jsonb)
+		 ON CONFLICT(identity) DO UPDATE SET checked_at=EXCLUDED.checked_at, payload=EXCLUDED.payload`,
+			f.id, `{"checkedAt":"2025-01-01T00:00:00Z","abnormal":true}`)
+		j.Payload.StartedAt = time.Now().Add(-2 * time.Hour) // in-memory payload drives the expired fence
+		if err := f.runner.recovery(context.Background(), j); err != nil {
+			t.Fatal(err)
+		}
+		var result string
+		if err := f.repo.Pool.QueryRow(context.Background(), `SELECT payload->>'recoveryResult' FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&result); err != nil {
+			t.Fatal(err)
+		}
+		if result != "timed-out" {
+			t.Fatalf("expired fence must beat the skip gate, got %s", result)
+		}
+	})
+	t.Run("gate respects P1-5 backoff cadence", func(t *testing.T) {
+		f := setup(t)
+		j := queueNormal(t, f)
+		f.exec(t, `INSERT INTO node_explorer_fast_results(identity, checked_at, payload) VALUES($1, now(), $2::jsonb)
+		 ON CONFLICT(identity) DO UPDATE SET checked_at=EXCLUDED.checked_at, payload=EXCLUDED.payload`,
+			f.id, `{"success":false,"delay":0}`)
+		if err := f.runner.recovery(context.Background(), j); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.runner.schedule(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		var due time.Time
+		var generation int64
+		if err := f.repo.Pool.QueryRow(context.Background(), `SELECT due_at,generation FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&due, &generation); err != nil {
+			t.Fatal(err)
+		}
+		if due.Before(time.Now().Add(19*time.Minute)) || generation != j.Generation+1 {
+			t.Fatalf("skip finish must queue through the probe-failed backoff: %v %d", due, generation)
+		}
+	})
+}

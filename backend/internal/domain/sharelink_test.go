@@ -106,3 +106,85 @@ func TestVLESSLinkRejectsMalformedECHConfig(t *testing.T) {
 		t.Fatal("malformed ECH config should be rejected")
 	}
 }
+
+func TestShareLinkTLSEnabledExplicitPerScheme(t *testing.T) {
+	// vless: TLS derives from the security parameter only, explicitly.
+	proxy, err := ShareLinkProxy("vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?type=ws", "Node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy["tls"] == true {
+		t.Fatalf("vless without security must not enable TLS: %#v", proxy)
+	}
+	proxy, err = ShareLinkProxy("vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls&type=ws", "Node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy["tls"] != true {
+		t.Fatalf("vless security=tls must enable TLS: %#v", proxy)
+	}
+	// trojan/anytls/hysteria2/tuic: TLS comes from the scheme, passed
+	// explicitly at the call site rather than derived from query keys.
+	for _, link := range []string{
+		"trojan://secret@example.com:443",
+		"tuic://123e4567-e89b-12d3-a456-426614174000@example.com:443",
+	} {
+		proxy, err := ShareLinkProxy(link, "Node")
+		if err != nil {
+			t.Fatalf("scheme-TLS link rejected: %v", err)
+		}
+		if proxy["tls"] != true {
+			t.Fatalf("scheme-TLS outbound lost TLS: %#v", proxy)
+		}
+	}
+}
+
+func TestTUICLinkCredentialShapes(t *testing.T) {
+	for _, test := range []struct {
+		name, link string
+		want       ProxyConfig
+		wantErr    bool
+	}{
+		{
+			name: "uuid token",
+			link: "tuic://123e4567-e89b-12d3-a456-426614174000@example.com:443?sni=example.com&congestion-controller=bbr&udp-relay-mode=native&allow_insecure=1",
+			want: ProxyConfig{"uuid": "123e4567-e89b-12d3-a456-426614174000", "password": ""},
+		},
+		{
+			name: "compact uuid",
+			link: "tuic://123e4567e89b12d3a456426614174000:secret@2001:db8::1:443",
+			want: ProxyConfig{"uuid": "123e4567-e89b-12d3-a456-426614174000", "password": "secret"},
+		},
+		{
+			name: "plain username and password",
+			link: "tuic://user:pass@example.com:8443",
+			want: ProxyConfig{"username": "user", "password": "pass"},
+		},
+		{
+			name:    "bare username without password",
+			link:    "tuic://user@example.com:443",
+			wantErr: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			proxy, err := ShareLinkProxy(test.link, "Node")
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("expected rejection, got %#v", proxy)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("valid tuic link was rejected: %v", err)
+			}
+			for key, want := range test.want {
+				if proxy[key] != want {
+					t.Fatalf("%s: got %#v, want %#v", key, proxy[key], want)
+				}
+			}
+			if proxy["type"] != "tuic" || proxy["server"] == "" {
+				t.Fatalf("tuic endpoint not preserved: %#v", proxy)
+			}
+		})
+	}
+}

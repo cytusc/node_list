@@ -13,6 +13,31 @@ import (
 
 // Each assessment owns fresh proofs. The normal service shares transport checks
 // but does not require residential classification.
+
+// configRejectedDeadLetterAttempts caps how often a deterministically rejected
+// config may re-enter an assessment. Parser verdicts do not change between
+// attempts, so after this many config-rejected rounds the outcome becomes the
+// terminal config-rejected-dead state; no requeue path may revive it until the
+// stored share-link config actually changes (new generation/new digest).
+const configRejectedDeadLetterAttempts = 3
+
+// configRejectedResult maps a deterministic rejection to its persisted recovery
+// outcome. The dead-letter switch reuses the surviving per-round attempt
+// counter (payload.recoveryAttempts) so the cap holds across requeues.
+// recentFastFailureSkipWindow bounds the fast-probe shortcut in normal
+// recovery admission. When the managed fast service recorded a failed delay
+// check for this identity within the window, that failure is fresher evidence
+// than any assessment this lane could start, so the round is finished
+// immediately as probe-failed instead of rejoining the kernel (P1-3: probe
+// backlog was paying a manager join per queued identity).
+const recentFastFailureSkipWindow = time.Hour
+
+func configRejectedResult(attempts int) string {
+	if attempts >= configRejectedDeadLetterAttempts {
+		return "config-rejected-dead"
+	}
+	return "config-rejected"
+}
 func (r *Runner) recovery(ctx context.Context, j Job) error {
 	t, err := r.Repo.Target(ctx, j.Payload.Identity)
 	if err != nil {
@@ -49,6 +74,24 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 		return finish("timed-out", "")
 	}
 
+	if normal && j.Payload.Action == "" {
+		// P1-3 shortcut: a recent failed fast delay probe is fresher than any
+		// proof this assessment could produce; finish without manager traffic.
+		// Failure covers both recorded shapes: the genuine !success delay
+		// result and the abnormal environment row (no success key at all).
+		var failed bool
+		if err = r.Repo.Pool.QueryRow(ctx, `SELECT EXISTS(
+		 SELECT 1 FROM node_explorer_fast_results f JOIN node_explorer_node_registry n USING(identity)
+		 WHERE f.identity=$2 AND n.incarnation=$3 AND n.available
+		   AND f.checked_at>now()-$1::interval
+		   AND NOT coalesce((f.payload->>'success')::boolean,false))`,
+			recentFastFailureSkipWindow, t.Identity, t.Incarnation).Scan(&failed); err != nil {
+			return err
+		}
+		if failed {
+			return finish("probe-failed", "")
+		}
+	}
 	session := "recovery:" + j.Ref()
 	p := j.Payload
 	p.RecoveryMode = ""
@@ -88,7 +131,7 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 			return e
 		}
 		if rejected {
-			return finish("config-rejected", "")
+			return finish(configRejectedResult(j.Payload.RecoveryAttempts), "")
 		}
 		var quick transport.DelayResult
 		ready, e := r.Repo.Probe(ctx, session, KindFast, &quick)

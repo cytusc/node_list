@@ -104,8 +104,20 @@ func (r *Repository) pruneSources(ctx context.Context, days int) error {
 }
 
 // Recovery rows are durable verification markers, not expiring probe sessions.
+// Normal-recovery markers are the one exception: a completed assessment whose
+// result is older than the retention window no longer gates anything - either
+// its retirement still qualifies and schedule starts a fresh assessment, or the
+// marker is residue from a restoration. Fresh markers stay because the staged
+// cadence reads their last result into the next attempt (config-rejected ones
+// are always fresher than six hours, so they survive every pass).
+//
+// Rows with no checkedAt keep the legacy due_at bucket as their timestamp.
 func (r *Repository) pruneCompletedWork(ctx context.Context) error {
 	if _, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_recovery_events WHERE checked_at<now()-interval '2 hours'`); err != nil {
+		return err
+	}
+	if _, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_work w WHERE w.kind='normal-recovery' AND w.state='done'
+	AND (CASE WHEN w.payload ? 'checkedAt' THEN (w.payload->>'checkedAt')::timestamptz ELSE w.due_at END)<now()-interval '30 days'`); err != nil {
 		return err
 	}
 	_, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_work WHERE state='done' AND kind NOT IN ('recovery','normal-recovery') AND due_at<now()-interval '2 days'`)

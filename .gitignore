@@ -29,3 +29,5 @@ backend/tools/*.tsv
 
 !SINGLE_MIHOMO.md
 !SINGLE_MIHOMO_VALIDATION.md
+scripts/
+reports/.dsh-ops-update-651c76543915baf76d861d472449782f90e379dbb38b94f231c133d9b851a9da.lock

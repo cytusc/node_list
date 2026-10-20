@@ -92,9 +92,18 @@ func malformedReason(n domain.Node) string {
 			port = nil
 		}
 		if protocol == "tuic" && u.User != nil {
-			// A token-only URL can describe TUIC v4. Only the explicit v5
-			// UUID/password form gives enough evidence to reject its UUID.
+			// A token-only URL can describe TUIC v4. The share-link parser
+			// accepts a UUID token and an explicit username/password pair, so
+			// the UUID evidence must track exactly that contract: a plain
+			// user:pass pair is a valid credential shape and must never be
+			// judged as a malformed UUID here.
 			if password, present := u.User.Password(); present && password != "" {
+				if tuicUUIDShape(u.User.Username()) {
+					uuid = u.User.Username()
+				} else {
+					uuid = ""
+				}
+			} else {
 				uuid = u.User.Username()
 			}
 		}
@@ -146,6 +155,30 @@ func isSupportedConnectionType(protocol string) bool {
 }
 
 func stringValue(v any) string { s, _ := v.(string); return s }
+
+// tuicUUIDShape mirrors domain.normalizeUUID's accepted shapes: a 36-char
+// dashed hex form or a compact 32-char hex form. Keeping the check local
+// avoids exporting a parser helper while staying byte-for-byte consistent
+// with the share-link contract.
+func tuicUUIDShape(v string) bool {
+	if len(v) == 32 {
+		return isHexValue(v)
+	}
+	if len(v) != 36 {
+		return false
+	}
+	return isHexValue(v[:8]) && isHexValue(v[9:13]) && isHexValue(v[14:18]) && isHexValue(v[19:23]) && isHexValue(v[24:])
+}
+
+func isHexValue(v string) bool {
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
 
 // CleanMalformedNodes is an explicit administrative operation, never scheduled.
 // The caller must pause writers and take a database backup before apply.

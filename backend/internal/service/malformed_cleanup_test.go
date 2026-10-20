@@ -77,3 +77,35 @@ func TestMalformedReasonPreservesCompleteConfigAndAlternatePortRange(t *testing.
 		}
 	}
 }
+
+func TestMalformedReasonAlignsTUICCredentialShapesWithParser(t *testing.T) {
+	// user:pass over a rawLink is a valid tuic v5 credential shape after P1-5:
+	// the audit channel must never veto it as a malformed UUID.
+	plain := domain.Node{
+		Type:    "tuic",
+		Port:    "443",
+		RawLink: "tuic://operator%40example.com:secret@edge.example:443?sni=example.com&congestion_control=bbr",
+	}
+	if _, err := domain.ShareLinkProxy(plain.RawLink, "tuic"); err != nil {
+		t.Fatalf("parser must accept the user:pass credential shape: %v", err)
+	}
+	if got := malformedReason(plain); got != "" {
+		t.Fatalf("valid tuic user:pass link must be preserved by the audit channel: %q", got)
+	}
+	// A username that is a UUID with a password still provides UUID evidence.
+	if got := malformedReason(domain.Node{
+		Type:    "tuic",
+		Port:    "443",
+		RawLink: "tuic://123e4567-e89b-12d3-a456-426614174001@edge.example:443?sni=example.com",
+	}); got != "" {
+		t.Fatalf("clean UUID-token tuic link must be preserved: %q", got)
+	}
+	// A genuinely damaged UUID (both password absent and shape invalid) stays a candidate.
+	if got := malformedReason(domain.Node{
+		Type:    "tuic",
+		Port:    "443",
+		RawLink: "tuic://zzzz-not-a-uuid@edge.example:443?sni=example.com",
+	}); got != "invalid-tuic-uuid" {
+		t.Fatalf("damaged bare-username UUID must stay a deletion candidate: %q", got)
+	}
+}

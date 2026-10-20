@@ -97,6 +97,11 @@ func TestCleanupDeletionVetoes(t *testing.T) {
 				f.exec(t, `UPDATE node_explorer_node_registry SET last_available_at=now()`)
 			case "newer-observation":
 				f.evidence(t, "")
+				// Two adjacent Go wall-clock reads can land 2ns apart and even
+				// backwards on Windows interrupt-time granularity, so the
+				// fixture pins the observation strictly newer instead of
+				// trusting call ordering.
+				f.exec(t, `UPDATE node_explorer_connectivity SET checked_at=now()+interval '5 milliseconds' WHERE identity=$1`, f.id)
 			case "changed-config":
 				f.exec(t, `UPDATE node_explorer_node_registry SET node=node||'{"name":"changed"}'::jsonb`)
 			case "recreated":

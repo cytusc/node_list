@@ -80,6 +80,7 @@ func (r *Repository) retryResidentialRecovery(ctx context.Context) error {
 	 AND w.key=n.identity||':'||t.retired_at
 	 AND w.payload->>'retiredAt'=t.retired_at AND w.payload->>'reason'=t.reason
 	 AND w.payload->>'recoveryResult' IN ('probe-failed','exit-probe-failed','exit-changed','timed-out','classification-unconfirmed','config-rejected')
+	 AND w.payload->>'recoveryResult'<>'config-rejected-dead'
 	 AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
 	 ORDER BY w.due_at,w.id`)
 	if err != nil {
