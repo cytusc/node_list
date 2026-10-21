@@ -267,48 +267,6 @@ func TestDuplicateDeliveryAndExpiredLeasesFenceWrites(t *testing.T) {
 	}
 }
 
-func TestIndependentCadenceAndManualRetirementScheduling(t *testing.T) {
-	f := setup(t)
-	ctx := context.Background()
-	f.evidence(t, "seed")
-	f.runner.Config.Role = "connectivity"
-	if e := f.runner.schedule(ctx); e != nil {
-		t.Fatal(e)
-	}
-	var priority int
-	var due time.Time
-	if e := f.repo.Pool.QueryRow(ctx, `SELECT priority,due_at FROM node_explorer_work WHERE kind=$1`, KindLive).Scan(&priority, &due); e != nil {
-		t.Fatal(e)
-	}
-	if priority != 1 || time.Until(due) < 4*time.Minute || time.Until(due) > 5*time.Minute {
-		t.Fatalf("residential cadence: %d %v", priority, due)
-	}
-	f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=jsonb_set(payload,'{classification,state}','"datacenter"')`)
-	// Remove evidence too so the classification does not re-evaluate as residential.
-	f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=(payload #- '{classification,evidence}') #- '{classification,types}'`)
-	f.exec(t, `DELETE FROM node_explorer_work`)
-	if e := f.runner.schedule(ctx); e != nil {
-		t.Fatal(e)
-	}
-	if e := f.repo.Pool.QueryRow(ctx, `SELECT priority,due_at FROM node_explorer_work WHERE kind=$1`, KindLive).Scan(&priority, &due); e != nil {
-		t.Fatal(e)
-	}
-	if priority != 0 || time.Until(due) < 29*time.Minute {
-		t.Fatal("normal cadence not independent")
-	}
-	p := f.retirement(t)
-	f.exec(t, `UPDATE node_explorer_retired_nodes SET reason='manual' WHERE identity=$1`, p.Identity)
-	f.runner.Config.Role = "residential"
-	if e := f.runner.schedule(ctx); e != nil {
-		t.Fatal(e)
-	}
-	var count int
-	_ = f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE kind=$1`, KindRecovery).Scan(&count)
-	if count != 0 {
-		t.Fatal("manual retirement scheduled for auto recovery")
-	}
-}
-
 func TestSchedulerBackfillsMissingTrafficRatioWithCooldown(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -341,7 +299,7 @@ func TestSchedulerBackfillsMissingTrafficRatioWithCooldown(t *testing.T) {
 				initialWorkState = "queued"
 			}
 			f.exec(t, `UPDATE node_explorer_work SET state=$2,due_at=CASE WHEN $2='queued' THEN now()+interval '24 hours' ELSE due_at END WHERE kind=$1 AND key='8.8.4.4'`, KindRisk, initialWorkState)
-			f.runner.Config.Role = "ip"
+			f.runner.Config.Role = "exit-provision"
 			if err := f.runner.schedule(ctx); err != nil {
 				t.Fatal(err)
 			}

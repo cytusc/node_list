@@ -152,18 +152,22 @@ func (r *Repository) sweepCommit(ctx context.Context, m *transport.Manager, resu
 	// Step 6: a retired node that passed the round re-promotes one strict
 	// recovery marker (idempotent once), same conditions as the former
 	// residential promotion scan.
-	ids, err := json.Marshal(passed)
+	ids := make([]map[string]string, 0, len(passed))
+	for _, id := range passed {
+		ids = append(ids, map[string]string{"identity": id})
+	}
+	b, err := json.Marshal(ids)
 	if err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `SELECT t.identity,t.retired_at,t.reason FROM node_explorer_retired_nodes t
-	 JOIN node_explorer_node_registry n USING(identity)
+	 JOIN node_explorer_node_registry n ON n.identity=t.identity
 	 JOIN jsonb_to_recordset($1::jsonb) AS x(identity text) ON x.identity=t.identity
 	 WHERE n.available AND n.historical_residential
 	 AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
 	 AND (t.reason=$2 OR t.reason LIKE 'IPPure:%')
 	 AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind=$3 AND w.key=t.identity||':'||t.retired_at AND w.state<>'done')
-	 AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='normal-recovery' AND w.key=t.identity||':'||t.retired_at AND w.state<>'done')`, ids, store.RetireRestoreReason, KindRecovery)
+	 AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='normal-recovery' AND w.key=t.identity||':'||t.retired_at AND w.state<>'done')`, b, store.RetireRestoreReason, KindRecovery)
 	if err != nil {
 		return err
 	}
@@ -191,15 +195,15 @@ func (r *Repository) sweepCommit(ctx context.Context, m *transport.Manager, resu
 	// with an IP keep their attribute/risk top-ups owned by the exit service.
 	rows, err = tx.Query(ctx, `SELECT n.identity,e.ip,a.payload FROM node_explorer_node_registry n
 	 JOIN jsonb_to_recordset($1::jsonb) AS x(identity text) ON x.identity=n.identity
-	 LEFT JOIN node_explorer_exits e USING(identity)
+	 LEFT JOIN node_explorer_exits e ON e.identity=n.identity
 	 LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
-	 WHERE n.available AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)`, ids)
+	 WHERE n.available AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)`, b)
 	if err != nil {
 		return err
 	}
 	type route struct {
 		identity string
-		ip       string
+		ip       *string
 		attr     []byte
 	}
 	var routes []route
@@ -217,7 +221,7 @@ func (r *Repository) sweepCommit(ctx context.Context, m *transport.Manager, resu
 	}
 	now := time.Now()
 	for _, v := range routes {
-		if v.ip == "" {
+		if v.ip == nil || *v.ip == "" {
 			if err = once(ctx, tx, KindExit, v.identity, Payload{Identity: v.identity}, 0); err != nil {
 				return err
 			}
@@ -228,16 +232,16 @@ func (r *Repository) sweepCommit(ctx context.Context, m *transport.Manager, resu
 			attr = domain.IPPureResult{}
 		}
 		if attr.Classification == nil || attr.Classification.State == "" {
-			if err = once(ctx, tx, KindAttributes, v.ip, Payload{IP: v.ip, Identity: v.identity}, 0); err != nil {
+			if err = once(ctx, tx, KindAttributes, *v.ip, Payload{IP: *v.ip, Identity: v.identity}, 0); err != nil {
 				return err
 			}
 		}
 		if missingTrafficRatio(attr, now) {
-			p := Payload{IP: v.ip, Identity: v.identity}
-			if err = once(ctx, tx, KindRisk, v.ip, p, 0); err != nil {
+			p := Payload{IP: *v.ip, Identity: v.identity}
+			if err = once(ctx, tx, KindRisk, *v.ip, p, 0); err != nil {
 				return err
 			}
-			if err = scheduleCompletedIP(ctx, tx, KindRisk, v.ip, p, 0); err != nil {
+			if err = scheduleCompletedIP(ctx, tx, KindRisk, *v.ip, p, 0); err != nil {
 				return err
 			}
 		}

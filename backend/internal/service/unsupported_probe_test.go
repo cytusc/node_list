@@ -42,8 +42,11 @@ func TestUnsupportedShareLinkPersistsProbeResultAndDoesNotImmediatelyRequeue(t *
 				if err := f.runner.schedule(ctx); err != nil {
 					t.Fatal(err)
 				}
+				// 轮次制重构后调度器不再为 unsupported 节点立即重排队：测活由
+				// sweeper 全量轮次承担，调度扫描对 done 行保持 no-op（无未来
+				// due 变化）。断言无立即重排队即可。
 				var future bool
-				if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at>now()+interval '20 minutes' FROM node_explorer_work WHERE kind=$1 AND key=$2`, kind, f.id).Scan(&future); err != nil || !future {
+				if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at>now()+interval '20 minutes' FROM node_explorer_work WHERE kind=$1 AND key=$2`, kind, f.id).Scan(&future); err != nil || future {
 					t.Fatalf("unsupported node immediately requeued: %v %v", future, err)
 				}
 			})

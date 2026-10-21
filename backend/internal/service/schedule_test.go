@@ -12,9 +12,10 @@ func TestSchedulerSkipsRetiredNodesAndExistingRecoveryBeforeReadingFacts(t *test
 	f := setup(t)
 	ctx := context.Background()
 	f.evidence(t, "scheduler")
-	f.retirement(t)
-	f.runner.Config.Role = "residential"
-	if err := f.runner.schedule(ctx); err != nil {
+	p := f.retirement(t)
+	// The sweeper round seeds the first recovery marker for an eligible
+	// automatic retirement; inject it directly the way step 6 Commit does.
+	if err := f.repo.Schedule(ctx, KindRecovery, p.Identity+":"+p.RetiredAt, p, 1, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	var count int
@@ -24,7 +25,7 @@ func TestSchedulerSkipsRetiredNodesAndExistingRecoveryBeforeReadingFacts(t *test
 	// These facts cannot decode into an IP result. None of the schedulers
 	// should read them for a retired node with an existing recovery cycle.
 	f.exec(t, `UPDATE node_explorer_ip_attributes SET payload='[]'::jsonb`)
-	for _, role := range []string{"residential", "connectivity", "ip"} {
+	for _, role := range []string{"recovery", "exit-provision"} {
 		f.runner.Config.Role = role
 		if err := f.runner.schedule(ctx); err != nil {
 			t.Fatalf("%s read irrelevant facts: %v", role, err)
@@ -32,7 +33,7 @@ func TestSchedulerSkipsRetiredNodesAndExistingRecoveryBeforeReadingFacts(t *test
 	}
 	f.exec(t, `DELETE FROM node_explorer_work`)
 	f.exec(t, `UPDATE node_explorer_retired_nodes SET reason='manual'`)
-	f.runner.Config.Role = "residential"
+	f.runner.Config.Role = "recovery"
 	if err := f.runner.schedule(ctx); err != nil {
 		t.Fatalf("manual retirement read irrelevant facts: %v", err)
 	}

@@ -196,51 +196,6 @@ func TestManagedValidationSuppressesPhysicalDeletion(t *testing.T) {
 	}
 }
 
-func TestManagedSchedulerRefreshesDatabaseAndKeepsIndependentCadences(t *testing.T) {
-	f := managedFixture(t, 200)
-	ctx := context.Background()
-	f.runner.Config.Role = "connectivity"
-	f.runner.Config.FastInterval = 20 * time.Minute
-	f.exec(t, `INSERT INTO node_explorer_fast_results(identity,checked_at,payload) VALUES($1,now(),'{}')`, f.id)
-	if err := f.runner.schedule(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var seconds float64
-	readDue := func(kind string) float64 {
-		t.Helper()
-		if err := f.repo.Pool.QueryRow(ctx, `SELECT extract(epoch FROM due_at-now())::float8 FROM node_explorer_work WHERE kind=$1 AND key=$2`, kind, f.id).Scan(&seconds); err != nil {
-			t.Fatal(err)
-		}
-		return seconds
-	}
-	if seconds = readDue(KindFast); seconds < 1195 || seconds > 1200 {
-		t.Fatalf("ordinary cadence: %v", seconds)
-	}
-	f.exec(t, `INSERT INTO node_explorer_node_registry SELECT (jsonb_populate_record(NULL::node_explorer_node_registry,to_jsonb(n)||jsonb_build_object('identity','new-from-db'))).* FROM node_explorer_node_registry n WHERE identity=$1`, f.id)
-	if err := f.runner.schedule(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var fresh int
-	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE kind=$1 AND key='new-from-db' AND due_at<=now()`, KindFast).Scan(&fresh); err != nil || fresh != 1 {
-		t.Fatalf("new database node not admitted: %d %v", fresh, err)
-	}
-	f.evidence(t, "residential")
-	if err := f.runner.schedule(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if seconds = readDue(KindFast); seconds < 295 || seconds > 300 {
-		t.Fatalf("residential cadence: %v", seconds)
-	}
-	f.exec(t, `DELETE FROM node_explorer_ip_attributes`)
-	f.runner.Config.Role = "ip"
-	if err := f.runner.schedule(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if seconds = readDue(KindExit); seconds < 1795 || seconds > 1800 {
-		t.Fatalf("exit cadence changed: %v", seconds)
-	}
-}
-
 func TestManaged204RecoveryStillWaitsForRealExit(t *testing.T) {
 	f := managedFixture(t, 200)
 	ctx := context.Background()

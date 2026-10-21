@@ -8,6 +8,7 @@ import (
 
 	"github.com/cytusc/node_list/backend/internal/domain"
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
+	"github.com/cytusc/node_list/backend/internal/transport"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -47,8 +48,9 @@ func TestRecoveryResultsSurviveCleanupRestartAndScheduler(t *testing.T) {
 			f := setup(t)
 			ctx := context.Background()
 			p := f.retirement(t)
-			f.runner.Config.Role = "residential"
-			if err := f.runner.schedule(ctx); err != nil {
+			// The sweeper round seeds the recovery marker; inject it directly
+			// the way step 6 Commit does (per-node scheduling left Schedule()).
+			if err := f.repo.Schedule(ctx, KindRecovery, p.Identity+":"+p.RetiredAt, p, 1, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			j := f.claim(t, KindRecovery)
@@ -76,9 +78,15 @@ func TestRecoveryResultsSurviveCleanupRestartAndScheduler(t *testing.T) {
 			if state != "done" || generation != j.Generation || saved.RecoveryResult != outcome || saved.IP != "8.8.4.4" || saved.CheckedAt == "" {
 				t.Fatalf("lost/requeued result: %s %+v", state, saved)
 			}
-			// A distinct retirement is a new assessment; the old marker cannot block it.
+			// A distinct retirement is a new assessment; the old marker cannot
+			// block it. In the round-based architecture the sweeper re-promotes
+			// it: the passing round's step-6 commit seeds a fresh marker keyed
+			// to the new retired_at.
 			f.exec(t, `UPDATE node_explorer_retired_nodes SET retired_at=$1`, p.RetiredAt+"-new")
-			if err := f.runner.schedule(ctx); err != nil {
+			repo := &Repository{Pool: f.repo.Pool}
+			entry := transport.RegistryEntry{Identity: f.id}
+			obs := []sweepObservation{{entry: entry, delay: transport.DelayResult{Success: true, CheckedAt: time.Now()}}}
+			if err := repo.sweepCommit(ctx, nil, obs); err != nil {
 				t.Fatal(err)
 			}
 			var count int
@@ -94,9 +102,10 @@ func TestRecoveryAssessmentPersistsResultBeforeAnyBackoffRetry(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			f := setup(t)
 			ctx := context.Background()
-			f.retirement(t)
-			f.runner.Config.Role = "residential"
-			if err := f.runner.schedule(ctx); err != nil {
+			p := f.retirement(t)
+			// Recovery marker seeding is the sweeper round's job; inject the
+			// marker directly the way step 6 Commit does.
+			if err := f.repo.Schedule(ctx, KindRecovery, p.Identity+":"+p.RetiredAt, p, 1, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			j := f.claim(t, KindRecovery)
@@ -150,13 +159,15 @@ func TestRecoveryAssessmentPersistsResultBeforeAnyBackoffRetry(t *testing.T) {
 func TestHostingRecoveryBacklogSkippedBeforeAdmission(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
-	f.retirement(t)
+	p := f.retirement(t)
 	f.evidence(t, "seed")
 	f.exec(t, `UPDATE node_explorer_ip_attributes SET payload=payload || '{"asn":"AS13335","asnOrganization":"Cloudflare"}'::jsonb`)
-	f.runner.Config.Role = "residential"
-	if err := f.runner.schedule(ctx); err != nil {
+	// Recovery marker seeding is the sweeper round's job; inject the marker
+	// directly, then let the recovery role skip the hosting backlog.
+	if err := f.repo.Schedule(ctx, KindRecovery, p.Identity+":"+p.RetiredAt, p, 1, time.Now()); err != nil {
 		t.Fatal(err)
 	}
+	f.runner.Config.Role = "recovery"
 	if err := f.runner.schedule(ctx); err != nil {
 		t.Fatal(err)
 	}

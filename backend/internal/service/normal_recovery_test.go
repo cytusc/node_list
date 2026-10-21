@@ -27,7 +27,7 @@ func queueNormal(t *testing.T, f *fixture) Job {
 	t.Helper()
 	f.retirement(t)
 	f.exec(t, `UPDATE node_explorer_node_registry SET historical_residential=false`)
-	f.runner.Config.Role = "normal-recovery"
+	f.runner.Config.Role = "recovery"
 	if err := f.runner.schedule(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestNormalRecoveryRoutingAndPersistentCadence(t *testing.T) {
 			case "unavailable":
 				f.exec(t, `UPDATE node_explorer_node_registry SET available=false`)
 			}
-			f.runner.Config.Role = "normal-recovery"
+			f.runner.Config.Role = "recovery"
 			if err := f.runner.schedule(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -372,7 +372,7 @@ func TestShorterRecoveryIntervalAdvancesOnlyUnstartedJobs(t *testing.T) {
 	ctx := context.Background()
 	f.retirement(t)
 	f.exec(t, `UPDATE node_explorer_node_registry SET historical_residential=false`)
-	f.runner.Config.Role = "normal-recovery"
+	f.runner.Config.Role = "recovery"
 	f.runner.Config.NormalRecoveryInterval = 6 * time.Hour
 	if err := f.runner.schedule(ctx); err != nil {
 		t.Fatal(err)
@@ -595,7 +595,7 @@ func TestNormalRecoveryDeadLetterStopsRescheduling(t *testing.T) {
 	}
 	// The scheduler must stop reviving a dead-lettered assessment and must not
 	// error out; the stale queued marker from the emulated retry stays dormant.
-	f.runner.Config.Role = "normal-recovery"
+	f.runner.Config.Role = "recovery"
 	if err := f.runner.schedule(ctx); err != nil {
 		t.Fatal(err)
 	}

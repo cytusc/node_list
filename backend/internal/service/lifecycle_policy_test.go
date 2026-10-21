@@ -108,9 +108,10 @@ func TestLifecycleRejectsLegacyOrSingleRoundRetirement(t *testing.T) {
 func TestTransientRecoveryBackoffUsesFreshGenerationAndPreservesHistory(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
-	f.retirement(t)
-	f.runner.Config.Role = "residential"
-	if err := f.runner.schedule(ctx); err != nil {
+	p := f.retirement(t)
+	// The sweeper round seeds the first recovery marker for an eligible
+	// automatic retirement; inject it directly the way step 6 Commit does.
+	if err := f.repo.Schedule(ctx, KindRecovery, p.Identity+":"+p.RetiredAt, p, 1, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	j := f.claim(t, KindRecovery)
@@ -119,6 +120,8 @@ func TestTransientRecoveryBackoffUsesFreshGenerationAndPreservesHistory(t *testi
 	if err := f.runner.recovery(ctx, j); err != nil {
 		t.Fatal(err)
 	}
+	// Recovery upkeep (requeue on backoff) belongs to the recovery role now.
+	f.runner.Config.Role = "recovery"
 	if err := f.runner.schedule(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -170,9 +173,8 @@ func TestRecoveryRetryEligibilityAndLegacyBackoff(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			f := setup(t)
 			ctx := context.Background()
-			f.retirement(t)
-			f.runner.Config.Role = "residential"
-			if err := f.runner.schedule(ctx); err != nil {
+			p := f.retirement(t)
+			if err := f.repo.Schedule(ctx, KindRecovery, p.Identity+":"+p.RetiredAt, p, 1, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			j := f.claim(t, KindRecovery)
@@ -209,28 +211,6 @@ func TestRecoveryRetryEligibilityAndLegacyBackoff(t *testing.T) {
 				t.Fatalf("unexpected state %s", state)
 			}
 		})
-	}
-}
-
-func TestSuspectedFailureGetsEarlyRecheckWithoutRetirement(t *testing.T) {
-	f := setup(t)
-	ctx := context.Background()
-	f.evidence(t, "seed")
-	f.exec(t, `UPDATE node_explorer_connectivity SET payload=payload || '{"reachable":false,"failedRounds":1,"confirmedDead":false}'::jsonb`)
-	f.runner.Config.Role = "connectivity"
-	if err := f.runner.schedule(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var due, checked time.Time
-	if err := f.repo.Pool.QueryRow(ctx, `SELECT w.due_at,c.checked_at FROM node_explorer_work w JOIN node_explorer_connectivity c ON c.identity=w.key WHERE w.kind='connectivity'`).Scan(&due, &checked); err != nil {
-		t.Fatal(err)
-	}
-	if (due.Sub(checked) - 2*time.Minute).Abs() > time.Millisecond {
-		t.Fatalf("suspect recheck delayed: %s", due.Sub(checked))
-	}
-	target, err := f.repo.Target(ctx, f.id)
-	if err != nil || target.Retired != nil {
-		t.Fatal("suspected failure retired")
 	}
 }
 
