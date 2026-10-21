@@ -48,6 +48,7 @@ func ConfigDigest(n domain.Node) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
+
 // proxyNameHex bounds the kernel-facing proxy name for panel and API
 // readability (REFACTOR_PLAN §6.4). The identity↔name mapping stays a pure
 // function of the identity; Sync quarantines the astronomically unlikely

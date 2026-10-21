@@ -150,20 +150,20 @@ jobs:
           curl --fail http://127.0.0.1:3001/ -o /tmp/index.html
           grep -q 'id="root"' /tmp/index.html
           test "$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/api/history)" = 404
-      - name: Smoke test independent lifecycle worker
+      - name: Smoke test recovery worker
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           docker run -d --read-only --tmpfs /tmp --network host \
             -e PGHOST=127.0.0.1 -e PGPORT=5432 -e PGDATABASE=node_explorer_test \
             -e PGUSER=postgres -e PGPASSWORD=test_password -e REDIS_URL=redis://127.0.0.1:6379/0 \
-            --name lifecycle-smoke "$IMAGE_NAME@$IMAGE_DIGEST" node-worker -role lifecycle
-          trap 'docker logs lifecycle-smoke; docker rm -f lifecycle-smoke' EXIT
+            --name recovery-smoke "$IMAGE_NAME@$IMAGE_DIGEST" node-worker -role recovery
+          trap 'docker logs recovery-smoke; docker rm -f recovery-smoke' EXIT
           for attempt in $(seq 1 20); do
-            if docker exec lifecycle-smoke node-worker -role lifecycle -health; then break; fi
+            if docker exec recovery-smoke node-worker -role recovery -health; then break; fi
             sleep 1
           done
-          docker exec lifecycle-smoke node-worker -role lifecycle -health
+          docker exec recovery-smoke node-worker -role recovery -health
       - name: Smoke test Mihomo manager worker
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
@@ -201,5 +201,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n所有探测服务共享单个 Mihomo 内核；快速测活请求 gstatic 204，普通节点测活与恢复评估默认每 20 分钟调度，住宅复核每 5 分钟。204 成功会更新连通性证明，但节点恢复还要求独立真实出口及适用的属性核验。单实例数据库锁阻止同一后台服务重复运行，原有服务内并发保持不变。升级步骤、CPU 预算和回滚方式见 SINGLE_MIHOMO.md。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
+          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n所有探测服务共享单个 Mihomo 内核；快速测活请求 gstatic 204，普通节点测活与恢复评估由 mihomo-manager 内的 30 分钟轮次 sweeper 统一驱动（SWEEP_INTERVAL_SECONDS=1800），住宅复核与独立生命周期治理统一收敛进 recovery 聚合角色，原有服务内并发保持不变，原有服务内并发保持不变。升级步骤、CPU 预算和回滚方式见 SINGLE_MIHOMO.md。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
           gh release create "$GITHUB_REF_NAME" "node-explorer-$GITHUB_REF_NAME.tar.gz" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md --verify-tag
