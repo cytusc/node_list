@@ -262,6 +262,9 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	}
 	paths, release, err := r.reserve(ctx, []domain.Node{t.Node}, high)
 	if err != nil {
+		if errors.Is(err, transport.ErrConfigRejected) {
+			return r.rejectedExit(ctx, j, t, err)
+		}
 		return err
 	}
 	defer release()
@@ -357,6 +360,37 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	})
 }
 
+// Persist an explanation even when no outbound can be reserved. Work and
+// observation updates share the task lease and registry incarnation fences.
+func (r *Runner) rejectedExit(ctx context.Context, j Job, t *Target, cause error) error {
+	message := configRejectedMessage() + ": " + transport.ConfigRejectionCode(cause)
+	v := domain.ExitState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Error: "节点配置无法加载: " + transport.ConfigRejectionCode(cause)}
+	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+		ok, err := guard(ctx, tx, j.Payload)
+		if err != nil || !ok {
+			return err
+		}
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_exits(identity,ip,checked_at,payload) VALUES($1,'',$2,$3)
+		ON CONFLICT(identity) DO UPDATE SET checked_at=EXCLUDED.checked_at,
+		payload=EXCLUDED.payload||jsonb_build_object('ip',node_explorer_exits.ip)
+		WHERE node_explorer_exits.checked_at<=EXCLUDED.checked_at`, t.Identity, v.CheckedAt, b); err != nil {
+			return err
+		}
+		if err = writeProbe(ctx, tx, j.Payload.Session, KindExit, t.Identity, v); err != nil {
+			return err
+		}
+		if err = recur(ctx, tx, j, 6*time.Hour); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE node_explorer_work SET error=$2 WHERE id=$1`, j.ID, message)
+		return err
+	})
+}
+
 func (r *Runner) attributes(ctx context.Context, j Job) error {
 	used, err := r.Repo.IPUsed(ctx, j.Payload.IP)
 	if err != nil {
@@ -419,6 +453,9 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		reserved, done, e := engine.Reserve(ctx, []domain.Node{*reference})
 		err = e
 		release = done
+		if e != nil {
+			return e
+		}
 		paths = map[string]*transport.Outbound{domain.AggregateIdentity(*reference): reserved[0]}
 	} else {
 		paths, release, err = r.reserve(ctx, []domain.Node{*reference}, false)
@@ -436,14 +473,21 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 	verdict, queryErr := collector.QueryIPPure(ctx, collector.NewIPPureClient(path.Client, r.Config.APIOrigin, 10*time.Second), j.Payload.IP, r.asnCache)
 	v := &domain.IPPureResult{IP: j.Payload.IP, Status: "error", FailureStage: "ippure-query", Error: "风险查询失败"}
 	e := ipcheck.Evidence{Provider: "ippure", IP: j.Payload.IP, CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Outcome: "unknown", QueryStatus: "request-failed"}
+	v.RiskQueryStatus = "query-failed"
+	if queryErr != nil {
+		v.FailureStage, v.RiskQueryError = collector.IPPureFailure(queryErr)
+		v.Error = "风险查询失败: " + v.RiskQueryError
+	}
 	if queryErr == nil {
 		v.Status = "success"
+		v.RiskQueryStatus = "success"
 		v.FailureStage = ""
 		v.Error = ""
 		v.ASN, v.Organization, v.Country, v.Source = verdict.ASN, verdict.Organization, verdict.Country, verdict.Source
 		v.Attributes, v.Score, v.Label = verdict.Attributes, verdict.Score, verdict.Label
 		v.HumanPercent, v.BotPercent = verdict.HumanPercent, verdict.BotPercent
 		v.TrafficRatioStatus = verdict.TrafficRatioStatus
+		v.TrafficRatioError = verdict.TrafficRatioError
 		e = ipcheck.IPPureEvidence(j.Payload.IP, verdict.Attributes, e.CheckedAt)
 		e.QueryStatus = "success"
 	}
@@ -467,8 +511,8 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 			if j.Priority > 0 {
 				delay = r.Config.ResidentialInterval
 			}
-		} else if v.HumanPercent == nil || v.BotPercent == nil {
-			delay = trafficRatioRetryInterval
+		} else {
+			delay = riskRefreshInterval(*v)
 		}
 		return recur(ctx, tx, j, delay)
 	})

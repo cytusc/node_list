@@ -243,6 +243,13 @@ func missingTrafficRatio(attr domain.IPPureResult, now time.Time) bool {
 	if attr.Status != "success" {
 		return false
 	}
+	// A failed required query retains the last successful verdict. Its old
+	// ratio timestamp must not bypass the failed query's retry backoff.
+	if attr.RiskQueryStatus == "query-failed" {
+		if t, err := time.Parse(time.RFC3339Nano, attr.RiskQueryCheckedAt); err == nil && now.Sub(t) < trafficRatioErrorRetryInterval {
+			return false
+		}
+	}
 	retryInterval := trafficRatioRetryInterval
 	if attr.TrafficRatioStatus == "query-failed" {
 		retryInterval = trafficRatioErrorRetryInterval
@@ -262,4 +269,15 @@ func scheduleCompletedIP(ctx context.Context, tx pgx.Tx, kind, ip string, p Payl
 	}
 	_, err = tx.Exec(ctx, `UPDATE node_explorer_work SET state='queued',generation=generation+1,due_at=now(),payload=$3,priority=$4,attempts=0,error='' WHERE kind=$1 AND key=$2 AND state='done'`, kind, ip, b, priority)
 	return err
+}
+
+// Risk refreshes distinguish optional statistics outages from absent data.
+func riskRefreshInterval(v domain.IPPureResult) time.Duration {
+	if v.TrafficRatioStatus == "query-failed" {
+		return trafficRatioErrorRetryInterval
+	}
+	if v.HumanPercent == nil || v.BotPercent == nil {
+		return trafficRatioRetryInterval
+	}
+	return 24 * time.Hour
 }

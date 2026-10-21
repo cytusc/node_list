@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -102,6 +103,8 @@ func TestQueryIPPureFetchesStatisticsWithoutCache(t *testing.T) {
 		{"without cache", nil, `{"ok":true,"data":{"human":74.0479,"bot":25.9521}}`, 0, "available", 2},
 		{"shared cache", NewASNCache(), `{"ok":true,"data":{"human":74.0479,"bot":25.9521}}`, 0, "available", 1},
 		{"not found means no statistics", NewASNCache(), "", http.StatusNotFound, "no-data", 1},
+		{"null statistics", NewASNCache(), `{"ok":true,"data":null}`, 0, "no-data", 1},
+		{"missing data is a failure", nil, `{"ok":true}`, 0, "query-failed", 2},
 		{"other http error", nil, "", http.StatusUnauthorized, "query-failed", 2},
 		{"empty successful response", nil, `{"ok":true,"data":{}}`, 0, "no-data", 2},
 	} {
@@ -145,11 +148,57 @@ func TestQueryIPPureFetchesStatisticsWithoutCache(t *testing.T) {
 				if v.TrafficRatioStatus != tc.wantStatus {
 					t.Fatalf("traffic ratio status = %q, want %q", v.TrafficRatioStatus, tc.wantStatus)
 				}
+				if tc.botStatus == http.StatusUnauthorized && v.TrafficRatioError != "http-401" {
+					t.Fatalf("failure reason lost: %+v", v)
+				}
 			}
 			if botCalls != tc.wantCalls {
 				t.Fatalf("statistics requests = %d, want %d", botCalls, tc.wantCalls)
 			}
 		})
+	}
+}
+
+func TestASNCacheSharesFailureAndRetriesAfterCooldown(t *testing.T) {
+	cache := NewASNCache()
+	calls := 0
+	load := func(context.Context) (map[string]any, error) { calls++; return nil, &ippureHTTPError{status: 429} }
+	for range 10 {
+		if _, err := cache.Load(context.Background(), 13335, load); err == nil {
+			t.Fatal("missing failure")
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("repeated failing ASN calls: %d", calls)
+	}
+	cache.mu.Lock()
+	cache.entries[13335].failedAt = time.Now().Add(-time.Minute)
+	cache.mu.Unlock()
+	if _, err := cache.Load(context.Background(), 13335, load); err == nil || calls != 2 {
+		t.Fatalf("failure never retried: %d %v", calls, err)
+	}
+}
+
+func TestIPPureFailureKeepsSafeStageAndCode(t *testing.T) {
+	stage, code := IPPureFailure(&IPPureQueryError{Stage: "ippure-basic", Err: &ippureHTTPError{status: 403}})
+	if stage != "ippure-basic" || code != "http-403" {
+		t.Fatalf("%s %s", stage, code)
+	}
+	_, code = IPPureFailure(&IPPureQueryError{Stage: "ippure-risk", Err: errors.New("IPPure 接口未返回有效 JSON")})
+	if code != "invalid-json" {
+		t.Fatal(code)
+	}
+}
+
+func TestNullDataIsOnlyValidForOptionalASNStatistics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"ok":true,"data":null}`) }))
+	defer server.Close()
+	c := NewIPPureClient(server.Client(), server.URL, time.Second)
+	if _, err := c.get(context.Background(), "/api/info/ip-basic/1.1.1.1"); err == nil {
+		t.Fatal("missing required IP data was accepted")
+	}
+	if _, err := c.get(context.Background(), "/api/info/asn/botclass/13335"); err != nil {
+		t.Fatal(err)
 	}
 }
 

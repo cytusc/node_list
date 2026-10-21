@@ -28,6 +28,22 @@ func entry(id string) RegistryEntry {
 	return RegistryEntry{Identity: id, Incarnation: "inc-" + id, Node: n, Digest: ConfigDigest(n)}
 }
 
+func TestManagerClientPreservesOnlyFixedRejectionReasons(t *testing.T) {
+	for _, reason := range []string{"missing-credentials", "password=private-secret"} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeManagerError(w, &ConfigRejection{Reason: reason}) }))
+		client := &ManagerClient{URL: server.URL}
+		err := client.call(context.Background(), http.MethodPost, "/v1/leases", nil, nil)
+		server.Close()
+		want := "missing-credentials"
+		if reason != "missing-credentials" {
+			want = "link-format"
+		}
+		if !errors.Is(err, ErrConfigRejected) || ConfigRejectionCode(err) != want || strings.Contains(err.Error(), "private-secret") {
+			t.Fatalf("unsafe or missing reason: %v", err)
+		}
+	}
+}
+
 func TestManagerSyncIncludesQilanECHResolverPolicy(t *testing.T) {
 	var config mihomoConfig
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

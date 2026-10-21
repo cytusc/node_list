@@ -47,11 +47,12 @@ func (c *ManagerClient) call(ctx context.Context, method, path string, in, out a
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var v struct {
-			Code string `json:"code"`
+			Code   string `json:"code"`
+			Reason string `json:"reason"`
 		}
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&v)
 		if resp.StatusCode == http.StatusUnprocessableEntity && v.Code == "node_config_rejected" {
-			return ErrConfigRejected
+			return &ConfigRejection{Reason: ConfigRejectionCode(&ConfigRejection{Reason: v.Reason})}
 		}
 		if resp.StatusCode == http.StatusConflict && v.Code == "node_config_changed" {
 			return ErrConfigChanged

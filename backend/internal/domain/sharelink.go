@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -10,17 +11,43 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ShareLinkVersion bumps whenever the converter changes. Persisted failures
 // tagged with an older version re-enter the queue so a fixed parser retries
 // nodes that previously looked unsupported.
-const ShareLinkVersion = 7
+const ShareLinkVersion = 8
 
 // ErrShareLink is returned for any link this converter cannot express as a
 // usable outbound. The message never includes the link itself: share links
 // embed credentials and are stored alongside public snapshot data.
 var ErrShareLink = fmt.Errorf("节点分享链接格式或连接参数不受当前检测服务支持")
+
+// ShareLinkError contains only fixed diagnostic codes, never link values.
+type ShareLinkError struct{ Code string }
+
+func (e *ShareLinkError) Error() string { return ErrShareLink.Error() + ": " + e.Code }
+func (e *ShareLinkError) Unwrap() error { return ErrShareLink }
+func shareLinkError(code string) error  { return &ShareLinkError{Code: code} }
+
+// Mihomo and Xray map custom VLESS IDs to UUIDv5 in the nil namespace.
+func normalizeVLESSID(value string) (string, error) {
+	if err := checkValues(value); err != nil {
+		return "", err
+	}
+	if value == "" {
+		return "", shareLinkError("missing-credentials")
+	}
+	if id, err := normalizeUUID(value); err == nil {
+		return id, nil
+	}
+	sum := sha1.Sum(append(make([]byte, 16), []byte(value)...))
+	sum[6] = (sum[6] & 0x0f) | 0x50
+	sum[8] = (sum[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16]), nil
+}
 
 func decodeBase64(value string) (string, error) {
 	if b, err := base64.RawURLEncoding.DecodeString(value); err == nil {
@@ -126,10 +153,8 @@ func normalizeUUID(v string) (string, error) {
 	return v, nil
 }
 
-// normalizeTUICCredential accepts both tuic v5 credential shapes: a UUID
-// token written as userinfo, or a plain username paired with a password. A
-// bare username without any password stays rejected: the outbound would
-// authenticate with an empty secret.
+// normalizeTUICCredential supports UUID/password v5 and token-only v4 links.
+// Bare non-UUID credentials are v4 tokens, not incomplete v5 credentials.
 func normalizeTUICCredential(proxy ProxyConfig, user, password string) error {
 	id, err := normalizeUUID(user)
 	if err == nil {
@@ -138,7 +163,11 @@ func normalizeTUICCredential(proxy ProxyConfig, user, password string) error {
 		return nil
 	}
 	if password == "" {
-		return ErrShareLink
+		if user == "" {
+			return shareLinkError("missing-credentials")
+		}
+		proxy["token"] = user
+		return nil
 	}
 	proxy["username"] = user
 	proxy["password"] = password
@@ -418,9 +447,9 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 	}
 	switch typeName {
 	case "vless":
-		id, err := normalizeUUID(user)
+		id, err := normalizeVLESSID(user)
 		if err != nil {
-			return nil, ErrShareLink
+			return nil, err
 		}
 		proxy["uuid"] = id
 		if v := get("flow"); v != "" {
@@ -443,7 +472,7 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 			proxy["password"] = user
 		}
 		if proxy["password"] == "" {
-			return nil, ErrShareLink
+			return nil, shareLinkError("missing-credentials")
 		}
 		// TLS-only schemes, expressed explicitly: these outbounds fail without
 		// TLS, so the link's own transport never downgrades them. A reality
@@ -516,11 +545,8 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 			proxy["port"] = 443
 		}
 	case "tuic":
-		// tuic v5 accepts two credential shapes: a UUID token (the common
-		// canonical form) and a plain username with a password. Accept both;
-		// a bare username without a password is still invalid because the
-		// outbound would authenticate with an empty secret. Both shapes run
-		// the same TLS and transport option mapping below.
+		// TUIC supports v4 token-only links and v5 UUID/password links.
+		// Normalize credentials before applying their shared TLS options.
 		if err := normalizeTUICCredential(proxy, user, password); err != nil {
 			return nil, err
 		}
@@ -590,13 +616,16 @@ func applyTransport(proxy ProxyConfig, get func(string) string) error {
 	if network == "" {
 		network = "tcp"
 	}
+	if network == "splithttp" {
+		network = "xhttp"
+	}
 	if network == "raw" {
 		network = "tcp"
 	}
 	switch network {
 	case "tcp", "ws", "grpc", "http", "h2", "httpupgrade", "xhttp":
 	default:
-		return ErrShareLink
+		return shareLinkError("unsupported-transport")
 	}
 	host := get("host")
 	if host == "" {
@@ -662,9 +691,10 @@ func applyTransport(proxy ProxyConfig, get func(string) string) error {
 		if v := get("extra"); v != "" {
 			var extra map[string]any
 			if err := json.Unmarshal([]byte(v), &extra); err != nil {
-				return ErrShareLink
+				return shareLinkError("invalid-xhttp-extra")
 			}
 			aliases := map[string]string{
+				"mode":                 "mode",
 				"noGRPCHeader":         "no-grpc-header",
 				"xPaddingBytes":        "x-padding-bytes",
 				"scMaxEachPostBytes":   "sc-max-each-post-bytes",
@@ -677,7 +707,7 @@ func applyTransport(proxy ProxyConfig, get func(string) string) error {
 				}
 				target, ok := aliases[key]
 				if !ok {
-					return ErrShareLink
+					return shareLinkError("unsupported-xhttp-option")
 				}
 				opts[target] = value
 			}
@@ -758,15 +788,18 @@ func applyTLSSettings(proxy ProxyConfig, get func(string) string, enabled bool) 
 // validateProxy rejects configurations that cannot be dialled and any value
 // carrying control characters, which would corrupt a Mihomo YAML document.
 func validateProxy(proxy ProxyConfig) (ProxyConfig, error) {
-	if proxy["__bad-reality"] != nil || proxy["__bad-ech"] != nil {
-		return nil, ErrShareLink
+	if proxy["__bad-reality"] != nil {
+		return nil, shareLinkError("missing-reality-key")
+	}
+	if proxy["__bad-ech"] != nil {
+		return nil, shareLinkError("invalid-ech")
 	}
 	server, _ := proxy["server"].(string)
 	port, _ := proxy["port"].(int)
 	if server == "" || port < 1 || port > 65535 {
-		return nil, ErrShareLink
+		return nil, shareLinkError("invalid-endpoint")
 	}
-	if err := checkValues(proxy); err != nil {
+	if err := checkValues(map[string]any(proxy)); err != nil {
 		return nil, err
 	}
 	return proxy, nil
@@ -775,10 +808,12 @@ func validateProxy(proxy ProxyConfig) (ProxyConfig, error) {
 func checkValues(v any) error {
 	switch t := v.(type) {
 	case string:
-		for i := 0; i < len(t); i++ {
-			c := t[i]
-			if c < 0x20 || (c >= 0x7f && c <= 0x9f) {
-				return ErrShareLink
+		if !utf8.ValidString(t) {
+			return shareLinkError("invalid-text")
+		}
+		for _, c := range t {
+			if unicode.IsControl(c) {
+				return shareLinkError("control-character")
 			}
 		}
 	case float64:

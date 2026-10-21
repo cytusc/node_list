@@ -268,7 +268,7 @@ func (r *Runner) consume(ctx context.Context, kind string, high bool) {
 		var pending waiting
 		if errors.Is(err, transport.ErrConfigRejected) {
 			delay = 6 * time.Hour
-			message = configRejectedMessage()
+			message = configRejectedMessage() + ": " + transport.ConfigRejectionCode(err)
 			log.Printf("%s: task %s: %s; retry in %s", kind, ref, taskFailureReason(err), delay)
 		} else if errors.Is(err, transport.ErrManagerBusy) {
 			delay = time.Second

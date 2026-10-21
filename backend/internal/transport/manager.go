@@ -27,6 +27,24 @@ const LeaseTTL = 150 * time.Second
 
 var ErrManagerBusy = errors.New("Mihomo capacity paused or busy")
 var ErrConfigRejected = errors.New("node configuration rejected or unsupported")
+
+type ConfigRejection struct{ Reason string }
+
+func (e *ConfigRejection) Error() string {
+	return ErrConfigRejected.Error() + ": " + ConfigRejectionCode(e)
+}
+func (e *ConfigRejection) Unwrap() error { return ErrConfigRejected }
+func ConfigRejectionCode(err error) string {
+	var e *ConfigRejection
+	if errors.As(err, &e) {
+		switch e.Reason {
+		case "missing-credentials", "invalid-endpoint", "missing-reality-key", "invalid-ech", "unsupported-transport", "invalid-xhttp-extra", "unsupported-xhttp-option", "control-character", "invalid-text", "chained-proxy", "name-collision", "kernel-rejected":
+			return e.Reason
+		}
+	}
+	return "link-format"
+}
+
 var ErrConfigChanged = errors.New("node missing or configuration changed")
 
 type RegistryEntry struct {
@@ -102,7 +120,7 @@ type Manager struct {
 	Instance                      MihomoConfig
 	mu                            sync.Mutex
 	entries                       map[string]RegistryEntry
-	rejected                      map[string]bool
+	rejected                      map[string]string
 	credentials                   map[string]string
 	leases                        map[string]Lease
 	generation, epoch             string
@@ -117,7 +135,7 @@ type Manager struct {
 }
 
 func NewManager(instance MihomoConfig) *Manager {
-	return &Manager{Instance: instance, epoch: token(), entries: map[string]RegistryEntry{}, rejected: map[string]bool{}, credentials: map[string]string{}, leases: map[string]Lease{}}
+	return &Manager{Instance: instance, epoch: token(), entries: map[string]RegistryEntry{}, rejected: map[string]string{}, credentials: map[string]string{}, leases: map[string]Lease{}}
 }
 func (m *Manager) prune() {
 	for id, l := range m.leases {
@@ -225,14 +243,25 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 		controllerPort = "9090"
 	}
 	config := mihomoConfig{MixedPort: port, AllowLan: true, BindAddress: "*", Mode: "rule", ExternalController: "0.0.0.0:" + controllerPort, Secret: m.Instance.Secret, Rules: []string{"MATCH,REJECT"}}
-	rejected := map[string]bool{}
+	rejected := map[string]string{}
 	credentials := map[string]string{}
 	valid := []RegistryEntry{}
 	for _, entry := range entries {
 		p := outboundConfig(entry.Node)
 		// Original display names cannot safely resolve arbitrary cross-node chains.
 		if p == nil || p["dialer-proxy"] != nil || p["detour"] != nil {
-			rejected[entry.Identity] = true
+			reason := "link-format"
+			if len(entry.Node.RawConfig) == 0 && entry.Node.RawLink != "" {
+				_, err := domain.ShareLinkProxy(entry.Node.RawLink, "probe")
+				var detail *domain.ShareLinkError
+				if errors.As(err, &detail) {
+					reason = detail.Code
+				}
+			}
+			if p != nil {
+				reason = "chained-proxy"
+			}
+			rejected[entry.Identity] = reason
 			continue
 		}
 		valid = append(valid, entry)
@@ -244,7 +273,7 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 	deduped := make([]RegistryEntry, 0, len(valid))
 	for _, entry := range valid {
 		if seen[proxyName(entry.Identity)] {
-			rejected[entry.Identity] = true
+			rejected[entry.Identity] = "name-collision"
 			log.Printf("mihomo: truncated proxy name collision quarantined")
 			continue
 		}
@@ -287,7 +316,7 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 				if index < 0 || index >= len(batch) {
 					break
 				} // Final install handles infrastructure errors and rollback.
-				rejected[batch[index].Identity] = true
+				rejected[batch[index].Identity] = "kernel-rejected"
 				batch = append(batch[:index], batch[index+1:]...)
 			}
 			filtered = append(filtered, batch...)
@@ -325,7 +354,7 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 			break
 		}
 		if index >= 0 && index < len(valid) {
-			rejected[valid[index].Identity] = true
+			rejected[valid[index].Identity] = "kernel-rejected"
 			valid = append(valid[:index], valid[index+1:]...)
 			continue
 		}
@@ -391,8 +420,8 @@ func (m *Manager) Acquire(req LeaseRequest) (Lease, error) {
 		if !ok || entry.Digest != target.Digest || (target.Incarnation != "" && target.Incarnation != entry.Incarnation) {
 			return Lease{}, ErrConfigChanged
 		}
-		if m.rejected[target.Identity] {
-			return Lease{}, ErrConfigRejected
+		if reason := m.rejected[target.Identity]; reason != "" {
+			return Lease{}, &ConfigRejection{Reason: reason}
 		}
 		entry.Node = domain.Node{}
 		l.Targets = append(l.Targets, entry)
@@ -411,7 +440,7 @@ func (m *Manager) Check(ctx context.Context) error {
 	generation := m.generation
 	path := "/version"
 	for id := range m.entries {
-		if !m.rejected[id] {
+		if m.rejected[id] == "" {
 			path = "/proxies/" + url.PathEscape(proxyName(id))
 			break
 		}
@@ -616,5 +645,5 @@ func writeManagerError(w http.ResponseWriter, err error) {
 		status, code = http.StatusConflict, "node_config_changed"
 	}
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"code": code})
+	_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "reason": ConfigRejectionCode(err)})
 }

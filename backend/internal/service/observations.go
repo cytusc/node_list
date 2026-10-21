@@ -109,9 +109,15 @@ func mergeAttributes(ctx context.Context, tx pgx.Tx, ip string, evidence []ipche
 			v = *verdict
 		} else if v.Status != "success" {
 			v.Error = verdict.Error
+			v.FailureStage = verdict.FailureStage
 		}
 	}
 	now := time.Now().UTC()
+	if verdict != nil {
+		v.RiskQueryStatus = verdict.RiskQueryStatus
+		v.RiskQueryError = verdict.RiskQueryError
+		v.RiskQueryCheckedAt = now.Format(time.RFC3339Nano)
+	}
 	votes := ipcheck.Score(ip, all, now)
 	v.Classification = &votes
 	v.Attributes = votes.Attributes(v.Attributes)

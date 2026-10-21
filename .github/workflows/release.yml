@@ -50,6 +50,10 @@ jobs:
         env:
           TEST_POSTGRES_URL: postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test
       - run: npm run build
+      - name: Test deployment updater
+        run: |
+          bash -n deploy/update.sh
+          python3 -m unittest discover -s deploy -p test_update.py -v
       - uses: actions/setup-go@v5
         with:
           go-version-file: backend/go.mod

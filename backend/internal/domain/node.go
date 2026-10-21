@@ -79,6 +79,10 @@ type IPPureResult struct {
 	HumanPercent          *float64 `json:"humanPercent,omitempty"`
 	BotPercent            *float64 `json:"botPercent,omitempty"`
 	TrafficRatioStatus    string   `json:"trafficRatioStatus,omitempty"`
+	TrafficRatioError     string   `json:"trafficRatioError,omitempty"`
+	RiskQueryStatus       string   `json:"riskQueryStatus,omitempty"`
+	RiskQueryError        string   `json:"riskQueryError,omitempty"`
+	RiskQueryCheckedAt    string   `json:"riskQueryCheckedAt,omitempty"`
 	TrafficRatioCheckedAt string   `json:"trafficRatioCheckedAt,omitempty"`
 	Score                 float64  `json:"score,omitempty"`
 	Label                 string   `json:"label,omitempty"`

@@ -3,10 +3,51 @@ package domain
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
 )
+
+func TestVLESSCustomIDMatchesMihomoUUIDMap(t *testing.T) {
+	p, err := ShareLinkProxy("vless://custom-user@example.com:443?type=splithttp&security=tls", "中国 🇨🇳")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// UUIDv5(nil, "custom-user"), as used by Mihomo's UUIDMap.
+	if p["uuid"] != "73641eb6-f94b-5b94-b083-8bd4ddcd0ba6" || p["network"] != "xhttp" {
+		t.Fatalf("custom ID/transport conversion: %v", p)
+	}
+	if _, err := ShareLinkProxy("vless://user%0Asecret@example.com:443", "node"); err == nil {
+		t.Fatal("control character in credentials was accepted")
+	}
+}
+
+func TestXHTTPExtraModeIsPreserved(t *testing.T) {
+	p, err := ShareLinkProxy(`vless://custom-user@example.com:443?type=xhttp&extra=%7B%22mode%22%3A%22packet-up%22%2C%22xPaddingBytes%22%3A%22100-1000%22%7D`, "node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := p["xhttp-opts"].(map[string]any)
+	if opts["mode"] != "packet-up" || opts["x-padding-bytes"] != "100-1000" {
+		t.Fatalf("extra options lost: %v", opts)
+	}
+}
+
+func TestShareLinkRejectsWithCredentialFreeReason(t *testing.T) {
+	for _, tc := range []struct{ link, code string }{
+		{"vless://example.com:443", "missing-credentials"},
+		{"trojan://example.com:443", "missing-credentials"},
+		{"vless://private-secret@example.com:443?security=reality", "missing-reality-key"},
+		{"vless://private-secret@example.com:443?type=unknown", "unsupported-transport"},
+	} {
+		_, err := ShareLinkProxy(tc.link, "节点")
+		var detail *ShareLinkError
+		if !errors.As(err, &detail) || !errors.Is(err, ErrShareLink) || detail.Code != tc.code || strings.Contains(err.Error(), "private-secret") {
+			t.Fatalf("unsafe or missing reason: %v", err)
+		}
+	}
+}
 
 func TestShadowsocksLinkEncodings(t *testing.T) {
 	auth := "aes-128-gcm:secret"
@@ -230,9 +271,9 @@ func TestTUICLinkCredentialShapes(t *testing.T) {
 			want: ProxyConfig{"username": "user", "password": "pass"},
 		},
 		{
-			name:    "bare username without password",
-			link:    "tuic://user@example.com:443",
-			wantErr: true,
+			name: "v4 token without password",
+			link: "tuic://user@example.com:443",
+			want: ProxyConfig{"token": "user"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

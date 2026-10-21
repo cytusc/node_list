@@ -5,8 +5,38 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cytusc/node_list/backend/internal/domain"
 	"github.com/jackc/pgx/v5"
 )
+
+func TestRiskRefreshIntervalDistinguishesFailureFromNoData(t *testing.T) {
+	p := 50.0
+	for _, tc := range []struct {
+		v    domain.IPPureResult
+		want time.Duration
+	}{
+		{domain.IPPureResult{TrafficRatioStatus: "query-failed"}, 30 * time.Minute},
+		{domain.IPPureResult{TrafficRatioStatus: "no-data"}, 6 * time.Hour},
+		{domain.IPPureResult{HumanPercent: &p, BotPercent: &p, TrafficRatioStatus: "available"}, 24 * time.Hour},
+	} {
+		if got := riskRefreshInterval(tc.v); got != tc.want {
+			t.Fatalf("%+v: %s != %s", tc.v, got, tc.want)
+		}
+	}
+}
+
+func TestMissingRatioHonorsLatestFailedRiskQueryBackoff(t *testing.T) {
+	now := time.Now()
+	attr := domain.IPPureResult{Status: "success", TrafficRatioStatus: "query-failed",
+		TrafficRatioCheckedAt: now.Add(-24 * time.Hour).Format(time.RFC3339Nano),
+		RiskQueryStatus:       "query-failed", RiskQueryCheckedAt: now.Format(time.RFC3339Nano)}
+	if missingTrafficRatio(attr, now) {
+		t.Fatal("old ratio timestamp bypassed the latest failed query's backoff")
+	}
+	if !missingTrafficRatio(attr, now.Add(31*time.Minute)) {
+		t.Fatal("failed query was not eligible after its backoff")
+	}
+}
 
 func TestSchedulerPrioritizesReachableNodesWithoutExit(t *testing.T) {
 	f := setup(t)

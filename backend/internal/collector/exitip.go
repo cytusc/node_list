@@ -369,6 +369,60 @@ func (e *ippureHTTPError) Error() string {
 	return fmt.Sprintf("IPPure 接口访问失败 (HTTP %d)", e.status)
 }
 
+// IPPureQueryError preserves a fixed failure stage while hiding response bodies.
+type IPPureQueryError struct {
+	Stage string
+	Err   error
+}
+
+func (e *IPPureQueryError) Error() string { return e.Stage + ": " + IPPureErrorCode(e.Err) }
+func (e *IPPureQueryError) Unwrap() error { return e.Err }
+func IPPureFailure(err error) (string, string) {
+	stage := "ippure-query"
+	var e *IPPureQueryError
+	if errors.As(err, &e) {
+		stage = e.Stage
+	}
+	return stage, IPPureErrorCode(err)
+}
+func IPPureErrorCode(err error) string {
+	var query *IPPureQueryError
+	if errors.As(err, &query) {
+		err = query.Err
+	}
+	if err == nil {
+		return ""
+	}
+	var h *ippureHTTPError
+	if errors.As(err, &h) {
+		return fmt.Sprintf("http-%d", h.status)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	var probe *exitError
+	if errors.As(err, &probe) {
+		return probe.code
+	}
+	switch {
+	case strings.Contains(err.Error(), "签名"):
+		return "signature-failed"
+	case strings.Contains(err.Error(), "JSON"):
+		return "invalid-json"
+	case strings.Contains(err.Error(), "IPv6"):
+		return "unsupported-ipv6"
+	case strings.Contains(err.Error(), "信息不完整"):
+		return "incomplete-data"
+	case strings.Contains(err.Error(), "不一致"):
+		return "ip-mismatch"
+	default:
+		return "request-failed"
+	}
+}
+
 // NewIPPureClient builds a signing client bound to one node transport.
 func NewIPPureClient(client *http.Client, origin string, timeout time.Duration) *IPPureClient {
 	if origin == "" {
@@ -458,6 +512,14 @@ func (c *IPPureClient) get(ctx context.Context, path string) (map[string]any, er
 		if err := json.Unmarshal(decoded, &payload); err != nil {
 			return nil, errors.New("IPPure 接口未返回有效 JSON")
 		}
+		if payload.OK && payload.Data == nil && strings.HasPrefix(path, "/api/info/asn/botclass/") {
+			// The service returns {ok:true,data:null} for ASNs with no statistics.
+			// Missing data and errors from required endpoints remain failures.
+			var raw map[string]json.RawMessage
+			if json.Unmarshal(decoded, &raw) == nil && strings.TrimSpace(string(raw["data"])) == "null" {
+				return map[string]any{}, nil
+			}
+		}
 		if !payload.OK || payload.Data == nil {
 			return nil, errors.New("IPPure 接口返回失败")
 		}
@@ -523,6 +585,7 @@ type IPPureResult struct {
 	HumanPercent       *float64 `json:"humanPercent"`
 	BotPercent         *float64 `json:"botPercent"`
 	TrafficRatioStatus string   `json:"trafficRatioStatus"`
+	TrafficRatioError  string   `json:"trafficRatioError,omitempty"`
 	Score              float64  `json:"score"`
 	Label              string   `json:"label"`
 	Country            string   `json:"country,omitempty"`
@@ -569,11 +632,11 @@ func QueryIPPure(ctx context.Context, c *IPPureClient, target string, asnCache *
 	}
 	basic, err := c.get(ctx, "/api/info/ip-basic/"+target)
 	if err != nil {
-		return nil, err
+		return nil, &IPPureQueryError{Stage: "ippure-basic", Err: err}
 	}
 	risk, err := c.get(ctx, "/api/info/ip-risk/"+target)
 	if err != nil {
-		return nil, err
+		return nil, &IPPureQueryError{Stage: "ippure-risk", Err: err}
 	}
 	asnNumber, ok := numberField(basic, "asn", "number")
 	if !ok || asnNumber < 1 {
@@ -611,6 +674,7 @@ func QueryIPPure(ctx context.Context, c *IPPureClient, target string, asnCache *
 			result.TrafficRatioStatus = "no-data"
 		} else {
 			result.TrafficRatioStatus = "query-failed"
+			result.TrafficRatioError = IPPureErrorCode(botErr)
 		}
 	case result.HumanPercent != nil && result.BotPercent != nil:
 		result.TrafficRatioStatus = "available"
@@ -771,6 +835,8 @@ type ASNCache struct {
 }
 
 type asnEntry struct {
+	err      error
+	failedAt time.Time
 	value    map[string]any
 	loadedAt time.Time
 	loading  chan struct{}
@@ -788,7 +854,7 @@ func NewASNCacheWithTTL(ttl time.Duration) *ASNCache {
 }
 
 // Load returns a cached value, coalescing concurrent lookups for one ASN.
-// Failures are not cached, so a transient outage does not poison later rounds.
+// Transient failures share a short cooldown; successful values use the normal TTL.
 func (c *ASNCache) Load(ctx context.Context, asn int64, compute func(context.Context) (map[string]any, error)) (map[string]any, error) {
 	for {
 		c.mu.Lock()
@@ -796,6 +862,11 @@ func (c *ASNCache) Load(ctx context.Context, asn int64, compute func(context.Con
 		if entry == nil {
 			entry = &asnEntry{}
 			c.entries[asn] = entry
+		}
+		if entry.err != nil && time.Since(entry.failedAt) < 30*time.Second {
+			err := entry.err
+			c.mu.Unlock()
+			return nil, err
 		}
 		if entry.loaded && (c.ttl <= 0 || time.Since(entry.loadedAt) < c.ttl) {
 			value := entry.value
@@ -818,6 +889,11 @@ func (c *ASNCache) Load(ctx context.Context, asn int64, compute func(context.Con
 
 		value, err := compute(ctx)
 		c.mu.Lock()
+		entry.err = nil
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			entry.err = err
+			entry.failedAt = time.Now()
+		}
 		if err == nil {
 			entry.value = value
 			entry.loadedAt = time.Now()

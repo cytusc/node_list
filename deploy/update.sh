@@ -22,19 +22,50 @@ healthy() {
 update_one() {
   local service=$1 variable=$2 repository=$3 old_tag new_tag
   old_tag=$(sed -n "s/^$variable=//p" release.env)
-  new_tag=$(curl --fail --silent --show-error --retry 2 --max-time 30 \
-    "https://api.github.com/repos/$repository/releases/latest" | \
-    python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])') || return 1
+  if [[ "$service" == node-explorer ]]; then
+    # A release is created only after the image passes its smoke tests. Compare
+    # numerically and retain a manually deployed newer hotfix tag.
+    new_tag=$(curl --fail --silent --show-error --retry 2 --max-time 30 \
+      "https://api.github.com/repos/$repository/releases/latest" | \
+      python3 -c '
+import json, re, sys
+def version(tag, current=False):
+    suffix = r"(?:-[A-Za-z0-9._-]+)?" if current else ""
+    match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)" + suffix, tag)
+    if not match:
+        raise ValueError("Invalid stable version: " + tag)
+    return tuple(map(int, match.groups()))
+current = sys.argv[1]
+latest = json.load(sys.stdin)["tag_name"]
+print(latest if version(latest) > version(current, current=True) else current)
+' "$old_tag") || return 1
+  else
+    new_tag=$(curl --fail --silent --show-error --retry 2 --max-time 30 \
+      "https://api.github.com/repos/$repository/releases/latest" | \
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])') || return 1
+  fi
+  if [[ "$new_tag" == "$old_tag" ]]; then
+    echo "$service already running $old_tag"
+    return 0
+  fi
   [[ "$new_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
   if [[ "$service" == subs-check ]]; then new_tag=${new_tag#v}; fi
-  [[ "$old_tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  [[ "$old_tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$ ]] || return 1
   if [[ "$new_tag" == "$old_tag" ]]; then
     echo "$service already running $old_tag"
     return 0
   fi
   local targets=("$service")
   if [[ "$service" == node-explorer ]]; then
-    targets=(node-explorer source-ingest mihomo-manager connectivity ip-service residential-recovery normal-recovery node-cleanup node-lifecycle)
+    # Read the deployed service topology instead of assuming legacy roles.
+    mapfile -t targets < <(compose config --format json | python3 -c '
+import json,sys
+config=json.load(sys.stdin)
+for name, service in config["services"].items():
+    if service.get("image", "").startswith("ghcr.io/cytusc/node_list:"):
+        print(name)
+')
+    [[ ${#targets[@]} -gt 0 ]] || return 1
   fi
   echo "Updating $service $old_tag -> $new_tag"
   compose_tag "$variable" "$new_tag" pull "${targets[@]}" || return 1
