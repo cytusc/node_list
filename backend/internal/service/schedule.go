@@ -50,7 +50,7 @@ func scheduleMany(ctx context.Context, tx pgx.Tx, work []scheduledWork) error {
 		LEFT JOIN node_explorer_work w ON w.kind=d.kind AND w.key=d.key
 		 WHERE w.id IS NULL OR (d.mode<>'once' AND (w.state='done' OR
 			 (w.state='queued' AND NOT (w.error LIKE $2 AND w.due_at>now())
-		 AND (d.due_at<w.due_at OR (d.mode='risk' AND d.priority>w.priority)))))
+		 AND (d.due_at<w.due_at OR ((d.mode='risk' OR d.kind='exit') AND d.priority>w.priority)))))
 		ORDER BY d.kind,d.key
 		ON CONFLICT(kind,key) DO UPDATE SET
 		payload=CASE WHEN EXCLUDED.kind='risk' AND node_explorer_work.state='queued' THEN node_explorer_work.payload ELSE EXCLUDED.payload END,
@@ -60,7 +60,7 @@ func scheduleMany(ctx context.Context, tx pgx.Tx, work []scheduledWork) error {
 		 WHERE EXCLUDED.kind NOT IN ('recovery','normal-recovery') AND (node_explorer_work.state='done' OR
 			 (node_explorer_work.state='queued' AND NOT (node_explorer_work.error LIKE $2 AND node_explorer_work.due_at>now())
 		 AND (EXCLUDED.due_at<node_explorer_work.due_at OR
-		 (EXCLUDED.kind='risk' AND EXCLUDED.priority>node_explorer_work.priority))))`, b, configRejectedPattern())
+		 (EXCLUDED.kind IN ('risk','exit') AND EXCLUDED.priority>node_explorer_work.priority))))`, b, configRejectedPattern())
 		if err != nil {
 			return err
 		}
@@ -118,14 +118,13 @@ func (r *Runner) schedule(ctx context.Context) error {
 		return err
 	}
 	type item struct {
-		id   string
-		e, a []byte
+		id      string
+		c, e, a []byte
 	}
 	items := []item{}
-	var cPayload []byte
 	for rows.Next() {
 		var i item
-		if err = rows.Scan(&i.id, &cPayload, &i.e, &i.a); err != nil {
+		if err = rows.Scan(&i.id, &i.c, &i.e, &i.a); err != nil {
 			rows.Close()
 			return err
 		}
@@ -146,8 +145,14 @@ func (r *Runner) schedule(ctx context.Context) error {
 	work := make([]scheduledWork, 0, len(items))
 	now := time.Now()
 	for _, i := range items {
+		var connectivity domain.ConnectivityState
 		var exit domain.ExitState
 		var attr domain.IPPureResult
+		if len(i.c) > 0 {
+			if err = json.Unmarshal(i.c, &connectivity); err != nil {
+				return err
+			}
+		}
 		if len(i.e) > 0 {
 			if err = json.Unmarshal(i.e, &exit); err != nil {
 				return err
@@ -159,7 +164,7 @@ func (r *Runner) schedule(ctx context.Context) error {
 			}
 		}
 		priority := 0
-		if domain.FreshResidential(&attr, exit.IP, now) {
+		if domain.FreshResidential(&attr, exit.IP, now) || (connectivity.Reachable && exit.IP == "") {
 			priority = 1
 		}
 		p := Payload{Identity: i.id}

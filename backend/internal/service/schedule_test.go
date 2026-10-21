@@ -8,6 +8,30 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+func TestSchedulerPrioritizesReachableNodesWithoutExit(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.evidence(t, "")
+	f.exec(t, `DELETE FROM node_explorer_exits`)
+	f.runner.Config.Role = "exit-provision"
+	if err := f.runner.schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var priority int
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT priority FROM node_explorer_work WHERE kind='exit' AND key=$1`, f.id).Scan(&priority); err != nil || priority != 1 {
+		t.Fatalf("missing exit was not prioritized: %d, %v", priority, err)
+	}
+	// A previously queued normal task must also be promoted without waiting
+	// for its scheduled time to change.
+	f.exec(t, `UPDATE node_explorer_work SET priority=0 WHERE kind='exit'`)
+	if err := f.runner.schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT priority FROM node_explorer_work WHERE kind='exit' AND key=$1`, f.id).Scan(&priority); err != nil || priority != 1 {
+		t.Fatalf("queued exit was not promoted: %d, %v", priority, err)
+	}
+}
+
 func TestSchedulerSkipsRetiredNodesAndExistingRecoveryBeforeReadingFacts(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()

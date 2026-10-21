@@ -31,6 +31,7 @@ type exitProbe struct {
 
 // ExitProbeServices raced per round. Cloudflare also reports the exit country.
 var ExitProbeServices = []exitProbe{
+	{"https://myip.ipip.net/", "IPIP", false},
 	{"https://api-ipv4.ip.sb/ip", "IP.SB", false},
 	{"https://checkip.amazonaws.com/", "AWS CheckIP", false},
 	{"https://api.ipify.org", "ipify", false},
@@ -62,10 +63,6 @@ type ExitAttempt struct {
 	Outcome   string `json:"outcome"`
 	Code      string `json:"code,omitempty"`
 }
-
-// probeCodes that prove the tunnel itself is dead, as opposed to one endpoint
-// refusing to answer.
-var transportDead = map[string]bool{"TIMEOUT": true, "CONNECTION_RESET": true}
 
 func exitProbeCode(err error) string {
 	var probeErr *exitError
@@ -105,14 +102,14 @@ func (e *exitError) Error() string { return e.err.Error() }
 func (e *exitError) Unwrap() error { return e.err }
 
 var traceCountryPattern = regexp.MustCompile(`(?m)^loc=([A-Za-z]{2})\s*$`)
+var ipipAddressPattern = regexp.MustCompile(`当前\s*IP[：:]\s*([^\s]+)`)
 
 // ResolveExitIPInfo races the echo services through one node's transport.
 //
 // A remembered endpoint goes first: echo reachability is a property of the
 // exit, so the previous winner usually wins again. Batches race inside one
-// timeout window instead of dialling sequentially, and a batch that failed with
-// endpoint-specific errors does not count towards the early abort, because it
-// proves the tunnel still answers per destination.
+// timeout window instead of dialling sequentially. Failure of one batch never
+// skips later services: reachability can differ by destination and region.
 func ResolveExitIPInfo(ctx context.Context, client *http.Client, timeout time.Duration, preferred []string, onAttempt func(ExitAttempt)) (*ExitOutcome, error) {
 	if client == nil {
 		return nil, &exitError{code: "NETWORK_ERROR", err: errors.New("IPPure 缺少隔离代理入口")}
@@ -139,7 +136,6 @@ func ResolveExitIPInfo(ctx context.Context, client *http.Client, timeout time.Du
 	var observed *ExitOutcome
 	var ipv6 *ExitOutcome
 	failures := 0
-	deadStreak := 0
 	var mu sync.Mutex
 
 	for offset := 0; offset < len(services); offset += ExitProbeBatch {
@@ -173,8 +169,6 @@ func ResolveExitIPInfo(ctx context.Context, client *http.Client, timeout time.Du
 		}
 		wg.Wait()
 
-		transportFailures := 0
-		endpointSpecific := false
 		for i, service := range batch {
 			result := results[i]
 			if result.err != nil {
@@ -188,11 +182,6 @@ func ResolveExitIPInfo(ctx context.Context, client *http.Client, timeout time.Du
 						Outcome:   "error",
 						Code:      code,
 					})
-				}
-				if transportDead[code] {
-					transportFailures++
-				} else {
-					endpointSpecific = true
 				}
 				continue
 			}
@@ -221,24 +210,13 @@ func ResolveExitIPInfo(ctx context.Context, client *http.Client, timeout time.Du
 			return observed, nil
 		}
 		failures += len(batch) - countSuccesses(results)
-		if endpointSpecific {
-			deadStreak = 0
-		} else {
-			deadStreak += transportFailures
-		}
-		if deadStreak >= 2 {
-			break
-		}
+		// Timeouts only prove these destinations are unreachable. Regional
+		// proxies may still reach another echo, so always try the next batch.
 	}
 	if ipv6 != nil {
 		return ipv6, nil
 	}
-	var failure error
-	if deadStreak >= 2 {
-		failure = errors.New("节点出口探测连续多次传输级失败，已提前中止")
-	} else {
-		failure = fmt.Errorf("出口 IP 探测失败：%d 个查询入口均未取得有效 IP", failures)
-	}
+	failure := fmt.Errorf("出口 IP 探测失败：%d 个查询入口均未取得有效 IP", failures)
 	return nil, &exitError{code: "EXIT_IP", err: failure}
 }
 
@@ -296,9 +274,16 @@ func probeOneEndpoint(ctx context.Context, client *http.Client, timeout time.Dur
 		}
 	}
 	parsed := net.ParseIP(ip)
+	if parsed == nil && service.Provider == "IPIP" {
+		// IPIP returns a labelled Chinese sentence, not a bare address.
+		if match := ipipAddressPattern.FindStringSubmatch(body); match != nil {
+			parsed = net.ParseIP(match[1])
+		}
+	}
 	if parsed == nil {
 		return nil, &exitError{code: "INVALID_IP", err: errors.New("出口查询未返回有效 IP")}
 	}
+	ip = parsed.String()
 	family := 4
 	if parsed.To4() == nil {
 		family = 6

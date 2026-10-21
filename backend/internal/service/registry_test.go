@@ -2,12 +2,49 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
 )
+
+func TestRegistryCollapsesEquivalentConnectionsAcrossImports(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	link := "vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"add":"example.com","port":"443","id":"11111111-1111-4111-8111-111111111111","net":"tcp"}`))
+	proxy, err := domain.ShareLinkProxy(link, "Clash variant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := domain.Node{Name: "share", Type: "vmess", Server: "example.com", Port: "443", RawLink: link}
+	second := domain.Node{Name: "config", Type: "vmess", Server: "example.com", Port: "443", RawConfig: proxy}
+	thirdProxy := domain.ProxyConfig{}
+	for k, v := range proxy {
+		thirdProxy[k] = v
+	}
+	thirdProxy["uuid"] = "22222222-2222-4222-8222-222222222222"
+	third := second
+	third.RawConfig = thirdProxy
+	for index, n := range []domain.Node{first, second, third} {
+		stamp := time.Now().Add(time.Duration(index+1) * time.Minute).UTC().Format(time.RFC3339Nano)
+		raw, _ := json.Marshal(domain.Snapshot{CheckedAt: stamp, Nodes: []domain.Node{n}})
+		if err := f.st.Adapter().Insert(ctx, "variant-"+stamp, raw, stamp, 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.repo.SyncRegistry(ctx, f.st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_node_registry WHERE available AND node->>'type'='vmess'`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("visible VMess count = %d, %v; want two distinct credentials", count, err)
+	}
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_node_registry WHERE node->>'type'='vmess'`).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("original identities must be retained: %d, %v", count, err)
+	}
+}
 
 func TestRegistryConsumesOnlySourceChangesAcrossRestarts(t *testing.T) {
 	f := setup(t)

@@ -3,12 +3,52 @@ package collector
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+type echoTransport func(*http.Request) (*http.Response, error)
+
+func (f echoTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestExitIPIPFallbackAfterTimeoutBatch(t *testing.T) {
+	var mu sync.Mutex
+	visited := map[string]bool{}
+	client := &http.Client{Transport: echoTransport(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		visited[r.URL.Host] = true
+		mu.Unlock()
+		if r.URL.Host != "myip.ipip.net" {
+			return nil, context.DeadlineExceeded
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("当前 IP：101.251.204.174  来自于：中国 北京 北京  联通\n")), Header: make(http.Header)}, nil
+	})}
+	// Put four unreachable services first to reproduce premature-abort failures.
+	preferred := []string{"https://api-ipv4.ip.sb/ip", "https://checkip.amazonaws.com/", "https://api.ipify.org", "https://ifconfig.me/ip"}
+	o, err := ResolveExitIPInfo(context.Background(), client, time.Second, preferred, nil)
+	if err != nil || o == nil || o.IP != "101.251.204.174" || o.Provider != "IPIP" {
+		t.Fatalf("fallback = %+v, %v", o, err)
+	}
+	if !visited["myip.ipip.net"] {
+		t.Fatal("regional fallback was skipped")
+	}
+}
+
+func TestIPIPRejectsUnlabelledAndInvalidResponses(t *testing.T) {
+	for _, body := range []string{"blocked 101.251.204.174", "当前 IP：999.251.204.174", "<html>request failed</html>"} {
+		client := &http.Client{Transport: echoTransport(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})}
+		if o, err := probeOneEndpoint(context.Background(), client, time.Second, exitProbe{"https://myip.ipip.net/", "IPIP", false}); err == nil || o != nil {
+			t.Fatalf("accepted %q", body)
+		}
+	}
+}
 
 func TestASNCacheCoalescesConcurrentLoadsAndExpires(t *testing.T) {
 	cache := NewASNCacheWithTTL(10 * time.Millisecond)

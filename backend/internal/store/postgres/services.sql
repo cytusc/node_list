@@ -133,3 +133,4 @@ BEGIN
     DELETE FROM node_explorer_recovery_events WHERE checked_at<now()-interval '2 hours';
   END IF;
 END $$;
+INSERT INTO node_explorer_service_migrations(version) VALUES (7) ON CONFLICT DO NOTHING;

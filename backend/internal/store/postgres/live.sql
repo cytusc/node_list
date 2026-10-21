@@ -2,6 +2,9 @@
 CREATE COLLATION IF NOT EXISTS node_explorer_numeric
   (provider = icu, locale = 'zh-u-kn-true');
 
+ALTER TABLE node_explorer_node_registry ADD COLUMN IF NOT EXISTS connection_key text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS node_explorer_registry_connection_key ON node_explorer_node_registry(connection_key) WHERE available AND connection_key<>'';
+
 ALTER TABLE node_explorer_node_registry ADD COLUMN IF NOT EXISTS source_at timestamptz NOT NULL DEFAULT '-infinity';
 CREATE TABLE IF NOT EXISTS node_explorer_registry_batches (
  snapshot_id integer PRIMARY KEY, revision bigint NOT NULL
