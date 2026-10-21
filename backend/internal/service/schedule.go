@@ -118,8 +118,8 @@ func (r *Runner) schedule(ctx context.Context) error {
 		return err
 	}
 	type item struct {
-		id      string
-		e, a    []byte
+		id   string
+		e, a []byte
 	}
 	items := []item{}
 	var cPayload []byte

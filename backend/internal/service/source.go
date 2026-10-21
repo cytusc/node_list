@@ -31,9 +31,9 @@ func (p *subsCheckProvider) Close() {}
 
 type qilanProvider struct{ q *qilan.Source }
 
-func (p *qilanProvider) Name() string { return "qilan" }
+func (p *qilanProvider) Name() string              { return "qilan" }
 func (p *qilanProvider) Start(ctx context.Context) { p.q.Start(ctx) }
-func (p *qilanProvider) Close() { p.q.Close() }
+func (p *qilanProvider) Close()                    { p.q.Close() }
 
 func (r *Repository) RunSource(ctx context.Context, st *store.Store) error {
 	return r.withServiceLock(ctx, ServiceName("source"), func(ctx context.Context) error {
