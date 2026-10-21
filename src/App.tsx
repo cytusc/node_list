@@ -66,7 +66,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FilterMenu } from "@/components/filter-menu";
-import { ServiceStatusPanel } from "@/components/service-status";
 import {
   countryName,
   detailLabels,
@@ -77,7 +76,6 @@ import {
   speedParts,
   timeLabel,
   type NodeRecord,
-  type ServiceStatus,
   type IPPureResult,
   type Snapshot,
 } from "@/lib/data";
@@ -342,14 +340,6 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [services, setServices] = useState<ServiceStatus[]>([]);
-  const [servicesObservedAt, setServicesObservedAt] = useState<string | null>(
-    null,
-  );
-  const [servicesError, setServicesError] = useState("");
-  const [servicesLoading, setServicesLoading] = useState(true);
-  const servicesRequest = useRef<AbortController | null>(null);
-  const servicesPending = useRef(false);
   const [errorCode, setErrorCode] = useState("");
   const [query, setQuery] = useState("");
   const [countries, setCountries] = useState<string[]>([]);
@@ -482,59 +472,6 @@ export default function App() {
     };
   }, [load]);
 
-  const refreshServices = useCallback(async () => {
-    if (servicesPending.current) return;
-    const controller = new AbortController();
-    servicesRequest.current = controller;
-    servicesPending.current = true;
-    setServicesLoading(true);
-    const timeout = window.setTimeout(() => controller.abort(), 12000);
-    try {
-      const response = await fetch("/api/services", {
-        signal: controller.signal,
-        cache: "no-store",
-      });
-      if (!response.ok) throw new Error("服务状态读取失败，请重试");
-      const body = await response.json();
-      if (
-        !Array.isArray(body.services) ||
-        !body.services.length ||
-        !Number.isFinite(Date.parse(body.observedAt))
-      ) {
-        throw new Error("服务状态数据不完整，请重试");
-      }
-      setServices(body.services);
-      setServicesObservedAt(body.observedAt);
-      setServicesError("");
-    } catch {
-      // Keep the last snapshot visible, but visibly mark it as outdated.
-      if (servicesRequest.current === controller)
-        setServicesError("状态更新失败，当前数据可能已过期");
-    } finally {
-      window.clearTimeout(timeout);
-      if (servicesRequest.current === controller) {
-        servicesPending.current = false;
-        setServicesLoading(false);
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    const update = () => {
-      if (!document.hidden) void refreshServices();
-    };
-    update();
-    const timer = window.setInterval(update, 15000);
-    document.addEventListener("visibilitychange", update);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", update);
-      const request = servicesRequest.current;
-      servicesRequest.current = null;
-      servicesPending.current = false;
-      request?.abort();
-    };
-  }, [refreshServices]);
   const maxSpeed = snapshot?.summary.maxSpeed || 0;
   const summary = snapshot?.summary || { countries: 0, median: 0 };
   const totalNodes = snapshot?.totalNodes || 0;
@@ -753,13 +690,6 @@ export default function App() {
         </div>
       </header>
       <main className="main-content">
-        <ServiceStatusPanel
-          services={services}
-          observedAt={servicesObservedAt}
-          error={servicesError}
-          loading={servicesLoading}
-          onRefresh={() => void refreshServices()}
-        />
         <section className="intro">
           <div className="intro-top">
             <div>

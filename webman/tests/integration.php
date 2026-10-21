@@ -20,11 +20,9 @@ declare(strict_types=1);
 
 require __DIR__ . '/bootstrap.php';
 
-use app\service\Heartbeat;
 use app\service\LiveResults;
-use app\service\ReadCache;
 use app\service\ResultsQueryParser;
-use app\service\ServiceBoard;
+use app\service\ResultsStatus;
 use support\Db;
 
 $passed = 0;
@@ -255,157 +253,23 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// 7. 服务看板与附属字段
+// 7. 结果附属字段
 //
 // 心跳表由测试自己掌管：本机可能同时跑着别的进程（比如并排验证 Go 版时，
 // 它每 10s 写一次 api 心跳），不清空的话断言会随「谁在跑」而飘。
-// 每改一次数据都要 forget 缓存，否则读到的是 10s 窗口里的旧值。
 // ---------------------------------------------------------------------------
 
-$board = new ServiceBoard();
-// 心跳是进程内节流的：不清状态的话，同一进程里先跑过的调用会把本次写入
-// 节流掉，断言就随执行顺序飘了。
-Heartbeat::reset();
-$cache = new ReadCache();
-foreach (['node-list:services:v2', 'node-list:collector', 'node-list:source-warning'] as $key) {
-    $cache->forget($key);
-}
+$status = new ResultsStatus();
 Db::statement('DELETE FROM node_explorer_service_status');
-
-$snapshot = $board->services();
-ok(isset($snapshot['observedAt']) && strtotime($snapshot['observedAt']) !== false, '快照带实际采集时间');
-$services = $snapshot['services'];
-same(9, count($services), '看板固定 9 个服务');
-same('api', $services[0]['service'], '按服务名排序');
-// 字段集必须与 Go 的 service.Status 完全一致：多一个键就是契约漂移
-// （内部行里的 updatedAtRfc3339 只供采集器状态用，不能透出去）。
-// 在 source-ingest 行上断言：它的 error 非空，11 个键才会全部出现；
-// api 行健康时 error 按 Go 的 omitempty 消失，那是下面单独断言的行为。
-$ingest = array_column($services, null, 'service')['source-ingest'];
-same(
-    ['service', 'updatedAt', 'healthy', 'error', 'queued', 'scheduled', 'running',
-     'oldestWaitSeconds', 'restored', 'checked', 'skipped',
-     'activeAssessments', 'checkedLastHour', 'drainEtaSeconds',
-     'blocked', 'expired', 'cooldown', 'restoredNodes'],
-    array_keys($ingest),
-    '服务状态字段与 Go 的 Status 结构一致'
-);
-// api 行是 webman 自己刚写的心跳（Heartbeat 在 statuses() 入口惰性写入）：
-// 删掉 Go 的 node-explorer 之后，这一行必须仍然健康，否则就是心跳没接上。
-same(true, $services[0]['healthy'], 'webman 自己写的 api 心跳算健康');
-ok(!array_key_exists('error', $services[0]), '心跳 error 为空时不输出该字段（Go 的 omitempty）');
-
-// 「无心跳」的文案与零值时间同样在 source-ingest 行上断言：webman 不写这个
-// 服务，不受节流时序影响；而 api 行只要被读过就一定有心跳。
-same('服务尚未启动', $ingest['error'], '无心跳时的文案');
-// 零值时间的字面量取决于部署时区（PG 的 0001-01-01 哨兵 + Go 的「本地当前偏移」
-// 渲染），所以只断言它是那个哨兵，不写死 Z 还是 +08:00。
 $isZeroTime = static fn (string $v): bool =>
     str_starts_with($v, '0000-12-31') || str_starts_with($v, '0001-01-01');
-ok($isZeroTime($ingest['updatedAt']), '无心跳时 updatedAt 是零值时间哨兵');
-same(false, $ingest['healthy'], '无心跳时 healthy=false');
-
-// Seed observed outcomes separately from mutable work, as the worker does.
-$recordBoardOutcomes = static function (): void {
-    Db::statement("INSERT INTO node_explorer_recovery_events(work_id,checked_at,kind,result)
-        SELECT w.id,(h->>'checkedAt')::timestamptz,w.kind,h->>'result'
-        FROM node_explorer_work w CROSS JOIN LATERAL jsonb_array_elements(
-            coalesce(w.payload->'recoveryHistory',jsonb_build_array(jsonb_build_object(
-                'checkedAt',w.payload->>'checkedAt','result',w.payload->>'recoveryResult')))) h
-        WHERE w.key LIKE 'board-%' AND coalesce(h->>'checkedAt','')<>''
-          AND coalesce(h->>'result','')<>'' ON CONFLICT DO NOTHING");
-    Db::statement("INSERT INTO node_explorer_recovery_totals(kind,result,completed)
-        SELECT kind,result,count(*) FROM node_explorer_recovery_events GROUP BY kind,result
-        ON CONFLICT(kind,result) DO UPDATE SET completed=EXCLUDED.completed");
-};
-// 两类恢复任务的统计独立，出口失败和分类未确认也计入住宅核验结果。
-Db::statement("INSERT INTO node_explorer_work(kind,key,state,due_at,payload) VALUES
- ('normal-recovery','board-low-scheduled','queued',now()+interval '6 hours','{}'),
- ('normal-recovery','board-low-completed','done',now(),'{\"recoveryResult\":\"eligible\"}'),
- ('recovery','board-high-exit-failed','done',now(),'{\"recoveryResult\":\"exit-probe-failed\"}'),
- ('recovery','board-high-unconfirmed','done',now(),'{\"recoveryResult\":\"classification-unconfirmed\"}')");
-Db::statement("UPDATE node_explorer_work SET payload=payload||jsonb_build_object('checkedAt',now()-interval '2 hours') WHERE key LIKE 'board-%' AND jsonb_exists(payload,'recoveryResult')");
-$recordBoardOutcomes();
-$split = array_column($board->statuses(['normal-recovery', 'residential-recovery']), null, 'service');
-same(1, $split['normal-recovery']['scheduled'], '非住宅恢复独立统计定时等待');
-same(1, $split['normal-recovery']['checked'], '非住宅恢复独立统计完成结果');
-same(2, $split['residential-recovery']['checked'], '住宅核验包含出口失败和分类未确认');
-// A finished assessment remains counted after requeue, polling does not count.
-Db::statement("INSERT INTO node_explorer_work(kind,key,state,due_at,attempts,payload) VALUES
- ('normal-recovery','board-low-requeued','queued',now()+interval '6 hours',99,
- jsonb_build_object('recoveryResult','probe-failed','recoveryAttempts',3,'checkedAt',now(),
- 'recoveryHistory',jsonb_build_array(
- jsonb_build_object('result','probe-failed','checkedAt',now()-interval '20 minutes'),
- jsonb_build_object('result','probe-failed','checkedAt',now()-interval '10 minutes'),
- jsonb_build_object('result','probe-failed','checkedAt',now())))),
- ('normal-recovery','board-low-active','queued',now()-interval '10 seconds',20,
- jsonb_build_object('startedAt',now()))");
-$recordBoardOutcomes();
-$metrics = $board->statuses(['normal-recovery'])[0];
-same(4, $metrics['checked'], '累计核验包含已重新排期的三轮结果');
-same(3, $metrics['checkedLastHour'], '滚动吞吐按历史次数计算，忽略轮询次数');
-same(1, $metrics['activeAssessments'], '等待依赖的会话仍计入核验中');
-same(1200, $metrics['drainEtaSeconds'], '预计排空时间只计算到期任务');
-// A later diagnostic result cannot erase previous assessments. Deleting work
-// or pruning recent events must not erase lifetime counts either.
-Db::statement("UPDATE node_explorer_work SET payload=payload||jsonb_build_object('recoveryResult','config-rejected') WHERE key='board-low-requeued'");
-same(4, $board->statuses(['normal-recovery'])[0]['checked'], '最终结果变化不改变已记录核验');
-Db::statement("INSERT INTO node_explorer_work(kind,key,state,due_at,lease_until,error) VALUES
- ('exit','board-expired','running',now()-interval '2 minutes',now()-interval '1 minute',''),
- ('exit','board-running','running',now(),now()+interval '1 minute',''),
- ('exit','board-blocked','queued',now()+interval '6 hours',NULL,'node_config_rejected: unsupported')");
-$ip = $board->statuses(['ip-service'])[0];
-same(1, $ip['running'], '执行中仅包含有效租约');
-same(1, $ip['expired'], '过期租约另列告警');
-same(1, $ip['blocked'], '配置拒绝任务另列告警');
-Db::statement("UPDATE node_explorer_node_registry SET historical_residential=true WHERE identity='id-us-retired'");
-Db::statement("UPDATE node_explorer_retired_nodes SET reason='IPPure:fixture' WHERE identity='id-us-retired'");
-Db::statement("INSERT INTO node_explorer_work(kind,key,state,due_at,payload)
- SELECT 'recovery',identity||':'||retired_at,'done',now(),jsonb_build_object(
- 'identity',identity,'retiredAt',retired_at,'reason',reason,
- 'recoveryResult','probe-failed','checkedAt',now(),'recoveryAttempts',1)
- FROM node_explorer_retired_nodes WHERE identity='id-us-retired'");
-$cold = $board->statuses(['residential-recovery'])[0];
-same(1, $cold['cooldown'], '完成态中的恢复冷却任务不会漏计');
-same(1, $cold['scheduled'], '冷却计入定时等待');
-Db::statement("UPDATE node_explorer_work SET payload=jsonb_set(payload,'{checkedAt}',to_jsonb((now()-interval '6 minutes')::text)) WHERE kind='recovery' AND payload->>'identity'='id-us-retired'");
-$cold = $board->statuses(['residential-recovery'])[0];
-same(0, $cold['cooldown'], '到期后不再计入冷却');
-same(1, $cold['queued'], '到期冷却计入待处理');
-ok($cold['oldestWaitSeconds'] >= 60, '最长等待包含到期恢复冷却');
-Db::statement("DELETE FROM node_explorer_work WHERE kind='recovery' AND payload->>'identity'='id-us-retired'");
-Db::statement("INSERT INTO node_explorer_lifecycle_events(identity,action,dry_run,reason) VALUES
- ('board-node','restore',false,'fixture'),('board-node','restore',false,'fixture')");
-$restored = $board->statuses(['node-lifecycle'])[0];
-same(2, $restored['restored'], '累计恢复按次数统计');
-same(1, $restored['restoredNodes'], '恢复节点按身份去重');
-Db::statement("DELETE FROM node_explorer_lifecycle_events WHERE identity='board-node'");
-Db::statement("DELETE FROM node_explorer_work WHERE key LIKE 'board-%'");
-same(4, $board->statuses(['normal-recovery'])[0]['checked'], '删除任务后历史累计保持不变');
-Db::statement("DELETE FROM node_explorer_recovery_events");
-same(4, $board->statuses(['normal-recovery'])[0]['checked'], '滚动明细过期不影响累计');
-same(0, $board->statuses(['normal-recovery'])[0]['checkedLastHour'], '小时统计来自时间窗口内明细');
-Db::statement("DELETE FROM node_explorer_recovery_totals");
-
-// 心跳过期 → 明确文案，且不再健康。先灌一行再改旧：source-ingest 没有
-// 写入方，直接 UPDATE 会更新 0 行，读到的仍是「尚未启动」。
-Db::statement(
-    "INSERT INTO node_explorer_service_status(service,updated_at,payload)
-     VALUES('source-ingest', now(), '{\"error\":\"\",\"running\":true}'::jsonb)
-     ON CONFLICT(service) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload"
-);
-Db::statement("UPDATE node_explorer_service_status SET updated_at=now()-interval '5 minutes' WHERE service='source-ingest'");
-$cache->forget('node-list:services:v2');
-$stale = array_column($board->services()['services'], null, 'service')['source-ingest'];
-same(false, $stale['healthy'], '超过 90 秒的心跳不算健康');
-same('服务心跳已过期', $stale['error'], '心跳过期的文案');
 
 // 采集器状态读的是 ip-service：本夹具没有它的心跳。
-$collector = $board->collectorStatus();
+$collector = $status->collectorStatus();
 same(true, $collector['enabled'], 'collector.enabled 恒为 true');
 ok($isZeroTime($collector['lastRunAt']), 'collector.lastRunAt 用秒精度零值时间哨兵');
 same('服务尚未启动', $collector['error'], '采集器无心跳时透出错误文案');
-same(null, $board->sourceWarning(), '无 sourceWarning 时为 null');
+same(null, $status->sourceWarning(), '无 sourceWarning 时为 null');
 
 // ---------------------------------------------------------------------------
 // 结果

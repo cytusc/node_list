@@ -19,7 +19,6 @@ Go 版的接口层（`backend/internal/api` 与 `cmd/node-explorer`）已经删�
 |---|---|---|---|---|
 | `/api/health` | GET | 200 | `{"status":"ok"}` | 无 |
 | `/api/results` | GET | 200 | 实时视图 + `sourceWarning` + `ippureCollector` | `no-store` |
-| `/api/services` | GET | 200 | `{"services":[…6 个]}` | `no-store` |
 | `/api/downloads` | ANY | 404 | `{"error":"订阅下载暂不可用。"}` | 无 |
 | `/api/download` | ANY | 404 | `{"error":"订阅下载暂不可用。"}` | 无 |
 | `/api/*` | ANY | 404 | `{"error":"接口不存在。"}` | 无 |
@@ -35,10 +34,7 @@ Go 版的接口层（`backend/internal/api` 与 `cmd/node-explorer`）已经删�
 - 任何不合法输入 → 400 `{"error":"节点分页、筛选或排序参数无效。"}`。
 - `snapshot` 参数 → 400 `{"error":"仅支持查询当前节点状态。"}`。
 
-**服务心跳**：Go 版由 `node-explorer` 起 10s ticker 写 `node_explorer_service_status`，
-删掉之后看板的 `api` 行会永远显示「服务尚未启动」。本实现在 `ServiceBoard::statuses()`
-入口惰性补写（两次写入至少间隔 10s，失败只记日志），见 `app/service/Heartbeat.php`。
-前端轮询本身就是心跳的驱动力；页面全关 90s 后该行显示「服务心跳已过期」也符合事实。
+服务状态面板及 `/api/services` 已移除。节点结果的采集器状态和来源告警由 `ResultsStatus` 读取；结果请求仍驱动 API 心跳（至少间隔 10 秒）。
 
 ---
 
@@ -55,7 +51,6 @@ config/
 app/
   controller/
     ResultsController.php   GET /api/results：参数校验 → 查询 → 合并附属信息
-    ServicesController.php  GET /api/services
     HealthController.php    GET /api/health（不带 no-store）
     DownloadController.php  /api/download(s) 的 404 占位
     StaticController.php    GET / → public/index.html（框架静态处理不映射目录）
@@ -63,7 +58,7 @@ app/
     ResultsQueryParser.php  查询参数 → 类型化 ResultsQuery（白名单唯一入口）
     LiveResults.php         实时视图读取：一条 SQL 完成元数据/facets/过滤/分页/载荷
     NodePresenter.php        节点 JSON 形状投影（复刻 Go 的 marshalJSONShape）
-    ServiceBoard.php         服务看板 + 采集器状态 + 上游告警
+    ResultsStatus.php        采集器状态 + 上游告警
     Heartbeat.php            api 服务心跳（惰性写入，替代 Go 的 10s ticker）
     ReadCache.php            PSR-16 缓存包装：记住 null、失败不缓存、缓存故障降级
     JsonResponse.php         JSON 响应（charset + no-store）
@@ -151,9 +146,7 @@ PGHOST=127.0.0.1 PGDATABASE=node_explorer_test PGUSER=postgres PGPASSWORD=... \
 wsl -d <distro> -- sleep 300 &     # 撑住转发
 ```
 
-集成测试会自己接管 `node_explorer_service_status` 表（先清空再逐项插入）。
-注意 `api` 行只要被 `statuses()` 读过就会有心跳（那是被测行为本身），
-所以「无心跳 / 心跳过期」的断言都放在 `source-ingest` 行上——它没有写入方。
+集成测试会清空 `node_explorer_service_status` 表，验证无心跳时结果附属字段的响应。仅在测试数据库运行。
 
 ---
 
@@ -218,4 +211,3 @@ wsl -d <distro> -- sleep 300 &     # 撑住转发
 | bool 字段恒为 true | pdo_pgsql 返回 `'t'/'f'`，`(bool)'f'` 是 `true`，必须显式判 |
 | `country` 全是 `unknown` | 视图 `country` 列的归一在 SQL 层，别在 PHP 里再算一遍 |
 | 优选排序失效 | 出口证据要满足 10 分钟新鲜度；集成测试会把时间戳推到 2 分钟前 |
-| 看板 `api` 行显示「服务尚未启动」 | 心跳没接上：`ServiceBoard::statuses()` 入口必须调 `Heartbeat::beatIfDue()` |

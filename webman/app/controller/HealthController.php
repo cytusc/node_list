@@ -12,7 +12,7 @@ use support\Response;
  *
  * 与 Go 的 api.health 一致：只回 {"status":"ok"}，不查库。
  * 刻意不探测数据库：这个端点被容器健康检查和反代使用，PG 抖动时
- * 不该把整个实例踢下线（可读性由 /api/services 的心跳体现）。
+ * 不该把整个实例踢下线。
  */
 final class HealthController
 {

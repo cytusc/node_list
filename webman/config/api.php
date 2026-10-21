@@ -25,7 +25,6 @@ return [
     // 读侧缓存 TTL（秒）。都远小于前端轮询间隔，避免界面拿到回退的旧状态。
     'cache' => [
         'collector_seconds' => (int)env('API_COLLECTOR_CACHE_SECONDS', 5),
-        'services_seconds' => (int)env('API_SERVICES_CACHE_SECONDS', 10),
         'warning_seconds' => (int)env('API_WARNING_CACHE_SECONDS', 10),
     ],
 ];

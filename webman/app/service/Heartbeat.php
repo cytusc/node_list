@@ -16,9 +16,7 @@ use Throwable;
  *
  * 为什么不是 Timer：workerman 的定时器在 Windows（无 pcntl）上不触发，
  * 而本地开发恰恰是主要调试场景；跟着请求走在 Linux/Windows 行为一致。
- * 语义上「有请求」本就说明服务活着——前端轮询 /api/services（15s）与
- * /api/results（5s）本身就是心跳的驱动力，页面关着时看板显示
- * 「服务心跳已过期」也符合事实。
+ * 节点结果请求 /api/results 驱动 API 心跳写入。
  *
  * 写入内容与 Go 逐字节一致：payload 的键序按字母（Go 用 map 序列化），
  * {"error":"","running":true}。
@@ -40,9 +38,7 @@ final class Heartbeat
     }
 
     /**
-     * 满了间隔才写。由 ServiceBoard::statuses() 调用——服务的两个读入口
-     * （/api/services 与 /api/results.ippureCollector）都经过它，且各自的
-     * 缓存窗口（10s/5s）天然把频率限制在与 Go 同一量级。
+     * 满了间隔才写，由 ResultsStatus::collectorSnapshot() 调用。
      */
     public static function beatIfDue(string $service = 'api'): void
     {

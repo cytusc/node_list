@@ -58,7 +58,7 @@ bash deploy/compose.sh config --quiet
 bash deploy/compose.sh pull
 bash deploy/compose.sh up -d --remove-orphans
 bash deploy/compose.sh ps
-curl --fail http://127.0.0.1:3001/api/services
+curl --fail http://127.0.0.1:3001/api/health
 ```
 
 `compose.yaml` 已包含全部 worker、十六个专用 Mihomo 和持久化 Redis，不暴露它们的宿主端口；只有来源服务挂载 subs-check 文件。旧的 `compose.pgsql.yaml`、`compose.ippure.yaml`、`compose.patrol.yaml`、`compose.patrol.pgsql.yaml` 空兼容 overlay 已从仓库删除；仍在 `COMPOSE_FILE` 中引用它们的旧部署需先移除这些引用再升级。`compose.qilan.yaml` 现在挂载到来源服务。现有更新脚本会一起更新／回滚七个应用服务。
@@ -84,7 +84,7 @@ npm run dev
 
 各命令分别在终端或进程管理器中运行。填写 `.env.example` 的 Redis、PostgreSQL 和四组专用控制器配置；住宅与普通通道不能共享控制器，不同服务的控制器所有权也有数据库锁保护。探测服务需要 `PGPOOL_MAX>=2`，默认每个服务最多 8 个连接（控制器所有权常驻 1 个，剩余供任务租约与写入使用）。慢车道（risk/attributes/lifecycle/recovery）消费者默认每通道 1 个，可用 `<角色前缀>_<KIND>_CONCURRENCY` 或通用 `<KIND>_CONCURRENCY` 调整；ip-service 的 Compose 默认 `IP_SERVICE_RISK_CONCURRENCY=2`。
 
-`/api/services` 返回七个服务的心跳、已到期的待处理任务、未到期的定时等待任务、执行中任务、最久逾期等待时间、已完成核验数、机房 ASN 跳过数和保留期内的恢复数；未启动或心跳超过 90 秒的服务算异常。探测 worker 正常心跳每 10 秒写入，错误状态变化时立即写入；控制器所有权连接仍每秒检查。`api` 行由接口进程自己惰性写入（两次写入至少间隔 10 秒，页面轮询即驱动；页面全关 90 秒后该行显示「服务心跳已过期」符合事实）。结果接口仅查询 IP 服务状态，服务列表按需汇总七个服务的任务计数。`node-worker -role <角色> -health` 可单独检查。`/api/health` 仍表示 HTTP API 存活。
+服务状态面板及 `/api/services` 已移除。结果接口仍查询 IP 采集状态和来源告警。探测 worker 正常心跳每 10 秒写入，错误状态变化时立即写入；控制器所有权连接仍每秒检查。`node-worker -role <角色> -health` 可单独检查。`/api/health` 表示 HTTP API 存活。
 
 数据库结构按版本在一个事务中迁移，七个服务共用迁移锁，已应用版本在后续启动时跳过 DDL。当前实时读取无需观察结果触发器；来源批次及退役状态仍保留增量追踪。
 

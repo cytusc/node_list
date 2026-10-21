@@ -5,7 +5,6 @@
  *
  *   /api/health    → 200 {"status":"ok"}
  *   /api/results   → 实时视图（live）
- *   /api/services  → 服务看板
  *   /api/downloads → 404 「订阅下载暂不可用。」
  *   /api/download  → 404 「订阅下载暂不可用。」
  *   /api/*         → 404 「接口不存在。」
@@ -14,7 +13,6 @@
 use app\controller\DownloadController;
 use app\controller\HealthController;
 use app\controller\ResultsController;
-use app\controller\ServicesController;
 use app\controller\StaticController;
 use app\middleware\AccessLog;
 use app\service\JsonResponse;
@@ -29,7 +27,6 @@ Route::disableDefaultRoute();
 Route::group('/api', function () {
     Route::get('/health', [HealthController::class, 'index'])->name('api.health');
     Route::get('/results', [ResultsController::class, 'index'])->name('api.results');
-    Route::get('/services', [ServicesController::class, 'index'])->name('api.services');
 
     // 订阅下载是显式 404 占位（"订阅下载暂不可用。"），语义是「功能未开」
     // 而不是「路径写错」，所以必须保留具名路由、不能交给兜底。

@@ -1,29 +1,17 @@
 import { test, expect } from "@playwright/test";
 import { fulfillRoute } from "./results-fixture";
 
-test("shows missing services and refreshes observations without closing details", async ({
+test("refreshes results without closing node details", async ({
   page,
 }) => {
   let reads = 0;
+  const serviceRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/services") {
+      serviceRequests.push(request.url());
+    }
+  });
   const sorts: string[] = [];
-  await page.route("**/api/services", (route) =>
-    route.fulfill({
-      json: {
-        observedAt: new Date().toISOString(),
-        services: [
-          {
-            service: "connectivity",
-            healthy: false,
-            error: "服务尚未启动",
-            queued: 2,
-            running: 0,
-            oldestWaitSeconds: 120,
-            restored: 0,
-          },
-        ],
-      },
-    }),
-  );
   await page.route("**/api/results?**", (route) => {
     reads++;
     sorts.push(new URL(route.request().url()).searchParams.get("sort") || "");
@@ -57,10 +45,6 @@ test("shows missing services and refreshes observations without closing details"
   await page.goto("/");
   await expect(page.getByLabel("排序方式")).toHaveValue("preferred-desc");
   expect(sorts[0]).toBe("preferred");
-  await page.locator(".service-status-summary").click();
-  await expect(
-    page.locator(".service-status-row").filter({ hasText: "连通性检测" }),
-  ).toContainText("服务尚未启动");
   await page.locator(".node-name").click();
   await expect(page.getByRole("dialog")).toContainText("节点检查");
   await expect(page.getByRole("dialog")).toContainText("可用");
@@ -73,4 +57,6 @@ test("shows missing services and refreshes observations without closing details"
   await expect(page.locator(".node-row")).toContainText("Updated node");
   await page.getByLabel("排序方式").selectOption("name-asc");
   await expect.poll(() => sorts.at(-1)).toBe("name");
+  await expect(page.locator(".service-status")).toHaveCount(0);
+  expect(serviceRequests).toEqual([]);
 });

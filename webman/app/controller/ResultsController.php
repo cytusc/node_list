@@ -5,7 +5,7 @@ namespace app\controller;
 
 use app\service\LiveResults;
 use app\service\ResultsQueryParser;
-use app\service\ServiceBoard;
+use app\service\ResultsStatus;
 use support\Request;
 use support\Response;
 use app\service\ApiError;
@@ -15,7 +15,7 @@ use app\service\JsonResponse;
  * GET /api/results —— 当前节点实时视图。
  *
  * 依赖通过方法参数注入（webman 原生的「控制器参数绑定」）：
- * 容器会把 LiveResults / ServiceBoard 作为进程内单例复用，
+ * 容器会把 LiveResults / ResultsStatus 作为进程内单例复用，
  * 不需要在控制器里 new，也不需要构造函数注入。
  *
  * 与 Go 的 api.liveResults 一致的行为要点：
@@ -27,7 +27,7 @@ use app\service\JsonResponse;
  */
 final class ResultsController
 {
-    public function index(Request $request, LiveResults $live, ServiceBoard $board): Response
+    public function index(Request $request, LiveResults $live, ResultsStatus $status): Response
     {
         $params = $request->get();
 
@@ -53,8 +53,8 @@ final class ResultsController
         //   struct{ postgres.Result; Collector `ippureCollector`; SourceWarning `sourceWarning` }
         // 嵌入字段会被摊平在原位，所以 ippureCollector 在前、sourceWarning 在后。
         // （非 live 的 resultsResponse 顺序相反，别照那个抄——那条路径在生产不可达。）
-        $body['ippureCollector'] = $board->collectorStatus();
-        $body['sourceWarning'] = $board->sourceWarning();
+        $body['ippureCollector'] = $status->collectorStatus();
+        $body['sourceWarning'] = $status->sourceWarning();
 
         return JsonResponse::payload($body);
     }

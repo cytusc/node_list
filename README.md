@@ -38,7 +38,6 @@ bash deploy/compose.sh pull
 bash deploy/compose.sh up -d --remove-orphans
 bash deploy/compose.sh ps
 curl --fail http://127.0.0.1:3001/api/health
-curl --fail http://127.0.0.1:3001/api/services
 ```
 
 默认 `COMPOSE_FILE=compose.yaml:compose.subs-check.yaml`，包含七个应用服务、Redis、十六个专用 Mihomo 和上游 subs-check。已有 subs-check 时可只使用 `compose.yaml`。数据库是已有外部服务，不自动新建。只有来源服务挂载订阅目录；所有代理和 Redis 都不发布宿主端口。Web 默认绑定 `127.0.0.1:3001`，可用 `BIND_ADDRESS`／`WEB_PORT` 调整。
@@ -65,13 +64,12 @@ Qilan 来源在 `COMPOSE_FILE` 追加 `:compose.qilan.yaml`，设置 `QILAN_SESS
 
 默认查询 IPPure、IPinfo、IP-API、IPregistry、AbuseIPDB、ipapi.is、IP2Location。每家最多一票，使用类型优先、公司类型后备，失败或无有效类型时弃权。最高票并列时，在并列项中依次优先住宅 IP、商业宽带，剩余平票判为机房 IP；全部弃权为类型未知。来源详情与独立时间保存在 `classification` 中。
 
-页面默认“住宅 IP 优先”，要求近期可用、出口检查新鲜且分类有效；用户选择其他排序后沿用其选择。页面自动刷新，详情分别展示测活、出口检查和属性时间。`/api/services` 展示工作进程状态与队列积压。
+页面默认“住宅 IP 优先”，要求近期可用、出口检查新鲜且分类有效；用户选择其他排序后沿用其选择。页面自动刷新，详情分别展示测活、出口检查和属性时间。服务状态面板及 `/api/services` 已移除。
 
 ## API 与后端
 
 - `/api/results?page=1&limit=50`：实时查询当前节点并分页，默认住宅优先；支持 `sort=preferred` 或速度、名称等显式排序。
 - `/api/results`：实时查询全部当前节点。历史接口已移除，历史路径返回 404，snapshot 参数返回 400。
-- `/api/services`：工作进程心跳、队列等待、执行数量及保留期内恢复数。
 - `/api/health`：HTTP API 存活。worker 使用 `node-worker -role <角色> -health`。
 
 后端主要目录：`backend/internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-worker` 按角色启动独立服务（source／connectivity／ip／residential／lifecycle）；HTTP 接口已改为 `webman/` 下的 PHP/webman 实现（同一镜像内运行，命令 `php start.php start`）。切换期的一次性分析命令（idcheck/idscan/linkdiff/sortchk）与旧 patrol 入口已完成使命并删除。

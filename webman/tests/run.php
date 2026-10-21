@@ -24,7 +24,7 @@ use app\service\JsonResponse;
 use app\service\LiveResults;
 use app\service\NodePresenter;
 use app\service\ResultsQueryParser;
-use app\service\ServiceBoard;
+use app\service\ResultsStatus;
 use app\service\enum\Direction;
 use app\service\enum\FacetKind;
 use app\service\enum\Feature;
@@ -481,14 +481,8 @@ ok(in_array('US', Country::codesMatching('美国'), true), 'codesMatching 命中
 // 时间渲染跟着「本地时区当前偏移」走（对齐 Go 的做法），所以这里显式切时区，
 // 避免断言结果随机器时区漂移；顺带把 +08 与零值哨兵两条分支都钉住。
 date_default_timezone_set('UTC');
-same('2026-10-18T00:00:00Z', ServiceBoard::rfc3339('2026-10-18 00:00:00+00'), 'RFC3339 秒精度');
-same('0001-01-01T00:00:00Z', ServiceBoard::rfc3339(''), '解析失败退回 Go 的零值字面量');
-same(
-    '2026-10-18T00:00:00.5Z',
-    ServiceBoard::goTime('2026-10-18 00:00:00.500000+00'),
-    'RFC3339Nano 裁掉尾随零'
-);
-
+same('2026-10-18T00:00:00Z', ResultsStatus::rfc3339('2026-10-18 00:00:00+00'), 'RFC3339 秒精度');
+same('0001-01-01T00:00:00Z', ResultsStatus::rfc3339(''), '解析失败退回 Go 的零值字面量');
 // 心跳节流：reset 后立即该写，写入后一个间隔内不再写。
 // （实际写库走集成测试；这里只钉节流逻辑，不需要数据库。）
 Heartbeat::reset();
@@ -500,12 +494,12 @@ ok(Heartbeat::shouldBeat(), 'reset 后恢复可写');
 date_default_timezone_set('Asia/Shanghai');
 same(
     '2026-10-18T08:00:00+08:00',
-    ServiceBoard::goTime('2026-10-18 00:00:00+00'),
+    ResultsStatus::rfc3339('2026-10-18 00:00:00+00'),
     '非 UTC 部署下按本地当前偏移渲染（与 Go 的 time.Local 一致）'
 );
 same(
     '0000-12-31T23:54:17+08:00',
-    ServiceBoard::goTime('0001-01-01 00:00:00+08:05:43'),
+    ResultsStatus::rfc3339('0001-01-01 00:00:00+08:05:43'),
     '零值哨兵按 +08:00 渲染，不套历史 LMT（+08:05:43）'
 );
 date_default_timezone_set('UTC');
