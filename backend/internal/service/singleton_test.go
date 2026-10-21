@@ -53,7 +53,7 @@ func TestServiceLockRejectsEveryDuplicateBeforeStartingWork(t *testing.T) {
 	}
 	defer pool.Close()
 	other := &Repository{Pool: pool}
-	for _, role := range []string{"source", "connectivity", "ip", "residential", "normal-recovery", "node-cleanup", "lifecycle", "mihomo-manager"} {
+	for _, role := range []string{"source", "exit-provision", "exit-attributes", "recovery", "node-cleanup", "mihomo-manager"} {
 		t.Run(role, func(t *testing.T) {
 			cancel, done := startLockedService(t, f.repo, ServiceName(role))
 			var err error
@@ -61,7 +61,7 @@ func TestServiceLockRejectsEveryDuplicateBeforeStartingWork(t *testing.T) {
 			case "source":
 				err = other.RunSource(context.Background(), nil)
 			case "mihomo-manager":
-				err = other.RunMihomoManager(context.Background(), nil)
+				err = other.RunMihomoManager(context.Background())
 			default:
 				err = (&Runner{Repo: other, Config: Config{Role: role}}).Run(context.Background())
 			}

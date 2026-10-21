@@ -95,14 +95,10 @@ type Config struct {
 func laneConcurrency(role string) map[string]int {
 	prefix := "CONNECTIVITY"
 	switch role {
-	case "ip":
+	case "exit-provision", "exit-attributes":
 		prefix = "IP_SERVICE"
-	case "normal-recovery":
-		prefix = "NORMAL_RECOVERY"
-	case "residential":
-		prefix = "RESIDENTIAL_RECOVERY"
-	case "lifecycle":
-		prefix = "LIFECYCLE"
+	case "recovery":
+		prefix = "RECOVERY"
 	}
 	out := map[string]int{}
 	for _, kind := range []string{KindRisk, KindAttributes, KindLifecycle, KindRecovery} {
@@ -128,29 +124,26 @@ func ConfigFromEnv(role string) (Config, error) {
 		}
 		c.Manager = &transport.ManagerClient{URL: address, Token: os.Getenv("MIHOMO_MANAGER_TOKEN")}
 		kind := "strict"
-		if role == "ip" {
+		if role == "exit-provision" {
 			kind = "exit"
 		}
 		c.HighRouter = transport.NewRouter(&transport.ManagedEngine{Manager: c.Manager, Kind: kind, High: true})
 		c.NormalRouter = transport.NewRouter(&transport.ManagedEngine{Manager: c.Manager, Kind: kind})
-		if role == "connectivity" {
+		if role == "exit-provision" {
 			c.HighConcurrency = 8
 			c.NormalConcurrency = 8
 		}
-		if role == "ip" {
-			c.HighConcurrency = 8
-			c.NormalConcurrency = 8
+		if role == "exit-attributes" {
 			c.LaneConcurrency[KindRisk] = 2
 		}
 		return c, nil
 	}
-	if role != "connectivity" && role != "ip" {
+	// Only exit-provision keeps a native mihomo fleet; every other manager-less
+	// role waits for MIHOMO_MANAGER_URL (compose always provides it).
+	if role != "exit-provision" {
 		return c, nil
 	}
-	prefix := "CONNECTIVITY"
-	if role == "ip" {
-		prefix = "IP_SERVICE"
-	}
+	prefix := "IP_SERVICE"
 	c.HighConcurrency = Number(prefix+"_HIGH_CONCURRENCY", c.HighConcurrency)
 	c.NormalConcurrency = Number(prefix+"_NORMAL_CONCURRENCY", c.NormalConcurrency)
 	seen := map[string]bool{}

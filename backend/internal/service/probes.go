@@ -325,8 +325,28 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 			return e
 		}
 		if v.Error == "" && v.AddressFamily == 4 && !strings.HasPrefix(j.Payload.Session, "recovery:") {
-			if e = scheduleIP(ctx, tx, v.IP, t.Identity, j.Priority); e != nil {
-				return e
+			// 住宅快判：ip-api 批量端点加权结果确认住宅时跳过完整属性加权，
+			// 直接投 IPPure 风险查询；误判由 attributes() 的属性新鲜度门回补。
+			strong := r.residentialQuickVerdict(ctx, v.IP)
+			kinds := []string{KindAttributes, KindRisk}
+			if strong {
+				kinds = kinds[1:]
+			}
+			payload := Payload{IP: v.IP, Identity: t.Identity}
+			for _, kind := range kinds {
+				// A completed lookup has its own next_due; regular exit checks
+				// do not reset it. Lookups are created once and refresh themselves.
+				if e = once(ctx, tx, kind, v.IP, payload, j.Priority); e != nil {
+					return e
+				}
+				if e = scheduleCompletedIP(ctx, tx, kind, v.IP, payload, j.Priority); e != nil {
+					return e
+				}
+				if j.Priority > 0 {
+					if _, e = tx.Exec(ctx, `UPDATE node_explorer_work SET priority=1 WHERE kind=$1 AND key=$2 AND state='queued' AND priority=0`, kind, v.IP); e != nil {
+						return e
+					}
+				}
 			}
 		}
 		if v.IP != "" && v.Error == "" {
@@ -433,6 +453,13 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		}
 		if err := mergeAttributes(ctx, tx, j.Payload.IP, []ipcheck.Evidence{e}, v); err != nil {
 			return err
+		}
+		if queryErr == nil && v.Classification != nil && v.Classification.State != "residential" {
+			// 兜底④：IPPure 否定快判的住宅结论时回补完整属性加权。once 幂等，
+			// 完整流程已存在的 attributes 行不会被重复创建。
+			if err := once(ctx, tx, KindAttributes, j.Payload.IP, Payload{IP: j.Payload.IP, Identity: j.Payload.Identity}, j.Priority); err != nil {
+				return err
+			}
 		}
 		delay := 24 * time.Hour
 		if queryErr != nil {

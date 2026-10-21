@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
@@ -134,6 +135,12 @@ func ConfigureProxyBatch(ctx context.Context, instance MihomoConfig, proxies []d
 		port = 443
 	} else {
 		port = 80
+	}
+	// Segmentation monitor (REFACTOR_PLAN §6.3): each wave allocates listener
+	// ports upward from base, so warn long before the fatal range error makes
+	// the whole wave fail.
+	if headroom := 65535 - port; headroom < 4096 {
+		log.Printf("mihomo: proxy port segment nearly exhausted: base=%d free=%d next wave=%d", port, headroom, len(proxies))
 	}
 	if port < 1 || port+len(proxies) > 65535 {
 		return nil, fmt.Errorf("代理配置端口范围无效: base=%d proxies=%d", port, len(proxies))

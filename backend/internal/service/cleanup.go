@@ -41,6 +41,11 @@ func cleanupGuard(ctx context.Context, tx pgx.Tx, p Payload) (bool, error) {
 	return err == nil, err
 }
 func (r *Runner) scheduleCleanup(ctx context.Context) error {
+	// Heartbeat rows of decommissioned services do not linger as ghosts
+	// (REFACTOR_PLAN §8.5): a stale row whose writer is gone is swept here.
+	if _, err := r.Repo.Pool.Exec(ctx, `DELETE FROM node_explorer_service_status WHERE updated_at<now()-interval '30 minutes'`); err != nil {
+		return err
+	}
 	_, err := r.Repo.Pool.Exec(ctx, `INSERT INTO node_explorer_work(kind,key,payload,priority,due_at)
  SELECT 'node-cleanup',n.identity||':'||n.incarnation,
  jsonb_build_object('identity',n.identity,'incarnation',n.incarnation,'reason',md5(n.node::text),'action','cleanup'),0,now()

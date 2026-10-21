@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 
@@ -99,7 +100,18 @@ func (i *Ingestor) importLocked(ctx context.Context, snap domain.Snapshot, sourc
 		MediaCheck: snap.MediaCheck,
 		Nodes:      make([]domain.Node, 0, len(snap.Nodes)),
 	}
+	seen := make(map[string]bool, len(snap.Nodes))
+	duplicates := 0
 	for _, node := range snap.Nodes {
+		// Node-level dedup (REFACTOR_PLAN §5): variants of the same node (e.g.
+		// vmess noise-field spellings) collapse to one AggregateIdentity; the
+		// first occurrence wins its raw link/config.
+		id := domain.AggregateIdentity(node)
+		if seen[id] {
+			duplicates++
+			continue
+		}
+		seen[id] = true
 		if sources != nil {
 			source := domain.SourceForNode(node, sources, true)
 			if source == nil && node.RawLink == "" && len(node.RawConfig) == 0 {
@@ -115,6 +127,9 @@ func (i *Ingestor) importLocked(ctx context.Context, snap domain.Snapshot, sourc
 			}
 		}
 		normalized.Nodes = append(normalized.Nodes, node)
+	}
+	if duplicates > 0 {
+		log.Printf("ingest: dropped %d duplicate node entries by aggregate identity", duplicates)
 	}
 
 	needsBackfill := sources != nil && !i.backfilled && !i.persistentOnly

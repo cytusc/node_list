@@ -21,7 +21,7 @@ func main() {
 	}
 }
 func run() error {
-	role := flag.String("role", "", "source, connectivity, ip, residential, normal-recovery, node-cleanup, lifecycle")
+	role := flag.String("role", "", "source, exit-provision, exit-attributes, recovery, node-cleanup, mihomo-manager")
 	health := flag.Bool("health", false, "check persistent service heartbeat")
 	flag.Parse()
 	service.LoadEnv(service.Root())
@@ -52,12 +52,7 @@ func run() error {
 		return repo.RunSource(ctx, st)
 	}
 	if *role == "mihomo-manager" {
-		q, err := taskqueue.New(ctx, os.Getenv("REDIS_URL"), os.Getenv("REDIS_NAMESPACE"))
-		if err != nil {
-			return err
-		}
-		defer q.Close()
-		return repo.RunMihomoManager(ctx, q)
+		return repo.RunMihomoManager(ctx)
 	}
 	c, err := service.ConfigFromEnv(*role)
 	if err != nil {

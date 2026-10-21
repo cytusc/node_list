@@ -4,24 +4,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sync"
 	"time"
 
-	"github.com/cytusc/node_list/backend/internal/taskqueue"
 	"github.com/cytusc/node_list/backend/internal/transport"
 )
 
 // RunMihomoManager owns a dedicated session lock for the controller, including
 // while reloads drain requests. Losing that session cancels the HTTP server.
-func (r *Repository) RunMihomoManager(parent context.Context, q *taskqueue.Redis) error {
+// The sweeper round shares this process: one owner, one kernel, no double
+// write controller (REFACTOR_PLAN §2).
+func (r *Repository) RunMihomoManager(parent context.Context) error {
 	return r.withServiceLock(parent, "mihomo-manager", func(ctx context.Context) error {
-		return r.runMihomoManager(ctx, q)
+		return r.runMihomoManager(ctx)
 	})
 }
 
-func (r *Repository) runMihomoManager(parent context.Context, q *taskqueue.Redis) error {
+func (r *Repository) runMihomoManager(parent context.Context) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	secret := os.Getenv("MIHOMO_CONTROLLER_SECRET")
@@ -48,11 +50,6 @@ func (r *Repository) runMihomoManager(parent context.Context, q *taskqueue.Redis
 		return fmt.Errorf("Mihomo controller already owned")
 	}
 	m := transport.NewManager(instance)
-	m.OnDelay = func(ctx context.Context, success, abnormal bool) {
-		bounded, stop := context.WithTimeout(ctx, 2*time.Second)
-		defer stop()
-		_ = q.RecordFast(bounded, success, abnormal)
-	}
 	server := &http.Server{Addr: Env("MIHOMO_MANAGER_LISTEN", ":9080"), Handler: m.Handler(apiToken), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
@@ -98,17 +95,20 @@ func (r *Repository) runMihomoManager(parent context.Context, q *taskqueue.Redis
 				if !s.Healthy {
 					message = "内核未就绪或正在重载"
 				}
-				counts, e := q.FastCounts(ctx)
-				if e != nil {
-					message = "快速测活统计暂不可用"
-				}
-				payload, _ := json.Marshal(map[string]any{"error": message, "running": true, "kernel": s, "fast": counts})
+				payload, _ := json.Marshal(map[string]any{"error": message, "running": true, "kernel": s})
 				_, _ = r.Pool.Exec(ctx, `INSERT INTO node_explorer_service_status(service,updated_at,payload) VALUES('mihomo-manager',now(),$1) ON CONFLICT(service) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload`, payload)
 			}
 		}
 	}()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	// Sweeper round state (§3): SWEEP_INTERVAL_SECONDS between rounds, bounded
+	// concurrency, one transaction commit per round. Rounds run synchronously
+	// in this loop so kernel reloads stay fenced while a round's evidence is
+	// being gathered.
+	sweepEvery := Seconds("SWEEP_INTERVAL_SECONDS", 1800)
+	nextSweep := time.Now().Add(sweepEvery)
+	sweepConcurrency := Number("SWEEP_CONCURRENCY", 32)
 	var pending []transport.RegistryEntry
 	lastFingerprint := ""
 	changedAt := time.Time{}
@@ -138,6 +138,20 @@ func (r *Repository) runMihomoManager(parent context.Context, q *taskqueue.Redis
 				changedAt = time.Time{}
 			} else {
 				nextAttempt = time.Now().Add(5 * time.Second)
+			}
+		}
+		if m.Stats().Healthy && time.Now().After(nextSweep) {
+			nextSweep = time.Now().Add(sweepEvery)
+			live, e := r.sweepEntries(ctx)
+			if e != nil {
+				log.Printf("mihomo-manager: sweep registry load failed: %s", taskFailureReason(e))
+			} else {
+				bounded, stop := context.WithTimeout(ctx, 2*time.Hour)
+				results := r.sweepAll(bounded, m, live, sweepConcurrency)
+				if err = r.sweepCommit(bounded, m, results); err != nil {
+					log.Printf("mihomo-manager: sweep round failed: %s", taskFailureReason(err))
+				}
+				stop()
 			}
 		}
 		select {

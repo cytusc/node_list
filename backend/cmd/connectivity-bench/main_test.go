@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -13,7 +14,11 @@ func TestPrivateAtomicOutputDoesNotOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0600 {
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows maps mode bits loosely; the 0600 assertion is POSIX-only.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatal("output is not private")
 	}
 	before, _ := os.ReadFile(path)
@@ -22,6 +27,9 @@ func TestPrivateAtomicOutputDoesNotOverwrite(t *testing.T) {
 	}
 	link := filepath.Join(root, "symlink.json")
 	if err = os.Symlink(path, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink creation needs privileges on windows")
+		}
 		t.Fatal(err)
 	}
 	if err = writeJSON(link, map[string]int{"count": 1}); err == nil {

@@ -1,4 +1,4 @@
-# Nine independently restartable application services. PostgreSQL is an existing external service.
+# Seven independently restartable application services. PostgreSQL is an existing external service.
 x-environment: &environment
   PGHOST: ${PGHOST:?Set PGHOST in .env}
   PGPORT: ${PGPORT:-5432}
@@ -8,9 +8,7 @@ x-environment: &environment
   PGPOOL_MAX: ${PGPOOL_MAX:-8}
   REDIS_URL: redis://task-redis:6379/0
   REDIS_NAMESPACE: ${REDIS_NAMESPACE:-node-explorer}
-  RESIDENTIAL_INTERVAL_SECONDS: ${RESIDENTIAL_INTERVAL_SECONDS:-300}
   NORMAL_INTERVAL_SECONDS: ${NORMAL_INTERVAL_SECONDS:-1800}
-  FAST_INTERVAL_SECONDS: ${FAST_INTERVAL_SECONDS:-1200}
   MIHOMO_MANAGER_URL: http://mihomo-manager:9080
   MIHOMO_MANAGER_TOKEN: ${MIHOMO_MANAGER_TOKEN:?Set MIHOMO_MANAGER_TOKEN in .env}
   # Validation mode suppresses automatic retirement, restore and physical deletion.
@@ -61,6 +59,7 @@ services:
     command: [node-worker, -role, source]
     environment:
       <<: *environment
+      SOURCE_PROVIDERS: subs-check
       SUBS_CHECK_DIR: /data/sub
     volumes:
       - type: bind
@@ -73,26 +72,32 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 60s
-  connectivity:
-    <<: *worker
-    command: [node-worker, -role, connectivity]
+  source-qilan:
+    <<: *app
+    command: [node-worker, -role, source]
     environment:
       <<: *environment
-      PROBE_TIMEOUT_SECONDS: ${PROBE_TIMEOUT_SECONDS:-12}
-      PROBE_RETRY_SECONDS: ${PROBE_RETRY_SECONDS:-10}
-      CONNECTIVITY_HIGH_CONCURRENCY: ${CONNECTIVITY_HIGH_CONCURRENCY:-4}
-      CONNECTIVITY_NORMAL_CONCURRENCY: ${CONNECTIVITY_NORMAL_CONCURRENCY:-20}
+      SOURCE_PROVIDERS: qilan
+      QILAN_SESSION: ${QILAN_SESSION:-}
+      QILAN_SESSION_FILE: /data/qilan/session.txt
+  exit-provision:
+    <<: *worker
+    command: [node-worker, -role, exit-provision]
+    environment:
+      <<: *environment
+      IP_SERVICE_HIGH_CONCURRENCY: ${EXIT_PROVISION_HIGH_CONCURRENCY:-4}
+      IP_SERVICE_NORMAL_CONCURRENCY: ${EXIT_PROVISION_NORMAL_CONCURRENCY:-4}
     depends_on:
       task-redis: { condition: service_healthy }
       mihomo-manager: { condition: service_healthy }
     healthcheck:
-      test: [CMD, node-worker, -role, connectivity, -health]
+      test: [CMD, node-worker, -role, exit-provision, -health]
       interval: 30s
       timeout: 10s
       start_period: 60s
-  ip-service:
+  exit-attributes:
     <<: *worker
-    command: [node-worker, -role, ip]
+    command: [node-worker, -role, exit-attributes]
     environment:
       <<: *environment
       IPPURE_API_ORIGIN: ${IPPURE_API_ORIGIN:-https://api.123169.xyz}
@@ -100,35 +105,29 @@ services:
       IP_API_PRO_KEY: ${IP_API_PRO_KEY:-}
       IPREGISTRY_API_KEY: ${IPREGISTRY_API_KEY:-}
       ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
-      IP_SERVICE_HIGH_CONCURRENCY: ${IP_SERVICE_HIGH_CONCURRENCY:-4}
-      IP_SERVICE_NORMAL_CONCURRENCY: ${IP_SERVICE_NORMAL_CONCURRENCY:-4}
-      IP_SERVICE_RISK_CONCURRENCY: ${IP_SERVICE_RISK_CONCURRENCY:-2}
+      IP_SERVICE_RISK_CONCURRENCY: ${EXIT_ATTRIBUTES_RISK_CONCURRENCY:-2}
     depends_on:
       task-redis: { condition: service_healthy }
       mihomo-manager: { condition: service_healthy }
     healthcheck:
-      test: [CMD, node-worker, -role, ip, -health]
+      test: [CMD, node-worker, -role, exit-attributes, -health]
       interval: 30s
       timeout: 10s
       start_period: 60s
-  residential-recovery:
+  recovery:
     <<: *worker
-    command: [node-worker, -role, residential]
-    healthcheck:
-      test: [CMD, node-worker, -role, residential, -health]
-      interval: 30s
-      timeout: 10s
-      start_period: 60s
-  normal-recovery:
-    <<: *worker
-    command: [node-worker, -role, normal-recovery]
+    command: [node-worker, -role, recovery]
     environment:
       <<: *environment
       NORMAL_RECOVERY_CONCURRENCY: ${NORMAL_RECOVERY_CONCURRENCY:-8}
       NORMAL_RECOVERY_INTERVAL_SECONDS: ${NORMAL_RECOVERY_INTERVAL_SECONDS:-1200}
-      SCHEDULE_INTERVAL_SECONDS: 30
+      RECOVERY_RECOVERY_CONCURRENCY: ${RECOVERY_RECOVERY_CONCURRENCY:-2}
+      RECOVERY_LIFECYCLE_CONCURRENCY: ${RECOVERY_LIFECYCLE_CONCURRENCY:-1}
+    depends_on:
+      task-redis: { condition: service_healthy }
+      mihomo-manager: { condition: service_healthy }
     healthcheck:
-      test: [CMD, node-worker, -role, normal-recovery, -health]
+      test: [CMD, node-worker, -role, recovery, -health]
       interval: 30s
       timeout: 10s
       start_period: 60s
@@ -143,17 +142,6 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 60s
-  node-lifecycle:
-    <<: *worker
-    command: [node-worker, -role, lifecycle]
-    environment:
-      <<: *environment
-      LIFECYCLE_DRY_RUN: ${LIFECYCLE_DRY_RUN:-true}
-    healthcheck:
-      test: [CMD, node-worker, -role, lifecycle, -health]
-      interval: 30s
-      timeout: 10s
-      start_period: 60s
   mihomo-manager:
     <<: *worker
     cpus: ${MIHOMO_MANAGER_CPUS:-0.5}
@@ -163,8 +151,9 @@ services:
       MIHOMO_CONTROLLER: http://shared-mihomo:9090
       MIHOMO_PROXY_URL: http://shared-mihomo:7890
       MIHOMO_CONTROLLER_SECRET: ${MIHOMO_CONTROLLER_SECRET:?Set MIHOMO_CONTROLLER_SECRET in .env}
+      SWEEP_INTERVAL_SECONDS: ${SWEEP_INTERVAL_SECONDS:-1800}
+      SWEEP_CONCURRENCY: ${SWEEP_CONCURRENCY:-32}
     depends_on:
-      task-redis: { condition: service_healthy }
       shared-mihomo: { condition: service_started }
     healthcheck:
       test: [CMD, node-worker, -role, mihomo-manager, -health]

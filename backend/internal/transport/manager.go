@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -39,7 +40,7 @@ func ConfigDigest(n domain.Node) string {
 	p := outboundConfig(n)
 	clone := make(domain.ProxyConfig, len(p))
 	for k, v := range p {
-		if k != "name" {
+		if !domain.DecorativeConfigField(k) {
 			clone[k] = v
 		}
 	}
@@ -47,9 +48,15 @@ func ConfigDigest(n domain.Node) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
+// proxyNameHex bounds the kernel-facing proxy name for panel and API
+// readability (REFACTOR_PLAN §6.4). The identity↔name mapping stays a pure
+// function of the identity; Sync quarantines the astronomically unlikely
+// truncated-name collision instead of letting two nodes share one route.
+const proxyNameHex = 16
+
 func proxyName(id string) string {
 	sum := sha256.Sum256([]byte(id))
-	return "node-" + hex.EncodeToString(sum[:])
+	return "node-" + hex.EncodeToString(sum[:])[:proxyNameHex]
 }
 func token() string {
 	var b [24]byte
@@ -122,6 +129,18 @@ func (m *Manager) Stats() ManagerStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return ManagerStats{m.generation, len(m.entries) - len(m.rejected), len(m.rejected), m.reloads, m.reloadMillis, m.fast, m.healthy && !m.reloading}
+}
+
+// Generation fences follow-up work against a kernel reload since the given
+// generation; the in-process sweeper relies on it before retirement evidence
+// is committed.
+func (m *Manager) Generation(ctx context.Context, generation string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if generation == "" || generation != m.generation {
+		return errors.New("kernel generation changed")
+	}
+	return nil
 }
 func (m *Manager) controller(ctx context.Context, method, path string, body []byte) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(m.Instance.Controller, "/")+path, bytes.NewReader(body))
@@ -217,6 +236,21 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 		}
 		valid = append(valid, entry)
 	}
+	// Truncated display names must stay injective (§6.4): a 64-bit collision
+	// is astronomically unlikely, but one is quarantined with a log line so a
+	// node can never route through another node's proxy.
+	seen := map[string]bool{}
+	deduped := make([]RegistryEntry, 0, len(valid))
+	for _, entry := range valid {
+		if seen[proxyName(entry.Identity)] {
+			rejected[entry.Identity] = true
+			log.Printf("mihomo: truncated proxy name collision quarantined")
+			continue
+		}
+		seen[proxyName(entry.Identity)] = true
+		deduped = append(deduped, entry)
+	}
+	valid = deduped
 	start := time.Now()
 	// Bound bad-config isolation cost: retry only a small batch, then install the
 	// complete valid registry once. No lease is admitted during these loads.

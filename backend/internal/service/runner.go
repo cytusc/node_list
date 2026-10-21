@@ -30,14 +30,15 @@ type Runner struct {
 
 func (r *Runner) kinds() []string {
 	switch r.Config.Role {
-	case "connectivity":
-		return []string{KindFast, KindLive}
-	case "ip":
-		return []string{KindExit, KindAttributes, KindRisk}
-	case "residential":
-		return []string{KindRecovery}
-	case "normal-recovery":
-		return []string{KindNormalRecovery}
+	case "exit-provision":
+		return []string{KindExit}
+	case "exit-attributes":
+		return []string{KindAttributes, KindRisk}
+	// The recovery role absorbs the former residential, normal-recovery and
+	// lifecycle workers (REFACTOR_PLAN §2). Strict sessions re-use fast/live
+	// and exit probes as dependencies, so the role consumes those kinds too.
+	case "recovery":
+		return []string{KindRecovery, KindNormalRecovery, KindFast, KindLive, KindLifecycle}
 	case "node-cleanup":
 		return []string{KindCleanup}
 	case "lifecycle":
@@ -94,7 +95,7 @@ func (r *Runner) run(ctx context.Context) error {
 	// One session holds cross-process controller ownership for both lanes.
 	var conn *pgxpool.Conn
 	var err error
-	if r.Config.Manager == nil && (r.Config.Role == "ip" || r.Config.Role == "connectivity") {
+	if r.Config.Manager == nil && isExitRole(r.Config.Role) {
 		if r.Repo.Pool.Config().MaxConns < 2 {
 			return fmt.Errorf("probe services require PGPOOL_MAX >= 2")
 		}
@@ -109,11 +110,11 @@ func (r *Runner) run(ctx context.Context) error {
 			conn.Release()
 		}()
 	}
-	prefix := "CONNECTIVITY"
-	if r.Config.Role == "ip" {
+	prefix := ""
+	if isExitRole(r.Config.Role) {
 		prefix = "IP_SERVICE"
 	}
-	if r.Config.Manager == nil && (r.Config.Role == "ip" || r.Config.Role == "connectivity") {
+	if r.Config.Manager == nil && isExitRole(r.Config.Role) {
 		for _, lane := range []string{"HIGH", "NORMAL"} {
 			for _, controller := range strings.Split(os.Getenv(prefix+"_"+lane+"_CONTROLLER"), ",") {
 				if controller == "" {
@@ -184,16 +185,15 @@ func (r *Runner) run(ctx context.Context) error {
 	}
 }
 
+// isExitRole reports the roles split out of the former single ip-service worker.
+func isExitRole(role string) bool {
+	return role == "exit-provision" || role == "exit-attributes"
+}
+
 func ServiceName(role string) string {
 	switch role {
 	case "source":
 		return "source-ingest"
-	case "ip":
-		return "ip-service"
-	case "residential":
-		return "residential-recovery"
-	case "lifecycle":
-		return "node-lifecycle"
 	default:
 		return role
 	}

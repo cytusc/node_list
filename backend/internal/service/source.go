@@ -5,12 +5,35 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/qilan"
 	"github.com/cytusc/node_list/backend/internal/source"
 	"github.com/cytusc/node_list/backend/internal/store"
 )
+
+// SourceProvider feeds one external source into the shared ingestor. Each
+// provider runs in its own container and mounts its own inputs (REFACTOR_PLAN §5).
+type SourceProvider interface {
+	Name() string
+	Start(ctx context.Context)
+	Close()
+}
+
+type subsCheckProvider struct{ watcher *source.Watcher }
+
+func (p *subsCheckProvider) Name() string { return "subs-check" }
+func (p *subsCheckProvider) Start(ctx context.Context) {
+	_ = p.watcher.Start(ctx)
+}
+func (p *subsCheckProvider) Close() {}
+
+type qilanProvider struct{ q *qilan.Source }
+
+func (p *qilanProvider) Name() string { return "qilan" }
+func (p *qilanProvider) Start(ctx context.Context) { p.q.Start(ctx) }
+func (p *qilanProvider) Close() { p.q.Close() }
 
 func (r *Repository) RunSource(ctx context.Context, st *store.Store) error {
 	return r.withServiceLock(ctx, ServiceName("source"), func(ctx context.Context) error {
@@ -34,13 +57,26 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 		return r.SyncRegistry(ctx, st)
 	}
 	_ = ingest(ctx)
-	watcher := source.NewWatcher([]string{results, clash, links}, source.WatcherConfig{Quiet: 5 * time.Second, Sweep: 2 * time.Minute, Ingest: ingest})
-	_ = watcher.Start(ctx)
-	sessionFile := Env("QILAN_SESSION_FILE", "/data/qilan/session.txt")
-	if _, err := os.Stat(sessionFile); os.Getenv("QILAN_SESSION") != "" || err == nil {
-		q := qilan.NewSource(st, ingestor, qilan.SourceConfig{Session: os.Getenv("QILAN_SESSION"), SessionFile: sessionFile, UserAgent: Env("QILAN_USER_AGENT", "Mozilla/5.0"), Interval: Seconds("QILAN_REFRESH_INTERVAL_SECONDS", 900), Webhook: os.Getenv("FEISHU_WEBHOOK_URL")})
-		q.Start(ctx)
-		defer q.Close()
+	enabled := map[string]bool{}
+	for _, name := range strings.Split(Env("SOURCE_PROVIDERS", "subs-check,qilan"), ",") {
+		enabled[strings.TrimSpace(name)] = true
+	}
+	var watcher *source.Watcher
+	var providers []SourceProvider
+	if enabled["subs-check"] {
+		watcher = source.NewWatcher([]string{results, clash, links}, source.WatcherConfig{Quiet: 5 * time.Second, Sweep: 2 * time.Minute, Ingest: ingest})
+		providers = append(providers, &subsCheckProvider{watcher})
+	}
+	if enabled["qilan"] {
+		sessionFile := Env("QILAN_SESSION_FILE", "/data/qilan/session.txt")
+		if _, err := os.Stat(sessionFile); os.Getenv("QILAN_SESSION") != "" || err == nil {
+			q := qilan.NewSource(st, ingestor, qilan.SourceConfig{Session: os.Getenv("QILAN_SESSION"), SessionFile: sessionFile, UserAgent: Env("QILAN_USER_AGENT", "Mozilla/5.0"), Interval: Seconds("QILAN_REFRESH_INTERVAL_SECONDS", 900), Webhook: os.Getenv("FEISHU_WEBHOOK_URL")})
+			providers = append(providers, &qilanProvider{q})
+		}
+	}
+	for _, p := range providers {
+		p.Start(ctx)
+		defer p.Close()
 	}
 	tick := time.NewTicker(10 * time.Second)
 	defer tick.Stop()
@@ -68,7 +104,9 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 				lastSweep = time.Now()
 			}
 			if time.Since(lastIngest) >= 30*time.Second {
-				watcher.Trigger(ctx)
+				if watcher != nil {
+					watcher.Trigger(ctx)
+				}
 				lastIngest = time.Now()
 			}
 			message := ""

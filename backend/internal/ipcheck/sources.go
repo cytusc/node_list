@@ -259,6 +259,20 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 	return e
 }
 
+// BatchEvidence returns fresh, cached ip-api evidence for the requested IPs,
+// as primed by PrimeIPAPIBatch. Missing or expired entries are omitted.
+func (c *Client) BatchEvidence(ips []string) []Evidence {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Evidence, 0, len(ips))
+	for _, ip := range ips {
+		if e, ok := c.cache["ip-api:"+ip]; ok && time.Now().Before(e.until) {
+			out = append(out, e.evidence)
+		}
+	}
+	return out
+}
+
 // ParseIPRegistry interprets connection and security attributes. Business and
 // education networks abstain from the residential/hosting vote.
 func ParseIPRegistry(raw []byte, ip, checkedAt string) Evidence {

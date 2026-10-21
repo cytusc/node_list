@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // CompareValues reproduces the JavaScript result comparator: numbers compare
@@ -102,6 +103,12 @@ func canonicalHash(v any) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// ShareLinkParseFailures counts share links that could not be parsed into a
+// connection identity and fell back to the summary identity (REFACTOR_PLAN
+// §6.1). A rising count means protocol coverage regressed; tests pin the
+// supported protocols.
+var ShareLinkParseFailures atomic.Uint64
+
 // NodeIdentity is the summary-level identity: it describes the endpoint as the
 // upstream summary reported it, before any credential is known.
 func NodeIdentity(n Node) (string, error) {
@@ -174,7 +181,9 @@ func AggregateIdentity(n Node) string {
 		if id, ok := shareLinkIdentity(n.RawLink); ok {
 			return "share-link:" + id
 		}
-		// Incomplete legacy links retain the summary-based identity.
+		// Incomplete or unsupported links keep the summary-based identity; the
+		// missed coverage stays observable instead of silent (§6.1).
+		ShareLinkParseFailures.Add(1)
 	}
 	if len(n.RawConfig) == 0 {
 		id, err := NodeIdentity(n)
@@ -316,10 +325,23 @@ func ConnectionConfig(proxy ProxyConfig) map[string]any {
 	return connectionConfig(proxy)
 }
 
+// decorativeConfigFields lists config keys that name a subscription entry
+// rather than describing the connection (display-name class). They are
+// stripped before the canonical hash so equivalent subscriptions differing
+// only cosmetically collapse (REFACTOR_PLAN §6.2).
+var decorativeConfigFields = map[string]bool{"name": true, "ps": true}
+
+// DecorativeConfigField reports whether a Clash YAML key is display-only and
+// must stay out of every canonical hash. transport.ConfigDigest shares this
+// table so the digest and the identity never disagree on a key.
+func DecorativeConfigField(key string) bool {
+	return decorativeConfigFields[key]
+}
+
 func connectionConfig(proxy ProxyConfig) map[string]any {
 	config := make(map[string]any, len(proxy))
 	for k, v := range proxy {
-		if k == "name" {
+		if decorativeConfigFields[k] {
 			continue
 		}
 		config[k] = v

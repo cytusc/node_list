@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -47,10 +48,21 @@ func TestImportFileChangesAndConcurrentImports(t *testing.T) {
 	if !run().Skipped {
 		t.Fatal("unchanged file was reimported")
 	}
-	info, _ := os.Stat(path)
-	write("after!") // identical size and mtime; change time still invalidates it
-	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
-		t.Fatal(err)
+	// Same size and POSIX mtime; the change time still invalidates the
+	// signature. Windows stat exposes no change time, so the rewrite is only
+	// picked up through a fresh mtime there.
+	var previous time.Time
+	if runtime.GOOS != "windows" {
+		info, _ := os.Stat(path)
+		previous = info.ModTime()
+	} else {
+		time.Sleep(10 * time.Millisecond)
+	}
+	write("after!")
+	if runtime.GOOS != "windows" {
+		if err := os.Chtimes(path, previous, previous); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if !run().Inserted {
 		t.Fatal("same-size rewrite was skipped")
@@ -91,8 +103,13 @@ func TestImportFileChangesAndConcurrentImports(t *testing.T) {
 	if err := os.WriteFile(tmp, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(tmp, time.Now(), old.ModTime()); err != nil {
-		t.Fatal(err)
+	// Pin the mtime so only the POSIX change time distinguishes the
+	// replacement. Windows has no observable change time, so its fresh mtime
+	// carries the signal instead.
+	if runtime.GOOS != "windows" {
+		if err := os.Chtimes(tmp, time.Now(), old.ModTime()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		t.Fatal(err)

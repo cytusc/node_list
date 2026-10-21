@@ -82,51 +82,50 @@ func onceDue(ctx context.Context, tx pgx.Tx, kind, key string, p Payload, due ti
 }
 
 func (r *Runner) schedule(ctx context.Context) error {
-	if r.Config.Role == "node-cleanup" {
+	switch r.Config.Role {
+	case "node-cleanup":
 		return r.scheduleCleanup(ctx)
-	}
-	if r.Config.Role == "normal-recovery" {
-		return r.scheduleNormalRecovery(ctx)
-	}
-	if r.Config.Role != "connectivity" && r.Config.Role != "ip" && r.Config.Role != "residential" {
-		return nil
-	}
-	if r.Config.Role == "residential" {
+	case "recovery":
+		// Strict recovery upkeep moves here with the merged role: requeue
+		// finished markers on their backoff, skip hosting-gone candidates, and
+		// advance freshly failed normal-recovery rows.
 		if err := r.Repo.retryResidentialRecovery(ctx); err != nil {
 			return err
 		}
 		if err := r.Repo.skipHostingRecovery(ctx); err != nil {
 			return err
 		}
+		return r.scheduleNormalRecovery(ctx)
+	case "exit-attributes":
+		// 属性/风险任务由 exit 结果投递与 recur 自续期产生，本服务无需周期扫描。
+		return nil
+	case "exit-provision":
+	default:
+		// Per-node liveness scheduling moved into the sweeper round (§3.3);
+		// retired recoveries are promoted by the round commit.
+		return nil
 	}
-	// Every pass re-derives work for the whole schedulable set: rows are created
-	// ahead of their due time, completed rows are refreshed, and residential
-	// promotions are applied to queued rows. Skipping fresh nodes would delay
-	// all three, so the scan stays whole; ScheduleInterval bounds its cost.
-	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.identity,n.historical_residential,CASE WHEN $3::boolean AND f.checked_at IS NOT NULL THEN coalesce(c.payload,'{}'::jsonb)||jsonb_build_object('checkedAt',to_char(f.checked_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) ELSE c.payload END,e.payload,a.payload,t.retired_at,t.reason
+	// exit-provision keeps re-deriving exit checks and risk top-ups for the
+	// unretired set ahead of their due time; completed rows refresh so repeated
+	// scans stay a no-op for unchanged state.
+	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.identity,c.payload,e.payload,a.payload
 	FROM node_explorer_node_registry n LEFT JOIN node_explorer_connectivity c USING(identity)
-	LEFT JOIN node_explorer_fast_results f USING(identity)
 	LEFT JOIN node_explorer_exits e USING(identity) LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
 	LEFT JOIN node_explorer_retired_nodes t USING(identity)
 	WHERE n.available AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
-	AND (($1::text='residential' AND n.historical_residential AND t.identity IS NOT NULL
-	 AND (t.reason=$2 OR t.reason LIKE 'IPPure:%')
-	 AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='recovery' AND w.key=n.identity||':'||t.retired_at)
- AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='normal-recovery' AND w.key=n.identity||':'||t.retired_at AND w.state<>'done'))
-	 OR ($1::text<>'residential' AND t.identity IS NULL))`, r.Config.Role, store.RetireRestoreReason, r.Config.Manager != nil)
+	AND t.identity IS NULL`)
 	if err != nil {
 		return err
 	}
 	type item struct {
-		id              string
-		historical      bool
-		c, e, a         []byte
-		retired, reason *string
+		id      string
+		e, a    []byte
 	}
 	items := []item{}
+	var cPayload []byte
 	for rows.Next() {
 		var i item
-		if err = rows.Scan(&i.id, &i.historical, &i.c, &i.e, &i.a, &i.retired, &i.reason); err != nil {
+		if err = rows.Scan(&i.id, &cPayload, &i.e, &i.a); err != nil {
 			rows.Close()
 			return err
 		}
@@ -147,14 +146,8 @@ func (r *Runner) schedule(ctx context.Context) error {
 	work := make([]scheduledWork, 0, len(items))
 	now := time.Now()
 	for _, i := range items {
-		var live domain.ConnectivityState
 		var exit domain.ExitState
 		var attr domain.IPPureResult
-		if len(i.c) > 0 {
-			if err = json.Unmarshal(i.c, &live); err != nil {
-				return err
-			}
-		}
 		if len(i.e) > 0 {
 			if err = json.Unmarshal(i.e, &exit); err != nil {
 				return err
@@ -165,41 +158,14 @@ func (r *Runner) schedule(ctx context.Context) error {
 				return err
 			}
 		}
-		residential := domain.FreshResidential(&attr, exit.IP, now)
-		interval := r.Config.NormalInterval
-		if r.Config.Role == "connectivity" && r.Config.Manager != nil && r.Config.FastInterval > 0 {
-			interval = r.Config.FastInterval
-		}
 		priority := 0
-		if residential || (i.retired != nil && i.historical) {
-			interval = r.Config.ResidentialInterval
+		if domain.FreshResidential(&attr, exit.IP, now) {
 			priority = 1
 		}
 		p := Payload{Identity: i.id}
-		if i.retired != nil {
-			if r.Config.Role != "residential" || !automatic(*i.reason) {
-				continue
-			}
-			p.RetiredAt, p.Reason = *i.retired, *i.reason
-			// Create one durable marker per retirement; transient retries advance its generation.
-			work = append(work, scheduledWork{Kind: KindRecovery, Key: i.id + ":" + *i.retired, Payload: p, Priority: priority, Due: now, Mode: "once"})
-			continue
-		}
-		switch r.Config.Role {
-		case "connectivity":
-			if live.FailedRounds > 0 && !live.ConfirmedDead {
-				interval = retirementRoundInterval
-			}
-			kind := KindLive
-			if r.Config.Manager != nil {
-				kind = KindFast
-			}
-			work = append(work, scheduledWork{Kind: kind, Key: i.id, Payload: p, Priority: priority, Due: nextDue(live.CheckedAt, interval)})
-		case "ip":
-			work = append(work, scheduledWork{Kind: KindExit, Key: i.id, Payload: p, Priority: priority, Due: nextDue(exit.CheckedAt, interval)})
-			if exit.IP != "" && missingTrafficRatio(attr, now) {
-				work = append(work, scheduledWork{Kind: KindRisk, Key: exit.IP, Payload: Payload{IP: exit.IP, Identity: i.id}, Priority: priority, Due: now, Mode: "risk"})
-			}
+		work = append(work, scheduledWork{Kind: KindExit, Key: i.id, Payload: p, Priority: priority, Due: nextDue(exit.CheckedAt, r.Config.NormalInterval)})
+		if exit.IP != "" && missingTrafficRatio(attr, now) {
+			work = append(work, scheduledWork{Kind: KindRisk, Key: exit.IP, Payload: Payload{IP: exit.IP, Identity: i.id}, Priority: priority, Due: now, Mode: "risk"})
 		}
 	}
 	if err = scheduleMany(ctx, tx, work); err != nil {
