@@ -39,7 +39,7 @@ func awaitSweep(t *testing.T, done <-chan struct{}) {
 		t.Fatal("sweep did not exit")
 	}
 }
-func TestSweepRunnerReloadCancelsAndJoinsWithoutOverlap(t *testing.T) {
+func TestSweepRunnerShutdownCancelsAndJoinsWithoutOverlap(t *testing.T) {
 	s := newSweepRunner(time.Hour)
 	s.next = time.Time{}
 	started := make(chan struct{})
@@ -67,7 +67,7 @@ func TestSweepRunnerReloadCancelsAndJoinsWithoutOverlap(t *testing.T) {
 	awaitSweep(t, cancelled)
 	select {
 	case <-stopped:
-		t.Fatal("reload allowed before round joined")
+		t.Fatal("shutdown returned before round joined")
 	default:
 	}
 	close(release)
@@ -83,6 +83,128 @@ func TestSweepRunnerReloadCancelsAndJoinsWithoutOverlap(t *testing.T) {
 	s.stop()
 	if s.start(context.Background(), func(context.Context) error { return nil }) {
 		t.Fatal("completion interval ignored")
+	}
+}
+
+func TestSweepRunnerDefersReloadThroughProbeAndCommit(t *testing.T) {
+	s := newSweepRunner(30 * time.Minute)
+	s.next = time.Time{}
+	probed := make(chan struct{})
+	commit := make(chan struct{})
+	committing := make(chan struct{})
+	finish := make(chan struct{})
+	var persisted atomic.Bool
+	if !s.start(context.Background(), func(ctx context.Context) error {
+		close(probed)
+		<-commit
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		s.progress(func(status *sweepStatus) { status.Phase = "committing" })
+		close(committing)
+		<-finish
+		persisted.Store(true)
+		return ctx.Err()
+	}) {
+		t.Fatal("not started")
+	}
+	// Ensure a failed assertion cannot leave the worker blocked.
+	t.Cleanup(func() { s.stop() })
+	t.Cleanup(func() { close(finish) })
+	t.Cleanup(func() { close(commit) })
+	awaitSweep(t, probed)
+	reload := func() error {
+		if !persisted.Load() {
+			t.Error("reload ran before results persisted")
+		}
+		return nil
+	}
+	for i := 0; i < 3; i++ {
+		if attempted, err := s.withReload(reload); attempted || err != nil {
+			t.Fatalf("reload interrupted probing: attempted=%v err=%v", attempted, err)
+		}
+	}
+	commit <- struct{}{}
+	awaitSweep(t, committing)
+	if attempted, err := s.withReload(reload); attempted || err != nil {
+		t.Fatalf("reload interrupted commit: attempted=%v err=%v", attempted, err)
+	}
+	finish <- struct{}{}
+	awaitSweep(t, s.done)
+	if attempted, err := s.withReload(reload); !attempted || err != nil {
+		t.Fatalf("completed round blocked reload: attempted=%v err=%v", attempted, err)
+	}
+	status := s.status()
+	if status.Outcome != "completed" || status.NextRunAt.Sub(status.FinishedAt) != 30*time.Minute {
+		t.Fatalf("round did not retain 30-minute idle interval: %+v", status)
+	}
+	if s.start(context.Background(), func(context.Context) error { return nil }) {
+		t.Fatal("reload bypassed idle interval")
+	}
+}
+
+func TestSweepRunnerReloadFailureReleasesLock(t *testing.T) {
+	s := newSweepRunner(time.Hour)
+	s.next = time.Time{}
+	failure := errors.New("reload failed")
+	if attempted, err := s.withReload(func() error { return failure }); !attempted || !errors.Is(err, failure) {
+		t.Fatalf("attempted=%v err=%v", attempted, err)
+	}
+	if !s.start(context.Background(), func(context.Context) error { return nil }) {
+		t.Fatal("failed reload retained process lock")
+	}
+	awaitSweep(t, s.done)
+	s.stop()
+}
+
+func TestSweepReloadObservesCommittedResults(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	entries, err := f.repo.sweepEntries(ctx)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries: %v %v", entries, err)
+	}
+	s := newSweepRunner(30 * time.Minute)
+	s.next = time.Time{}
+	committing := make(chan struct{})
+	finish := make(chan struct{})
+	m := testSweepKernel{generation: func(ctx context.Context, _ string) error {
+		close(committing)
+		select {
+		case <-finish:
+			return ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}}
+	if !s.start(ctx, func(round context.Context) error {
+		return f.repo.sweepCommit(round, m, []sweepObservation{{entry: entries[0], delay: transport.DelayResult{
+			Generation: "test-generation", CheckedAt: time.Now(),
+		}}})
+	}) {
+		t.Fatal("not started")
+	}
+	t.Cleanup(func() { s.stop() })
+	t.Cleanup(func() { close(finish) })
+	awaitSweep(t, committing)
+	reload := func() error {
+		var count int
+		err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_connectivity WHERE identity=$1`, f.id).Scan(&count)
+		if err == nil && count != 1 {
+			return fmt.Errorf("reload observed %d committed results, want 1", count)
+		}
+		return err
+	}
+	if attempted, err := s.withReload(reload); attempted || err != nil {
+		t.Fatalf("reload ran during transaction: attempted=%v err=%v", attempted, err)
+	}
+	finish <- struct{}{}
+	awaitSweep(t, s.done)
+	if s.status().Outcome != "completed" {
+		t.Fatalf("commit failed: %+v", s.status())
+	}
+	if attempted, err := s.withReload(reload); !attempted || err != nil {
+		t.Fatalf("reload did not observe committed evidence: attempted=%v err=%v", attempted, err)
 	}
 }
 func TestSweepRunnerShutdown(t *testing.T) {

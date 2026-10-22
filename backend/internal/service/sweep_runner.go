@@ -7,14 +7,15 @@ import (
 	"time"
 )
 
-// Calls to start/stop belong to the config loop. Only status is shared with
-// the heartbeat. Closing done hands the entire round (including commit) back
-// to the config loop before it can reload the kernel.
+// Calls to start/stop/withReload belong to the config loop. The process mutex
+// protects the entire round, including its database commit, against reloads.
+// A busy reload is deferred so the config loop can keep observing changes.
 type sweepRunner struct {
 	every  time.Duration
 	next   time.Time
 	cancel context.CancelFunc
 	done   chan struct{}
+	kernel sync.Mutex
 	mu     sync.Mutex
 	state  sweepStatus
 }
@@ -29,10 +30,12 @@ type sweepStatus struct {
 	FinishedAt     time.Time `json:"finished_at,omitempty"`
 	DurationMillis int64     `json:"duration_ms"`
 	Outcome        string    `json:"outcome,omitempty"`
+	NextRunAt      time.Time `json:"next_run_at,omitempty"`
 }
 
 func newSweepRunner(every time.Duration) *sweepRunner {
-	return &sweepRunner{every: every, next: time.Now().Add(every)}
+	next := time.Now().Add(every)
+	return &sweepRunner{every: every, next: next, state: sweepStatus{NextRunAt: next}}
 }
 func (s *sweepRunner) status() sweepStatus {
 	s.mu.Lock()
@@ -54,6 +57,9 @@ func (s *sweepRunner) start(parent context.Context, run func(context.Context) er
 	if parent.Err() != nil || time.Now().Before(s.next) {
 		return false
 	}
+	if !s.kernel.TryLock() {
+		return false
+	}
 	ctx, cancel := context.WithTimeout(parent, 2*time.Hour)
 	s.cancel = cancel
 	s.done = make(chan struct{})
@@ -64,6 +70,7 @@ func (s *sweepRunner) start(parent context.Context, run func(context.Context) er
 	s.mu.Unlock()
 	go func() {
 		defer close(done)
+		defer s.kernel.Unlock()
 		defer cancel()
 		err := run(ctx)
 		outcome := "completed"
@@ -79,6 +86,7 @@ func (s *sweepRunner) start(parent context.Context, run func(context.Context) er
 		s.state.FinishedAt = finished
 		s.state.DurationMillis = finished.Sub(started).Milliseconds()
 		s.state.Outcome = outcome
+		s.state.NextRunAt = finished.Add(s.every)
 		s.mu.Unlock()
 		if err != nil && ctx.Err() == nil {
 			log.Printf("mihomo-manager: sweep round failed: %s", taskFailureReason(err))
@@ -87,6 +95,17 @@ func (s *sweepRunner) start(parent context.Context, run func(context.Context) er
 	}()
 	return true
 }
+
+// withReload never cancels a round. Only a finished probe and commit release
+// the kernel for configuration changes; shutdown still cancels via stop.
+func (s *sweepRunner) withReload(reload func() error) (bool, error) {
+	if !s.kernel.TryLock() {
+		return false, nil
+	}
+	defer s.kernel.Unlock()
+	return true, reload()
+}
+
 func (s *sweepRunner) stop() {
 	if s.done == nil {
 		return

@@ -103,7 +103,8 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 	}()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	// One background round owns its transaction; reload cancels and joins it.
+	// A round holds the process mutex through commit; pending changes are
+	// coalesced here and reloaded only after that round releases the kernel.
 	sweepConcurrency := Number("SWEEP_CONCURRENCY", 32)
 	var pending []transport.RegistryEntry
 	lastFingerprint := ""
@@ -127,14 +128,17 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 			changedAt = time.Now()
 		}
 		if time.Now().After(nextAttempt) && ((!changedAt.IsZero() && time.Since(changedAt) >= 5*time.Second) || !m.Stats().Healthy) {
-			sweeps.stop()
-			reload, stop := context.WithTimeout(ctx, transport.LeaseTTL+30*time.Second)
-			e = m.Sync(reload, pending)
-			stop()
-			if e == nil {
-				changedAt = time.Time{}
-			} else {
-				nextAttempt = time.Now().Add(5 * time.Second)
+			attempted, reloadErr := sweeps.withReload(func() error {
+				reload, stop := context.WithTimeout(ctx, transport.LeaseTTL+30*time.Second)
+				defer stop()
+				return m.Sync(reload, pending)
+			})
+			if attempted {
+				if reloadErr == nil {
+					changedAt = time.Time{}
+				} else {
+					nextAttempt = time.Now().Add(5 * time.Second)
+				}
 			}
 		}
 		if m.Stats().Healthy && changedAt.IsZero() {
