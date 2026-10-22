@@ -13,9 +13,14 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  test:
+    name: Tests and frontend assets
+    runs-on: ubuntu-24.04
     services:
       redis:
         image: redis:7-alpine
@@ -36,9 +41,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
-    permissions:
-      contents: write
-      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -93,9 +95,54 @@ jobs:
             bash webman/tests/fixtures/load.sh
           PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=test_password \
             PGDATABASE=node_explorer_webman_test php webman/tests/integration.php
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    name: Build and smoke test (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: node_explorer_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d node_explorer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Set image name
         run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -106,21 +153,28 @@ jobs:
         id: meta
         with:
           images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
-            type=sha
+      # Registry caches are shared across tags; GHA caches created on a tag
+      # cannot be restored by the next tag. Keep one cache per architecture.
       - uses: docker/build-push-action@v6
         id: image
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
+      - name: Prepare native smoke test tools
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if ! command -v psql >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          curl -fL --retry 3 "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.27/mihomo-linux-${ARCH}-v1.19.27.gz" -o /tmp/mihomo.gz
+          gzip -dc /tmp/mihomo.gz > /tmp/mihomo
+          chmod +x /tmp/mihomo
       - name: Smoke test published image
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
@@ -194,6 +248,75 @@ jobs:
             sleep 1
           done
           docker exec mihomo-manager-smoke node-worker -role mihomo-manager -health
+      # Only expose digests to the publish job after all smoke checks pass.
+      - name: Export tested image digest
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${IMAGE_DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish tested images and release
+    needs: [test, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-digest-*
+          path: /tmp/digests
+          merge-multiple: true
+      - name: Set image name
+        run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=sha
+      - name: Publish multi-architecture manifest
+        id: manifest
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          tag_args=()
+          while IFS= read -r tag; do
+            tag_args+=(--tag "$tag")
+          done <<< "$IMAGE_TAGS"
+          images=()
+          for digest in /tmp/digests/*; do
+            digest="${digest##*/}"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+            images+=("$IMAGE_NAME@sha256:$digest")
+          done
+          test "${#images[@]}" -eq 2
+          docker buildx imagetools create "${tag_args[@]}" "${images[@]}"
+          first_tag="${IMAGE_TAGS%%$'\n'*}"
+          digest=$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest}}' | jq -er '.digest')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Package production files
         if: startsWith(github.ref, 'refs/tags/')
         # webman/ 只打包源码：vendor 由镜像的 composer stage 重装，runtime 是运行产物。
@@ -203,7 +326,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.manifest.outputs.digest }}
         run: |
           printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n所有探测服务共享单个 Mihomo 内核；快速测活请求 gstatic 204，普通节点测活与恢复评估由 mihomo-manager 内的 30 分钟轮次 sweeper 统一驱动（SWEEP_INTERVAL_SECONDS=1800），住宅复核与独立生命周期治理统一收敛进 recovery 聚合角色，原有服务内并发保持不变，原有服务内并发保持不变。升级步骤、CPU 预算和回滚方式见 SINGLE_MIHOMO.md。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
           gh release create "$GITHUB_REF_NAME" "node-explorer-$GITHUB_REF_NAME.tar.gz" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md --verify-tag

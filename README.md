@@ -96,6 +96,10 @@ IPPure 人机比例接口明确返回空数据时记为“暂无数据”，6 �
 
 GitHub Actions 执行构建、Go race 测试、webman 离线与连库契约测试、归档行为测试，并验证 API 和独立生命周期 worker 镜像。容器包含 PHP 接口运行时（含前端静态资源）与 Go worker 二进制。发布不会自动执行当前工作区部署。
 
+发布流程中，测试与镜像构建并行执行；`linux/amd64` 和 `linux/arm64` 分别使用 GitHub 原生 runner 构建，不经过 QEMU。每个架构都执行 API、recovery 和 Mihomo manager 冒烟检查，全部测试通过后才合并双架构镜像清单、更新版本／`latest` 标签并创建 Release。前端产物通过 Actions artifact 传给发布任务，无需再次编译。
+
+Docker 构建缓存保存到同一 GHCR 镜像的 `buildcache-amd64`／`buildcache-arm64` 标签，供不同版本 tag 复用；这些标签仅用于缓存，不用于部署。首次运行或依赖变更需要重建相应缓存层，后续发布可复用 PHP 扩展、依赖安装等结果。工作流沿用 `GITHUB_TOKEN` 的 `packages: write` 权限，无需新增密钥。
+
 ### 全库出口 IP 属性清洗
 
 `ip-type-clean` 覆盖 `node_explorer_ippure_results` 中所有有效出口 IP，包括历史批次和已退役节点；按 IP 去重，不使用节点服务器地址替代出口。它不探测节点当前出口，也不覆盖 IPPure 风险分数。默认实时请求 IPPure 和六家外部类型来源；通过 `--query-proxy` 指定独立检测代理。每次刷新仅使用本轮结果投票，失败、限流或缺少有效类型的来源弃权，备份只用于回滚。`--refresh=false` 仅用于显式重算现有证据，不属于实时清洗。
