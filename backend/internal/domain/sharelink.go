@@ -18,7 +18,7 @@ import (
 // ShareLinkVersion bumps whenever the converter changes. Persisted failures
 // tagged with an older version re-enter the queue so a fixed parser retries
 // nodes that previously looked unsupported.
-const ShareLinkVersion = 8
+const ShareLinkVersion = 9
 
 // ErrShareLink is returned for any link this converter cannot express as a
 // usable outbound. The message never includes the link itself: share links
@@ -436,7 +436,20 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 	user := u.User.Username()
 	secret, _ := u.User.Password()
 	password := secret
-	get := func(key string) string { return u.Query().Get(key) }
+	query := u.Query()
+	// ECH uses '+' both in base64 and between its DNS name and resolver.
+	// Subscription URLs often leave it literal; form decoding would turn it
+	// into a space. Preserve it only for ECH, without changing other fields.
+	for _, part := range strings.Split(u.RawQuery, "&") {
+		key, value, _ := strings.Cut(part, "=")
+		if decoded, err := url.QueryUnescape(key); err == nil && decoded == "ech" {
+			if value, err := url.QueryUnescape(strings.ReplaceAll(value, "+", "%2B")); err == nil {
+				query.Set("ech", value)
+			}
+			break
+		}
+	}
+	get := query.Get
 
 	proxy := ProxyConfig{
 		"name":   name,
@@ -699,8 +712,26 @@ func applyTransport(proxy ProxyConfig, get func(string) string) error {
 				"xPaddingBytes":        "x-padding-bytes",
 				"scMaxEachPostBytes":   "sc-max-each-post-bytes",
 				"scMinPostsIntervalMs": "sc-min-posts-interval-ms",
+				"sessionIDKey":         "session-key",
+				"sessionIDPlacement":   "session-placement",
 			}
 			for key, value := range extra {
+				if key == "xmux" {
+					reuse, err := xhttpReuseSettings(value)
+					if err != nil {
+						return err
+					}
+					opts["reuse-settings"] = reuse
+					continue
+				}
+				if key == "scMaxConcurrentPosts" {
+					// Obsolete client scheduling hint, absent from both current
+					// Xray and Mihomo. It has no wire-format counterpart.
+					if _, err := xhttpRange(value); err != nil {
+						return err
+					}
+					continue
+				}
 				if key == "headers" {
 					opts["headers"] = value
 					continue
@@ -715,6 +746,63 @@ func applyTransport(proxy ProxyConfig, get func(string) string) error {
 		proxy["xhttp-opts"] = opts
 	}
 	return nil
+}
+
+func xhttpRange(value any) (string, error) {
+	switch v := value.(type) {
+	case string:
+		parts := strings.Split(v, "-")
+		if len(parts) > 2 {
+			break
+		}
+		previous := int64(0)
+		for _, part := range parts {
+			n, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+			if err != nil || n < previous {
+				return "", shareLinkError("invalid-xhttp-extra")
+			}
+			previous = n
+		}
+		return v, nil
+	case float64:
+		if v >= 0 && v < math.MaxInt64 && v == math.Trunc(v) {
+			return strconv.FormatInt(int64(v), 10), nil
+		}
+	}
+	return "", shareLinkError("invalid-xhttp-extra")
+}
+
+func xhttpReuseSettings(value any) (map[string]any, error) {
+	values, ok := value.(map[string]any)
+	if !ok {
+		return nil, shareLinkError("invalid-xhttp-extra")
+	}
+	aliases := map[string]string{
+		"maxConcurrency": "max-concurrency", "maxConnections": "max-connections",
+		"cMaxReuseTimes": "c-max-reuse-times", "hMaxRequestTimes": "h-max-request-times",
+		"hMaxReusableSecs": "h-max-reusable-secs", "hKeepAlivePeriod": "h-keep-alive-period",
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		target, ok := aliases[key]
+		if !ok {
+			return nil, shareLinkError("unsupported-xhttp-option")
+		}
+		v, err := xhttpRange(value)
+		if err != nil {
+			return nil, err
+		}
+		if key == "hKeepAlivePeriod" {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return nil, shareLinkError("invalid-xhttp-extra")
+			}
+			out[target] = n
+		} else {
+			out[target] = v
+		}
+	}
+	return out, nil
 }
 
 func first(get func(string) string, keys ...string) string {
@@ -774,12 +862,13 @@ func applyTLSSettings(proxy ProxyConfig, get func(string) string, enabled bool) 
 		}
 	}
 	if get("security") == "reality" {
-		if get("pbk") == "" {
+		publicKey := first(get, "pbk", "publicKey", "public-key", "public_key")
+		if publicKey == "" {
 			proxy["__bad-reality"] = true
 			return
 		}
 		proxy["reality-opts"] = map[string]any{
-			"public-key": get("pbk"),
+			"public-key": publicKey,
 			"short-id":   get("sid"),
 		}
 	}

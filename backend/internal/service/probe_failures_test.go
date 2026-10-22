@@ -44,7 +44,7 @@ func TestRejectedExitPersistsReasonAndPreservesHistoricalIP(t *testing.T) {
 	if err = f.repo.Pool.QueryRow(ctx, `SELECT state,error,due_at FROM node_explorer_work WHERE id=$1`, j.ID).Scan(&state, &message, &due); err != nil {
 		t.Fatal(err)
 	}
-	if state != "queued" || !strings.HasPrefix(message, "node_config_rejected:share-link-v8:") || due.Before(time.Now().Add(5*time.Hour)) {
+	if state != "queued" || !strings.HasPrefix(message, strings.TrimSuffix(configRejectedPattern(), "%")) || due.Before(time.Now().Add(5*time.Hour)) {
 		t.Fatalf("retry: %s %s %s", state, message, due)
 	}
 	if err = f.runner.rejectedExit(ctx, j, target, &transport.ConfigRejection{Reason: "kernel-rejected"}); !errors.Is(err, ErrLeaseLost) {

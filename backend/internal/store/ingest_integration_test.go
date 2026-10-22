@@ -118,3 +118,55 @@ func TestImportFileChangesAndConcurrentImports(t *testing.T) {
 		t.Fatal("atomic replacement was skipped")
 	}
 }
+
+func TestImportFiltersMissingCredentialsAfterSourceEnrichment(t *testing.T) {
+	for _, persistent := range []bool{false, true} {
+		t.Run(map[bool]string{false: "cached", true: "persistent"}[persistent], func(t *testing.T) {
+			ctx := context.Background()
+			adapter, err := sqlite.New(filepath.Join(t.TempDir(), "db.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer adapter.Close()
+			st := store.New(adapter, nil)
+			importer := store.NewIngestor(st)
+			if persistent {
+				importer = store.NewPersistentIngestor(st)
+			}
+			node := func(name, protocol, link string) domain.Node {
+				return domain.Node{Name: name, Type: protocol, Server: "example.com", Port: "443", RawLink: link}
+			}
+			rescued := node("rescued", "trojan", "trojan://example.com:443")
+			key, err := domain.NodeIdentity(rescued)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sources := &domain.Sources{Configs: map[string][]domain.ProxyConfig{
+				key: {{"name": "rescued", "type": "trojan", "server": "example.com", "port": 443, "password": "secret"}},
+			}}
+			snap := domain.Snapshot{CheckedAt: "2026-10-22T01:00:00Z", Nodes: []domain.Node{
+				node("missing UUID", "vless", "vless://example.com:443"),
+				node("missing reality key", "vless", "vless://user@example.com:443?security=reality"),
+				node("missing token", "tuic", "tuic://example.com:443"),
+				// This shares a fallback identity with the missing UUID entry.
+				// Dropping that invalid entry must not suppress this one.
+				node("unsupported retained", "vless", "vless://user@example.com:443?type=future-transport"),
+				node("HTTP retained", "http", "http://example.com:443"), rescued,
+			}}
+			if err := importer.Import(ctx, snap, sources); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := adapter.All(ctx)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("stored rounds: %d, %v", len(rows), err)
+			}
+			var stored domain.Snapshot
+			if err := json.Unmarshal(rows[0].Payload, &stored); err != nil {
+				t.Fatal(err)
+			}
+			if len(stored.Nodes) != 3 || stored.Nodes[0].Name != "unsupported retained" || stored.Nodes[1].Name != "HTTP retained" || stored.Nodes[2].Name != "rescued" || stored.Nodes[2].RawConfig["password"] != "secret" {
+				t.Fatalf("incorrect filtering or enrichment: %+v", stored.Nodes)
+			}
+		})
+	}
+}

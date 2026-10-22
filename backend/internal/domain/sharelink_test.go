@@ -34,6 +34,62 @@ func TestXHTTPExtraModeIsPreserved(t *testing.T) {
 	}
 }
 
+func TestXHTTPExtraMapsClientOptions(t *testing.T) {
+	extra := `{"scMaxConcurrentPosts":32,"sessionIDKey":"session","sessionIDPlacement":"query","xmux":{"maxConcurrency":"16-32","maxConnections":0,"cMaxReuseTimes":0,"hMaxRequestTimes":"600-900","hMaxReusableSecs":"1800-3000","hKeepAlivePeriod":30}}`
+	p, err := ShareLinkProxy("vless://custom-user@example.com:443?type=xhttp&extra="+url.QueryEscape(extra), "node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := p["xhttp-opts"].(map[string]any)
+	reuse := opts["reuse-settings"].(map[string]any)
+	if opts["session-key"] != "session" || opts["session-placement"] != "query" || reuse["max-concurrency"] != "16-32" || reuse["max-connections"] != "0" || reuse["h-max-request-times"] != "600-900" || reuse["h-keep-alive-period"] != 30 {
+		t.Fatalf("client options lost: %#v", opts)
+	}
+	if _, exists := opts["sc-max-concurrent-posts"]; exists {
+		t.Fatal("obsolete setting was emitted as an unsupported kernel option")
+	}
+	for _, extra := range []string{
+		`{"xmux":{"unknown":1}}`, `{"unknown":1}`, `{"xmux":true}`,
+		`{"xmux":{"maxConcurrency":-1}}`, `{"xmux":{"maxConcurrency":"32-16"}}`,
+		`{"xmux":{"hKeepAlivePeriod":"10-20"}}`, `{"scMaxConcurrentPosts":true}`,
+	} {
+		if _, err := ShareLinkProxy("vless://user@example.com:443?type=xhttp&extra="+url.QueryEscape(extra), "node"); err == nil {
+			t.Fatalf("unsupported or malformed options accepted: %s", extra)
+		}
+	}
+}
+
+func TestECHPreservesLiteralAndEscapedPluses(t *testing.T) {
+	for _, ech := range []string{
+		"ip.gs+udp://8.8.8.8",
+		"cloudflare-ech.com+https://dns.alidns.com/dns-query",
+		"AEn+DQBFKwAgACABWIHUGj4u+PIggYXcR5JF0gYk3dCRioBW8uJq9H4mKAAIAAEAAQABAANAEnB1YmxpYy50bHMtZWNoLmRldgAA",
+	} {
+		for _, value := range []string{ech, url.QueryEscape(ech)} {
+			link := "vless://user@example.com:443?security=tls&sni=some+host&ech=" + value
+			p, err := ShareLinkProxy(link, "node")
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := p["ech-opts"].(map[string]any)
+			if strings.Contains(ech, "://") {
+				name, resolver, _ := strings.Cut(ech, "+")
+				if opts["query-server-name"] != name || p["__ech-resolver"] != resolver {
+					t.Fatalf("ECH DNS setting changed: %#v", p)
+				}
+			} else if opts["config"] != ech {
+				t.Fatal("ECH base64 was corrupted")
+			}
+			if p["servername"] != "some host" {
+				t.Fatal("ECH compatibility changed unrelated query decoding")
+			}
+		}
+	}
+	if _, err := ShareLinkProxy("vless://user@example.com:443?ech=ip.gs%20udp://8.8.8.8", "node"); err == nil {
+		t.Fatal("actual whitespace must not be repaired into a plus")
+	}
+}
+
 func TestShareLinkRejectsWithCredentialFreeReason(t *testing.T) {
 	for _, tc := range []struct{ link, code string }{
 		{"vless://example.com:443", "missing-credentials"},

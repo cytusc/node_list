@@ -61,7 +61,7 @@ func TestManagerSyncIncludesQilanECHResolverPolicy(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	proxy, err := domain.ShareLinkProxy("vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls&ech="+url.QueryEscape("cloudflare-ech.com+https://dns.alidns.com/dns-query"), "ech-probe")
+	proxy, err := domain.ShareLinkProxy("vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls&ech=cloudflare-ech.com+https://dns.alidns.com/dns-query", "ech-probe")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,6 +272,22 @@ func realManager(t *testing.T) *Manager {
 	}
 	return m
 }
+
+func TestRealManagerAcceptsXHTTPShareLinkOptions(t *testing.T) {
+	m := realManager(t)
+	ctx := context.Background()
+	extra := `{"scMaxConcurrentPosts":32,"scMaxEachPostBytes":1000000,"scMinPostsIntervalMs":30,"sessionIDKey":"session","sessionIDPlacement":"query","xmux":{"maxConcurrency":"16-32","maxConnections":0,"hMaxRequestTimes":"600-900","hMaxReusableSecs":"1800-3000","hKeepAlivePeriod":30}}`
+	node := domain.Node{Name: "xhttp", Type: "vless", RawLink: "vless://custom-user@127.0.0.1:443?security=tls&type=xhttp&extra=" + url.QueryEscape(extra)}
+	e := RegistryEntry{Identity: "xhttp", Incarnation: "inc-xhttp", Node: node, Digest: ConfigDigest(node)}
+	if err := m.Sync(ctx, []RegistryEntry{e}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := m.Acquire(LeaseRequest{Targets: []RegistryEntry{e}, Kind: "strict"})
+	if err != nil {
+		t.Fatalf("Mihomo rejected converted XHTTP options: %v", err)
+	}
+	m.Release(lease.ID)
+}
 func TestRealManagerRouteIsolation(t *testing.T) {
 	m := realManager(t)
 	ctx := context.Background()
@@ -354,7 +370,7 @@ func TestRealManagerRouteIsolation(t *testing.T) {
 
 func TestRealManagerAcceptsQilanECHResolverConfig(t *testing.T) {
 	m := realManager(t)
-	proxy, err := domain.ShareLinkProxy("vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls&ech="+url.QueryEscape("cloudflare-ech.com+https://dns.alidns.com/dns-query"), "ech-probe")
+	proxy, err := domain.ShareLinkProxy("vless://123e4567-e89b-12d3-a456-426614174000@example.com:443?security=tls&ech=cloudflare-ech.com+https://dns.alidns.com/dns-query", "ech-probe")
 	if err != nil {
 		t.Fatal(err)
 	}

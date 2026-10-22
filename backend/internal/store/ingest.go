@@ -102,16 +102,12 @@ func (i *Ingestor) importLocked(ctx context.Context, snap domain.Snapshot, sourc
 	}
 	seen := make(map[string]bool, len(snap.Nodes))
 	duplicates := 0
+	rejected := make(map[string]int)
 	for _, node := range snap.Nodes {
 		// Node-level dedup (REFACTOR_PLAN §5): variants of the same node (e.g.
 		// vmess noise-field spellings) collapse to one AggregateIdentity; the
 		// first occurrence wins its raw link/config.
 		id := domain.AggregateIdentity(node)
-		if seen[id] {
-			duplicates++
-			continue
-		}
-		seen[id] = true
 		if sources != nil {
 			source := domain.SourceForNode(node, sources, true)
 			if source == nil && node.RawLink == "" && len(node.RawConfig) == 0 {
@@ -126,7 +122,22 @@ func (i *Ingestor) importLocked(ctx context.Context, snap domain.Snapshot, sourc
 				}
 			}
 		}
+		if err := domain.NodeCredentialError(node); err != nil {
+			var detail *domain.ShareLinkError
+			if errors.As(err, &detail) {
+				rejected[detail.Code]++
+			}
+			continue
+		}
+		if seen[id] {
+			duplicates++
+			continue
+		}
+		seen[id] = true
 		normalized.Nodes = append(normalized.Nodes, node)
+	}
+	for reason, count := range rejected {
+		log.Printf("ingest: dropped %d invalid node entries: %s", count, reason)
 	}
 	if duplicates > 0 {
 		log.Printf("ingest: dropped %d duplicate node entries by aggregate identity", duplicates)
