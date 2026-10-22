@@ -84,9 +84,12 @@ func TestRecoveryResultsSurviveCleanupRestartAndScheduler(t *testing.T) {
 			// to the new retired_at.
 			f.exec(t, `UPDATE node_explorer_retired_nodes SET retired_at=$1`, p.RetiredAt+"-new")
 			repo := &Repository{Pool: f.repo.Pool}
-			entry := transport.RegistryEntry{Identity: f.id}
-			obs := []sweepObservation{{entry: entry, delay: transport.DelayResult{Success: true, CheckedAt: time.Now()}}}
-			if err := repo.sweepCommit(ctx, nil, obs); err != nil {
+			entries, err := repo.sweepEntries(ctx)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("entries: %v %v", entries, err)
+			}
+			obs := []sweepObservation{{entry: entries[0], delay: transport.DelayResult{Success: true, CheckedAt: time.Now(), Generation: "test-generation"}}}
+			if err := repo.sweepCommit(ctx, testSweepKernel{}, obs); err != nil {
 				t.Fatal(err)
 			}
 			var count int

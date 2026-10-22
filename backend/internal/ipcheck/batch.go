@@ -66,7 +66,6 @@ func (c *Client) PrimeIPAPIBatch(ctx context.Context, ips []string) error {
 		c.mu.Lock()
 		if c.cache == nil {
 			c.cache = map[string]cachedEvidence{}
-			c.next = map[string]time.Time{}
 		}
 		for _, item := range items {
 			var v struct {

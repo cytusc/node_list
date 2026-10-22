@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -50,6 +49,8 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 		return fmt.Errorf("Mihomo controller already owned")
 	}
 	m := transport.NewManager(instance)
+	sweeps := newSweepRunner(Seconds("SWEEP_INTERVAL_SECONDS", 1800))
+	defer sweeps.stop()
 	server := &http.Server{Addr: Env("MIHOMO_MANAGER_LISTEN", ":9080"), Handler: m.Handler(apiToken), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
@@ -95,19 +96,14 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 				if !s.Healthy {
 					message = "内核未就绪或正在重载"
 				}
-				payload, _ := json.Marshal(map[string]any{"error": message, "running": true, "kernel": s})
+				payload, _ := json.Marshal(map[string]any{"error": message, "running": true, "kernel": s, "sweep": sweeps.status()})
 				_, _ = r.Pool.Exec(ctx, `INSERT INTO node_explorer_service_status(service,updated_at,payload) VALUES('mihomo-manager',now(),$1) ON CONFLICT(service) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload`, payload)
 			}
 		}
 	}()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	// Sweeper round state (§3): SWEEP_INTERVAL_SECONDS between rounds, bounded
-	// concurrency, one transaction commit per round. Rounds run synchronously
-	// in this loop so kernel reloads stay fenced while a round's evidence is
-	// being gathered.
-	sweepEvery := Seconds("SWEEP_INTERVAL_SECONDS", 1800)
-	nextSweep := time.Now().Add(sweepEvery)
+	// One background round owns its transaction; reload cancels and joins it.
 	sweepConcurrency := Number("SWEEP_CONCURRENCY", 32)
 	var pending []transport.RegistryEntry
 	lastFingerprint := ""
@@ -131,6 +127,7 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 			changedAt = time.Now()
 		}
 		if time.Now().After(nextAttempt) && ((!changedAt.IsZero() && time.Since(changedAt) >= 5*time.Second) || !m.Stats().Healthy) {
+			sweeps.stop()
 			reload, stop := context.WithTimeout(ctx, transport.LeaseTTL+30*time.Second)
 			e = m.Sync(reload, pending)
 			stop()
@@ -140,20 +137,37 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 				nextAttempt = time.Now().Add(5 * time.Second)
 			}
 		}
-		if m.Stats().Healthy && time.Now().After(nextSweep) {
-			nextSweep = time.Now().Add(sweepEvery)
-			live, e := r.sweepEntries(ctx)
-			if e != nil {
-				log.Printf("mihomo-manager: sweep registry load failed: %s", taskFailureReason(e))
-			} else {
-				bounded, stop := context.WithTimeout(ctx, 2*time.Hour)
-				results := r.sweepAll(bounded, m, live, sweepConcurrency)
-				if err = r.sweepCommit(bounded, m, results); err != nil {
-					log.Printf("mihomo-manager: sweep round failed: %s", taskFailureReason(err))
+		if m.Stats().Healthy && changedAt.IsZero() {
+			sweeps.start(ctx, func(round context.Context) error {
+				live, e := r.sweepEntries(round)
+				if e != nil {
+					return e
 				}
-				stop()
-			}
+				sweeps.progress(func(s *sweepStatus) { s.Phase = "probing"; s.Candidates = len(live) })
+				started := time.Now()
+				results := r.sweepAll(round, m, live, sweepConcurrency)
+				probeMillis := time.Since(started).Milliseconds()
+				observations := 0
+				for _, res := range results {
+					if res.entry.Identity != "" {
+						observations++
+					}
+				}
+				sweeps.progress(func(s *sweepStatus) {
+					s.Phase = "committing"
+					s.Observations = observations
+					s.ProbeMillis = probeMillis
+				})
+				if e = round.Err(); e != nil {
+					return e
+				}
+				started = time.Now()
+				e = r.sweepCommit(round, m, results)
+				sweeps.progress(func(s *sweepStatus) { s.CommitMillis = time.Since(started).Milliseconds() })
+				return e
+			})
 		}
+
 		select {
 		case <-ctx.Done():
 			select {

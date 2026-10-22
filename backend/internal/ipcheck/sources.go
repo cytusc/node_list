@@ -27,6 +27,8 @@ type Client struct {
 	AfterProvider     func(context.Context, string, time.Time) error
 	FreshSweep        bool
 	mu                sync.Mutex
+	providers         map[string]chan struct{}
+	denied            map[string]time.Time
 	cache             map[string]cachedEvidence
 	next              map[string]time.Time
 	registryDemoKey   string
@@ -49,14 +51,18 @@ func NewClient(token, proKey string, extraKeys ...string) *Client {
 }
 
 func (c *Client) Lookup(ctx context.Context, ip string) []Evidence {
-	return []Evidence{
-		c.lookup(ctx, "ipinfo", ip),
-		c.lookup(ctx, "ip-api", ip),
-		c.lookup(ctx, "ipregistry", ip),
-		c.lookup(ctx, "abuseipdb", ip),
-		c.lookup(ctx, "ipapi", ip),
-		c.lookup(ctx, "ip2location", ip),
+	providers := []string{"ipinfo", "ip-api", "ipregistry", "abuseipdb", "ipapi", "ip2location"}
+	out := make([]Evidence, len(providers))
+	var wg sync.WaitGroup
+	for i, provider := range providers {
+		wg.Add(1)
+		go func(i int, provider string) {
+			defer wg.Done()
+			out[i] = c.lookup(ctx, provider, ip)
+		}(i, provider)
 	}
+	wg.Wait()
+	return out
 }
 
 const browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
@@ -67,7 +73,8 @@ const registryDemoFallback = "sb69ksjcajfs4c"
 
 var registryDemoKeyPattern = regexp.MustCompile(`apiKey="([a-zA-Z0-9]+)"`)
 
-// Called under mu. Cache homepage discovery across IPs, including failures.
+// Called under the ipregistry gate, without holding the cache mutex.
+// Cache homepage discovery across IPs, including failures.
 func (c *Client) publicRegistryKey(ctx context.Context) string {
 	if time.Now().Before(c.registryDemoUntil) {
 		return c.registryDemoKey
@@ -105,21 +112,25 @@ func (c *Client) publicRegistryKey(ctx context.Context) string {
 }
 
 func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cache == nil {
-		c.cache = map[string]cachedEvidence{}
-		c.next = map[string]time.Time{}
-	}
 	key := provider + ":" + ip
 	now := time.Now()
-	if old, ok := c.cache[key]; ok && now.Before(old.until) {
-		return old.evidence
+	if old, ok := c.cached(key); ok {
+		return old
 	}
 	e := Evidence{Provider: provider, IP: ip, CheckedAt: now.UTC().Format(time.RFC3339Nano), Outcome: "unknown", QueryStatus: "request-failed"}
-	if wait := time.Until(c.next[provider]); wait > 0 {
+	quota := c.quotaKey(provider)
+	release, err := c.acquireProvider(ctx, quota)
+	if err != nil {
+		return e
+	}
+	defer release()
+	// Another caller may have populated the cache while we waited.
+	if old, ok := c.cached(key); ok {
+		return old
+	}
+	if wait := time.Until(c.providerNext(quota)); wait > 0 {
 		// Quota blocks should not stall a recovery wave. Short pacing is bounded.
-		if wait > 2*time.Second && !c.FreshSweep {
+		if wait > 2*time.Second && (!c.FreshSweep || c.providerDenied(quota)) {
 			e.QueryStatus = "quota-cooldown"
 			return e
 		}
@@ -132,13 +143,18 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 		}
 	}
 	if c.BeforeProvider != nil {
-		if err := c.BeforeProvider(ctx, provider); err != nil {
+		if err := c.BeforeProvider(ctx, quota); err != nil {
 			e.QueryStatus = "quota-cooldown"
 			return e
 		}
 	}
 	if c.AfterProvider != nil {
-		defer func() { _ = c.AfterProvider(ctx, provider, c.next[provider]) }()
+		defer func() {
+			// A timed-out request must still publish its cooldown to replicas.
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			defer cancel()
+			_ = c.AfterProvider(cleanup, quota, c.providerNext(quota))
+		}()
 	}
 	e.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	url := "https://ipinfo.io/" + ip + "/json"
@@ -191,41 +207,44 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 		req.Header.Set("Accept", "application/json")
 	}
 	resp, err := c.HTTP.Do(req)
-	c.next[provider] = time.Now().Add(1500 * time.Millisecond)
+	c.deferProvider(quota, time.Now().Add(1500*time.Millisecond))
 	if err != nil {
+		c.deferProvider(quota, time.Now().Add(30*time.Second))
 		return e
 	}
 	defer resp.Body.Close()
 	e.HTTPStatus = resp.StatusCode
 	e.QueryStatus = "http-error"
 	if resp.StatusCode == 429 {
-		c.next[provider] = retryTime(resp.Header)
+		c.deferProvider(quota, retryTime(resp.Header))
 		return e
 	}
 	if provider == "ip-api" && resp.Header.Get("X-Rl") == "0" {
 		if ttl, err := strconv.Atoi(resp.Header.Get("X-Ttl")); err == nil && ttl > 0 {
-			c.next[provider] = time.Now().Add(time.Duration(ttl) * time.Second)
+			c.deferProvider(quota, time.Now().Add(time.Duration(ttl)*time.Second))
 		} else {
-			c.next[provider] = time.Now().Add(time.Minute)
+			c.deferProvider(quota, time.Now().Add(time.Minute))
 		}
 	}
 	if resp.StatusCode != 200 {
 		// Public demo endpoints may reject an entire egress address. Avoid
 		// repeating that rejection for every IP in a maintenance sweep.
-		if !c.FreshSweep {
-			c.next[provider] = time.Now().Add(time.Minute)
+		cooldown := time.Minute
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			cooldown = 15 * time.Minute
+			c.denyProvider(quota, time.Now().Add(cooldown))
 		}
+		c.deferProvider(quota, time.Now().Add(cooldown))
 		if provider == "ipregistry" && c.IPRegistryKey == "" && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 			// Refresh rejected demo keys on the next lookup, with bounded pacing.
 			c.registryDemoUntil = time.Time{}
-			if !c.FreshSweep {
-				c.next[provider] = time.Now().Add(time.Minute)
-			}
 		}
 		return e
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
 	if err != nil {
+		e.QueryStatus = "request-failed"
+		c.deferProvider(quota, time.Now().Add(30*time.Second))
 		return e
 	}
 	if provider == "ipinfo" {
@@ -247,6 +266,11 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 	types := e.networkTypes()
 	if e.Outcome == "unknown" && types.UsageType == "" && types.CompanyType == "" {
 		ttl = time.Minute
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cache == nil {
+		c.cache = map[string]cachedEvidence{}
 	}
 	if len(c.cache) >= 1024 {
 		for k, v := range c.cache {

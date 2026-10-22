@@ -2,7 +2,7 @@
 
 React／TypeScript 节点浏览器与 PHP（webman）接口层，实时展示 subs-check 和 Qilan 节点的当前连通性及出口 IP 属性。支持筛选、分页、详情、列设置和深浅主题。
 
-现在由七个独立服务运行：API 查询（PHP/webman，实现见 `webman/`）、来源导入、测活、IP 属性、住宅恢复、非住宅恢复、节点生命周期（后六个是 Go `node-worker`）。**PostgreSQL 保存业务数据，Redis 分发任务；在用住宅节点默认每 5 分钟检查，住宅恢复失败后按退避间隔重试；非住宅节点默认每 6 小时复检，合格立即恢复。** 人工禁用不会自动恢复。
+现在由七个独立服务运行：API 查询（PHP/webman，实现见 `webman/`）、来源导入、出口探测、IP 属性、恢复与生命周期、节点清理、Mihomo 管理与全量巡检（后六个是 Go `node-worker`）。**PostgreSQL 保存业务数据，Redis 分发任务；API 只查询当前状态，全量连通性巡检由 `mihomo-manager` 在上一轮结束后默认间隔 30 分钟启动下一轮；`recovery` 消费住宅和普通节点的复核、恢复及生命周期任务，失败后按退避间隔重试。** 全量巡检更新检测证据，不能替代恢复任务；人工禁用不会自动恢复。
 
 完整的模块职责、任务契约、故障恢复、部署与升级步骤见 [MODULAR_SERVICES.md](MODULAR_SERVICES.md)，住宅判定规则见 [RESIDENTIAL_RECOVERY.md](RESIDENTIAL_RECOVERY.md)。
 
@@ -40,7 +40,7 @@ bash deploy/compose.sh ps
 curl --fail http://127.0.0.1:3001/api/health
 ```
 
-默认 `COMPOSE_FILE=compose.yaml:compose.subs-check.yaml`，包含七个应用服务、Redis、十六个专用 Mihomo 和上游 subs-check。已有 subs-check 时可只使用 `compose.yaml`。数据库是已有外部服务，不自动新建。只有来源服务挂载订阅目录；所有代理和 Redis 都不发布宿主端口。Web 默认绑定 `127.0.0.1:3001`，可用 `BIND_ADDRESS`／`WEB_PORT` 调整。
+默认 `COMPOSE_FILE=compose.yaml:compose.subs-check.yaml`，包含七个应用服务、Redis、一个共享 Mihomo 和上游 subs-check。已有 subs-check 时可只使用 `compose.yaml`。数据库是已有外部服务，不自动新建。只有来源服务挂载订阅目录；所有代理和 Redis 都不发布宿主端口。Web 默认绑定 `127.0.0.1:3001`，可用 `BIND_ADDRESS`／`WEB_PORT` 调整。
 
 旧的 PG／IPPure／巡检 overlay 已删除（它们曾是为旧部署保留的空兼容文件，生产自 v1.4.x 起已不在 `COMPOSE_FILE` 中引用）。升级应停止旧巡检与采集进程，更新 Compose 文件，保留数据库与旧 SQLite 卷；SQLite 历史不会自动迁移。详见模块化升级说明。
 
@@ -56,6 +56,8 @@ Qilan 来源在 `COMPOSE_FILE` 追加 `:compose.qilan.yaml`，设置 `QILAN_SESS
 
 注册表额外按实际 Mihomo 连接参数合并等价配置和分享链接，忽略备注及未启用 TLS 时无效的 TLS 参数；不同凭据、有效 SNI 或传输路径分别保留。重复记录仅停止展示和调度，原身份、配置及检测记录仍保留。出口探测通过节点代理并发访问 IPIP（`myip.ipip.net`）、IP.SB、AWS、ipify 等查询站，一批超时后仍尝试后续站点；已检测连通但缺少出口 IP 的节点优先补查。
 
+IP 属性的六个来源并行查询，缓存锁只保护内存数据；同一上游的请求按限额串行，等待可取消。共用 `ipinfo.check.place` 的公共查询共享额度和拒绝冷却，配置个人 AbuseIPDB 凭据后使用独立额度。HTTP 401/403 冷却 15 分钟，429 遵循 `Retry-After`，网络请求失败冷却 30 秒；冷却通过 PostgreSQL 在工作进程间共享。被拒绝或限流的来源弃权，不据此判定节点类型；此机制减少无效请求，不能解除上游封禁，稳定完整的属性仍依赖可用的查询源或有效账号额度。
+
 分享链接兼容 TUIC v4 token、TUIC v5 凭据及 VLESS 自定义用户 ID，`splithttp` 按 `xhttp` 解析。缺少凭据、Reality 公钥或内核不支持的配置会保存明确的拒绝原因并退避重试；探测失败保留历史出口，但清除本次验证状态。
 
 IPPure 人机比例接口明确返回空数据时记为“暂无数据”，6 小时后重查；查询失败记为独立错误，30 分钟后重试，不生成比例值。基础信息或风险查询失败保留上次成功结果，同时记录最近一次查询的状态、时间和原因。
@@ -64,9 +66,9 @@ IPPure 人机比例接口明确返回空数据时记为“暂无数据”，6 �
 
 ## 调度与展示
 
-测活只检查 GitHub 连通性。两次失败且宿主直连、另一个近期可用节点的代理对照均成功，才提交自动退役建议；对照不足、配置不支持、控制器故障不会直接退役。IP 服务独立读取出口，按真实出口 IP 合并属性查询，不使用节点服务器地址替代出口。
+全量巡检通过共享 Mihomo 检查 GitHub 连通性并保存当前状态；严格复核另有宿主直连和参考代理对照。自动退役要求跨周期连续失败及有效代际证据。出口服务独立读取出口，按真实出口 IP 合并属性查询，不使用节点服务器地址替代出口。
 
-在用住宅节点测活／出口检查默认 300 秒，普通节点 1800 秒。自动退役须连续 3 轮失败、每轮至少相隔 2 分钟；历史住宅节点的临时恢复失败按 5 分钟、15 分钟、1 小时、6 小时退避复测，每轮使用新证据并保留结果。住宅和普通队列各有专用工作槽位及代理实例；风险接口请求只使用普通 IP 代理。分类与风险成功结果 24 小时后刷新，失败有独立重试。分类按原始来源时间判断有效性，风险接口失败不阻塞其他来源分类与住宅恢复。
+全量连通性巡检按完成时间计算下一轮，默认间隔 1800 秒；常规出口检查默认间隔也是 1800 秒。巡检在后台单轮运行，配置检查继续按 5 秒节拍执行；重载先取消并等待旧轮次退出。取消、接口忙及基础设施错误不累计节点失败；证据写入须通过内核代际、节点实例及配置摘要校验。服务心跳包含巡检阶段、候选数、有效观察数及探测/提交耗时。自动退役须连续 3 轮失败、每轮至少相隔 2 分钟；历史住宅节点的临时恢复失败按 5 分钟、15 分钟、1 小时、6 小时退避复测，每轮使用新证据并保留结果。各类检测有独立工作槽位，底层复用共享 Mihomo；风险接口请求使用独立的 risk 容量。分类与风险成功结果 24 小时后刷新，失败有独立重试。分类按原始来源时间判断有效性，风险接口失败不阻塞其他来源分类与住宅恢复。
 
 默认查询 IPPure、IPinfo、IP-API、IPregistry、AbuseIPDB、ipapi.is、IP2Location。每家最多一票，使用类型优先、公司类型后备，失败或无有效类型时弃权。最高票并列时，在并列项中依次优先住宅 IP、商业宽带，剩余平票判为机房 IP；全部弃权为类型未知。来源详情与独立时间保存在 `classification` 中。
 
@@ -78,7 +80,7 @@ IPPure 人机比例接口明确返回空数据时记为“暂无数据”，6 �
 - `/api/results`：实时查询全部当前节点。历史接口已移除，历史路径返回 404，snapshot 参数返回 400。
 - `/api/health`：HTTP API 存活。worker 使用 `node-worker -role <角色> -health`。
 
-后端主要目录：`backend/internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-worker` 按角色启动独立服务（source／connectivity／ip／residential／lifecycle）；HTTP 接口已改为 `webman/` 下的 PHP/webman 实现（同一镜像内运行，命令 `php start.php start`）。切换期的一次性分析命令（idcheck/idscan/linkdiff/sortchk）与旧 patrol 入口已完成使命并删除。
+后端主要目录：`backend/internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-worker` 按角色启动独立服务（source／exit-provision／exit-attributes／recovery／node-cleanup／mihomo-manager）；HTTP 接口已改为 `webman/` 下的 PHP/webman 实现（同一镜像内运行，命令 `php start.php start`）。切换期的一次性分析命令（idcheck/idscan/linkdiff/sortchk）与旧 patrol 入口已完成使命并删除。
 
 `legacy/node-server/` 已归档，仅作为兼容行为基准及旧数据维护参考，不参与运行时调度。`npm test` 运行归档行为测试；`npm run test:backend` 验证 Go。集成测试使用显式 `NODE_EXPLORER_TEST_PG`／`NODE_EXPLORER_TEST_REDIS`，不自动连接生产环境。
 

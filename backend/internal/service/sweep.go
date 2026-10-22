@@ -49,42 +49,50 @@ func (r *Repository) sweepEntries(ctx context.Context) ([]transport.RegistryEntr
 	return entries, rows.Err()
 }
 
-// sweepAll probes every registered entry concurrently; results only accumulate
-// in memory. A single infra failure retries whole-next round, and the node
-// counts the delayed round as a failure (§3.1 step 2-3).
-func (r *Repository) sweepAll(ctx context.Context, m *transport.Manager, entries []transport.RegistryEntry, concurrency int) []sweepObservation {
+// sweepKernel lets tests exercise cancellation and evidence fencing without a controller.
+type sweepKernel interface {
+	Delay(context.Context, transport.LeaseRequest) (transport.DelayResult, error)
+	Generation(context.Context, string) error
+}
+
+// sweepAll uses a fixed worker pool. Only explicit controller observations
+// are evidence; busy, cancellation and transport errors leave an empty slot.
+func (r *Repository) sweepAll(ctx context.Context, m sweepKernel, entries []transport.RegistryEntry, concurrency int) []sweepObservation {
 	if concurrency < 1 {
 		concurrency = 32
 	}
+	if concurrency > len(entries) {
+		concurrency = len(entries)
+	}
 	results := make([]sweepObservation, len(entries))
-	sem := make(chan struct{}, concurrency)
+	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for i := range entries {
+	for worker := 0; worker < concurrency; worker++ {
 		wg.Add(1)
-		go func(i int, entry transport.RegistryEntry) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			probe, cancel := context.WithTimeout(ctx, 8*time.Second)
-			defer cancel()
-			result, err := m.Delay(probe, transport.LeaseRequest{Targets: []transport.RegistryEntry{entry}})
-			if err != nil {
+			for i := range jobs {
 				if ctx.Err() != nil {
 					return
 				}
-				result.Success = false
-				if result.CheckedAt.IsZero() {
-					result.CheckedAt = time.Now().UTC()
+				probe, cancel := context.WithTimeout(ctx, 8*time.Second)
+				result, err := m.Delay(probe, transport.LeaseRequest{Targets: []transport.RegistryEntry{entries[i]}})
+				cancel()
+				if err == nil && ctx.Err() == nil && !result.CheckedAt.IsZero() && result.Generation != "" {
+					results[i] = sweepObservation{entry: entries[i], delay: result}
 				}
 			}
-			results[i] = sweepObservation{entry: entry, delay: result}
-		}(i, entries[i])
+		}()
 	}
+dispatch:
+	for i := range entries {
+		select {
+		case <-ctx.Done():
+			break dispatch
+		case jobs <- i:
+		}
+	}
+	close(jobs)
 	wg.Wait()
 	return results
 }
@@ -93,7 +101,7 @@ func (r *Repository) sweepAll(ctx context.Context, m *transport.Manager, entries
 // connectivity failure accumulation, retirement on the third confirmed loss
 // (guard review retained), and the round's recovery markers for retired nodes
 // that passed this round (§3.1 steps 4-6).
-func (r *Repository) sweepCommit(ctx context.Context, m *transport.Manager, results []sweepObservation) error {
+func (r *Repository) sweepCommit(ctx context.Context, m sweepKernel, results []sweepObservation) error {
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -101,7 +109,30 @@ func (r *Repository) sweepCommit(ctx context.Context, m *transport.Manager, resu
 	defer tx.Rollback(ctx)
 	passed := make([]string, 0, len(results))
 	for _, res := range results {
-		if res.entry.Identity == "" {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		if res.entry.Identity == "" || res.entry.Incarnation == "" || res.delay.CheckedAt.IsZero() {
+			continue
+		}
+		if err = m.Generation(ctx, res.delay.Generation); err != nil {
+			return err
+		}
+		// Lock the exact registry incarnation and configuration before any
+		// evidence write. Reloads cancel/join this transaction before Sync.
+		var nodeRaw []byte
+		err = tx.QueryRow(ctx, `SELECT node FROM node_explorer_node_registry WHERE identity=$1 AND incarnation=$2 AND available AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=snapshot_id) FOR UPDATE`, res.entry.Identity, res.entry.Incarnation).Scan(&nodeRaw)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var entry transport.RegistryEntry
+		if err = json.Unmarshal(nodeRaw, &entry.Node); err != nil {
+			return err
+		}
+		if transport.ConfigDigest(entry.Node) != res.entry.Digest {
 			continue
 		}
 		var raw []byte
@@ -113,8 +144,8 @@ func (r *Repository) sweepCommit(ctx context.Context, m *transport.Manager, resu
 		if len(raw) > 0 && json.Unmarshal(raw, &previous) != nil {
 			previous = domain.ConnectivityState{}
 		}
-		if res.delay.CheckedAt.IsZero() {
-			res.delay.CheckedAt = time.Now().UTC()
+		if previousTime, e := time.Parse(time.RFC3339Nano, previous.CheckedAt); e == nil && !res.delay.CheckedAt.After(previousTime) {
+			continue
 		}
 		probe, e := json.Marshal(res.delay)
 		if e != nil {
@@ -256,7 +287,7 @@ func (r *Repository) sweepCommit(ctx context.Context, m *transport.Manager, resu
 // sweepRetire promotes a third consecutive confirmed loss to retirement inside
 // the round transaction. The registry row lock and the lifecycle event keep the
 // audit trail identical to the queue-driven retire flow.
-func (r *Repository) sweepRetire(ctx context.Context, tx pgx.Tx, m *transport.Manager, res sweepObservation, current domain.ConnectivityState) error {
+func (r *Repository) sweepRetire(ctx context.Context, tx pgx.Tx, m sweepKernel, res sweepObservation, current domain.ConnectivityState) error {
 	// A kernel reload between the probe and the commit invalidates the round's
 	// evidence; the next round re-arbitrates.
 	if err := m.Generation(ctx, res.delay.Generation); err != nil {

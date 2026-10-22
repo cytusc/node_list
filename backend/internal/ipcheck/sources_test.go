@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -39,8 +40,11 @@ func TestParsersAbstainOnFailuresAndKeepProxySeparate(t *testing.T) {
 
 func TestClientCachesPerIPAndHonorsIPAPIQuota(t *testing.T) {
 	calls := map[string]int{}
+	var mu sync.Mutex
 	c := NewClient("private-token", "")
 	c.HTTP = &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		calls[r.URL.Host]++
 		header := make(http.Header)
 		body := `{"ip":"8.8.8.8","is_hosting":false}`
@@ -79,8 +83,11 @@ func TestRateLimitResponsesDoNotBecomeDatacenterVotes(t *testing.T) {
 
 func TestNetworkTypeSourcesUseConfiguredCredentialsAndPublicDefaults(t *testing.T) {
 	calls := map[string]int{}
+	var mu sync.Mutex
 	c := NewClient("", "", "registry-fixture", "abuse-fixture")
 	c.HTTP = &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		calls[r.URL.Host]++
 		body := `{}`
 		switch r.URL.Host {
