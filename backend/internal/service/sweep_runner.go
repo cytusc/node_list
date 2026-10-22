@@ -106,6 +106,13 @@ func (s *sweepRunner) withReload(reload func() error) (bool, error) {
 	return true, reload()
 }
 
+// Recovery may cancel an unusable generation. Join the round, including any
+// transaction rollback, before touching the kernel; normal reloads still defer.
+func (s *sweepRunner) withRecovery(reload func() error) (bool, error) {
+	s.stop()
+	return s.withReload(reload)
+}
+
 func (s *sweepRunner) stop() {
 	if s.done == nil {
 		return

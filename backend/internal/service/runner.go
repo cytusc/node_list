@@ -241,6 +241,11 @@ func (r *Runner) consume(ctx context.Context, kind string, high bool) {
 	timer.Stop()
 	defer timer.Stop()
 	for ctx.Err() == nil {
+		if r.Config.Manager != nil {
+			if err := r.Config.Manager.WaitReady(ctx); err != nil {
+				return
+			}
+		}
 		ref, err := r.Queue.Pop(ctx, kind, high)
 		if err != nil || ref == "" {
 			timer.Reset(idleDelay)

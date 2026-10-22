@@ -16,7 +16,40 @@ import (
 )
 
 // ManagerClient has no controller credentials and never writes kernel config.
-type ManagerClient struct{ URL, Token string }
+type ManagerClient struct {
+	URL, Token string
+	mu         sync.Mutex
+	retryAt    time.Time
+}
+
+// All lanes in a worker share the outage cooldown. Wait before claiming work
+// as well as before HTTP calls so a manager outage cannot churn the full queue.
+func (c *ManagerClient) WaitReady(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		delay := time.Until(c.retryAt)
+		c.mu.Unlock()
+		if delay <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (c *ManagerClient) pause() {
+	c.mu.Lock()
+	c.retryAt = time.Now().Add(2 * time.Second)
+	c.mu.Unlock()
+}
 
 var ErrManagerUnavailable = errors.New("Mihomo manager unavailable")
 
@@ -27,6 +60,12 @@ func (e *ManagerHTTPError) Error() string {
 }
 
 func (c *ManagerClient) call(ctx context.Context, method, path string, in, out any) error {
+	// Release must remain available during outages so reload can drain leases.
+	if method != http.MethodDelete {
+		if err := c.WaitReady(ctx); err != nil {
+			return err
+		}
+	}
 	raw, err := json.Marshal(in)
 	if err != nil {
 		return err
@@ -39,9 +78,16 @@ func (c *ManagerClient) call(ctx context.Context, method, path string, in, out a
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		c.pause()
 		return ErrManagerUnavailable
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		c.pause()
+	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return ErrManagerBusy
 	}

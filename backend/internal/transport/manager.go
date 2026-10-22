@@ -156,7 +156,7 @@ func (m *Manager) Stats() ManagerStats {
 func (m *Manager) Generation(ctx context.Context, generation string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if generation == "" || generation != m.generation {
+	if generation == "" || generation != m.generation || !m.healthy || m.reloading {
 		return errors.New("kernel generation changed")
 	}
 	return nil
@@ -170,6 +170,9 @@ func (m *Manager) controller(ctx context.Context, method, path string, body []by
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
 		return nil, 0, errors.New("Mihomo controller unavailable")
 	}
 	defer resp.Body.Close()
@@ -434,8 +437,27 @@ func (m *Manager) Acquire(req LeaseRequest) (Lease, error) {
 }
 func (m *Manager) Release(id string) { m.mu.Lock(); delete(m.leases, id); m.mu.Unlock() }
 
-// Check detects a restart even when there are no worker requests in flight.
+// invalidate fences a confirmed kernel failure against a concurrent reload.
+// Reasons are fixed codes: controller errors may contain node credentials.
+func (m *Manager) invalidate(generation, reason string, status int) {
+	m.mu.Lock()
+	changed := m.generation == generation && m.healthy && !m.reloading
+	if changed {
+		m.healthy = false
+		m.leases = map[string]Lease{}
+	}
+	m.mu.Unlock()
+	if changed {
+		log.Printf("mihomo-manager: kernel unhealthy reason=%s status=%d generation=%s", reason, status, generation)
+	}
+}
+
+// Check owns health decisions. Its own bounded probe may confirm an outage;
+// cancellation of the caller (including shutdown) is never kernel evidence.
 func (m *Manager) Check(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	generation := m.generation
 	path := "/version"
@@ -450,14 +472,18 @@ func (m *Manager) Check(ctx context.Context) error {
 	if !healthy {
 		return errors.New("kernel not ready")
 	}
-	_, status, err := m.controller(ctx, http.MethodGet, path, nil)
+	check, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, status, err := m.controller(check, http.MethodGet, path, nil)
 	if err != nil || status != 200 {
-		m.mu.Lock()
-		if m.generation == generation {
-			m.healthy = false
-			m.leases = map[string]Lease{}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		m.mu.Unlock()
+		reason := "health_probe_failed"
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = "health_probe_timeout"
+		}
+		m.invalidate(generation, reason, status)
 		return errors.New("kernel unavailable or restarted")
 	}
 	return nil
@@ -465,6 +491,9 @@ func (m *Manager) Check(ctx context.Context) error {
 
 // Kernel restarts lose the in-memory registry. Outages invalidate all results.
 func (m *Manager) Validate(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	m.prune()
 	l, ok := m.leases[id]
@@ -476,12 +505,22 @@ func (m *Manager) Validate(ctx context.Context, id string) error {
 	for _, entry := range l.Targets {
 		_, status, err := m.controller(ctx, http.MethodGet, "/proxies/"+url.PathEscape(proxyName(entry.Identity)), nil)
 		if err != nil || status != 200 {
-			m.mu.Lock()
-			m.healthy = false
-			m.leases = map[string]Lease{}
-			m.mu.Unlock()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if status == http.StatusNotFound {
+				// A missing registered proxy is direct evidence of kernel state loss.
+				m.invalidate(l.Generation, "registered_proxy_missing", status)
+			} else {
+				// A transient request failure rejects this proof, but only a fresh
+				// health probe may invalidate other callers' leases.
+				_ = m.Check(ctx)
+			}
 			return errors.New("Mihomo infrastructure unavailable")
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

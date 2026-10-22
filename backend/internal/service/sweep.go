@@ -106,8 +106,15 @@ func (r *Repository) sweepCommit(ctx context.Context, m sweepKernel, results []s
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+		// Recovery joins this round before reload; a cancelled probe context must
+		// not skip rollback and leave its locks to asynchronous connection cleanup.
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}()
 	passed := make([]string, 0, len(results))
+	observations := 0
 	for _, res := range results {
 		if err = ctx.Err(); err != nil {
 			return err
@@ -147,6 +154,7 @@ func (r *Repository) sweepCommit(ctx context.Context, m sweepKernel, results []s
 		if previousTime, e := time.Parse(time.RFC3339Nano, previous.CheckedAt); e == nil && !res.delay.CheckedAt.After(previousTime) {
 			continue
 		}
+		observations++
 		probe, e := json.Marshal(res.delay)
 		if e != nil {
 			return e
@@ -280,7 +288,7 @@ func (r *Repository) sweepCommit(ctx context.Context, m sweepKernel, results []s
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
-	log.Printf("mihomo-manager: sweep round committed %d observations (%d passed)", len(results), len(passed))
+	log.Printf("mihomo-manager: sweep round committed %d observations (%d passed, %d candidates)", observations, len(passed), len(results))
 	return nil
 }
 

@@ -112,9 +112,7 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 	nextAttempt := time.Time{}
 	for {
 		if m.Stats().Healthy {
-			check, stop := context.WithTimeout(ctx, 2*time.Second)
-			_ = m.Check(check)
-			stop()
+			_ = m.Check(ctx)
 		}
 		entries, e := r.kernelEntries(ctx)
 		if e != nil {
@@ -128,11 +126,16 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 			changedAt = time.Now()
 		}
 		if time.Now().After(nextAttempt) && ((!changedAt.IsZero() && time.Since(changedAt) >= 5*time.Second) || !m.Stats().Healthy) {
-			attempted, reloadErr := sweeps.withReload(func() error {
+			reloadKernel := func() error {
 				reload, stop := context.WithTimeout(ctx, transport.LeaseTTL+30*time.Second)
 				defer stop()
 				return m.Sync(reload, pending)
-			})
+			}
+			reload := sweeps.withReload
+			if !m.Stats().Healthy {
+				reload = sweeps.withRecovery
+			}
+			attempted, reloadErr := reload(reloadKernel)
 			if attempted {
 				if reloadErr == nil {
 					changedAt = time.Time{}
