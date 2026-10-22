@@ -112,7 +112,7 @@ func fakeManager(t *testing.T) (*Manager, *atomic.Bool, *atomic.Int32) {
 			w.WriteHeader(503)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"name": "proxy"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "proxy", "extra": map[string]any{DelayTarget: map[string]any{"alive": false, "history": []map[string]any{{"time": time.Now(), "delay": 0}}}}})
 	}))
 	t.Cleanup(server.Close)
 	return NewManager(MihomoConfig{Controller: server.URL, ProxyURL: "http://localhost:7890", Secret: "controller"}), failed, reloads
@@ -547,7 +547,7 @@ func TestManagerPauseIsBackpressureWithoutAbnormalResult(t *testing.T) {
 	}
 }
 
-func TestRealKernelDelayRequiresExpected204(t *testing.T) {
+func TestRealManagerDelayRequiresExpected204(t *testing.T) {
 	m := realManager(t)
 	e := entry("status-check")
 	e.Node.RawConfig["type"] = "direct"
@@ -557,12 +557,23 @@ func TestRealKernelDelayRequiresExpected204(t *testing.T) {
 	if err := m.Sync(ctx, []RegistryEntry{e}); err != nil {
 		t.Fatal(err)
 	}
-	for _, status := range []int{200, 204, 403} {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
-		_, got, err := m.controller(ctx, "GET", "/proxies/"+proxyName(e.Identity)+"/delay?timeout=2000&expected=204&url="+url.QueryEscape(server.URL), nil)
-		server.Close()
-		if err != nil || (got == 200) != (status == 204) {
-			t.Fatalf("HTTP %d accepted incorrectly: controller=%d err=%v", status, got, err)
+	// Zero-latency responses exercise Mihomo's 0ms rounding; a delayed response
+	// proves non-204 rejection is independent of the /delay HTTP status.
+	for _, latency := range []time.Duration{0, 5 * time.Millisecond} {
+		for _, status := range []int{200, 204, 301, 403, 500, 204} {
+			t.Run(fmt.Sprintf("status=%d/latency=%s", status, latency), func(t *testing.T) {
+				var requests atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests.Add(1)
+					time.Sleep(latency)
+					w.WriteHeader(status)
+				}))
+				defer server.Close()
+				result, err := m.delay(ctx, LeaseRequest{Targets: []RegistryEntry{e}}, server.URL)
+				if err != nil || result.Success != (status == 204) || result.CheckedAt.IsZero() || requests.Load() == 0 {
+					t.Fatalf("HTTP %d classified incorrectly: result=%+v err=%v requests=%d", status, result, err, requests.Load())
+				}
+			})
 		}
 	}
 }

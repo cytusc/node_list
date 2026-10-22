@@ -29,7 +29,7 @@ func managedFixture(t *testing.T, status int) *fixture {
 			}
 			return
 		}
-		_, _ = w.Write([]byte(`{}`))
+		_ = json.NewEncoder(w).Encode(map[string]any{"extra": map[string]any{transport.DelayTarget: map[string]any{"alive": status == 200, "history": []map[string]any{{"time": time.Now(), "delay": 1}}}}})
 	}))
 	t.Cleanup(controller.Close)
 	m := transport.NewManager(transport.MihomoConfig{Controller: controller.URL, ProxyURL: "http://localhost:7890"})

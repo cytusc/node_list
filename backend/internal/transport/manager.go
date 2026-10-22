@@ -25,6 +25,11 @@ import (
 const DelayTarget = "https://www.gstatic.com/generate_204"
 const LeaseTTL = 150 * time.Second
 
+// Delay owns the whole budget, including capacity wait and proof validation.
+// Callers should pass their lifecycle context rather than a shorter probe timer.
+const delayControllerTimeout = 12 * time.Second
+const delayValidationTimeout = 3 * time.Second
+
 var ErrManagerBusy = errors.New("Mihomo capacity paused or busy")
 var ErrConfigRejected = errors.New("node configuration rejected or unsupported")
 
@@ -123,6 +128,7 @@ type Manager struct {
 	rejected                      map[string]string
 	credentials                   map[string]string
 	leases                        map[string]Lease
+	delaying                      map[string]bool
 	generation, epoch             string
 	sequence                      int
 	reloading, healthy            bool
@@ -135,7 +141,7 @@ type Manager struct {
 }
 
 func NewManager(instance MihomoConfig) *Manager {
-	return &Manager{Instance: instance, epoch: token(), entries: map[string]RegistryEntry{}, rejected: map[string]string{}, credentials: map[string]string{}, leases: map[string]Lease{}}
+	return &Manager{Instance: instance, epoch: token(), entries: map[string]RegistryEntry{}, rejected: map[string]string{}, credentials: map[string]string{}, leases: map[string]Lease{}, delaying: map[string]bool{}}
 }
 func (m *Manager) prune() {
 	for id, l := range m.leases {
@@ -491,6 +497,11 @@ func (m *Manager) Check(ctx context.Context) error {
 
 // Kernel restarts lose the in-memory registry. Outages invalidate all results.
 func (m *Manager) Validate(ctx context.Context, id string) error {
+	return m.validate(ctx, id, nil)
+}
+
+// inspect reuses the validated proxy response while the caller owns its lease.
+func (m *Manager) validate(ctx context.Context, id string, inspect func([]byte)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -503,7 +514,7 @@ func (m *Manager) Validate(ctx context.Context, id string) error {
 		return errors.New("lease expired or generation changed")
 	}
 	for _, entry := range l.Targets {
-		_, status, err := m.controller(ctx, http.MethodGet, "/proxies/"+url.PathEscape(proxyName(entry.Identity)), nil)
+		raw, status, err := m.controller(ctx, http.MethodGet, "/proxies/"+url.PathEscape(proxyName(entry.Identity)), nil)
 		if err != nil || status != 200 {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -517,6 +528,9 @@ func (m *Manager) Validate(ctx context.Context, id string) error {
 				_ = m.Check(ctx)
 			}
 			return errors.New("Mihomo infrastructure unavailable")
+		}
+		if inspect != nil {
+			inspect(raw)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -532,9 +546,37 @@ func (m *Manager) Validate(ctx context.Context, id string) error {
 	return nil
 }
 func (m *Manager) Delay(ctx context.Context, req LeaseRequest) (result DelayResult, err error) {
+	return m.delay(ctx, req, DelayTarget)
+}
+
+func (m *Manager) delay(ctx context.Context, req LeaseRequest, target string) (result DelayResult, err error) {
+	ctx, cancel := context.WithTimeout(ctx, delayControllerTimeout+delayValidationTimeout)
+	defer cancel()
 	if len(req.Targets) != 1 {
 		return result, errors.New("one delay target required")
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	// URL-test history belongs to the proxy, not the HTTP request. Serialize
+	// each identity through evidence collection so another caller cannot replace it.
+	identity := req.Targets[0].Identity
+	m.mu.Lock()
+	if m.delaying[identity] {
+		m.mu.Unlock()
+		return result, ErrManagerBusy
+	}
+	m.delaying[identity] = true
+	m.mu.Unlock()
+	releaseIdentity := func() { m.mu.Lock(); delete(m.delaying, identity); m.mu.Unlock() }
+	var draining <-chan struct{}
+	defer func() {
+		if draining == nil {
+			releaseIdentity()
+		} else {
+			go func() { <-draining; releaseIdentity() }()
+		}
+	}()
 	// Idle reserved capacity may be borrowed. Waiting residential calls get the next completion.
 	waitingHigh := req.High
 	m.mu.Lock()
@@ -592,31 +634,81 @@ func (m *Manager) Delay(ctx context.Context, req LeaseRequest) (result DelayResu
 	// Mihomo's DNS/dial setup can exceed its requested 2s delay timeout.
 	// Allow its explicit 503/504 response to arrive; a transport timeout remains
 	// an infrastructure error, never evidence that a node is dead.
-	probe, stop := context.WithTimeout(ctx, 12*time.Second)
-	defer stop()
-	path := "/proxies/" + url.PathEscape(proxyName(req.Targets[0].Identity)) + "/delay?timeout=2000&expected=204&url=" + url.QueryEscape(DelayTarget)
-	raw, status, e := m.controller(probe, http.MethodGet, path, nil)
+	path := "/proxies/" + url.PathEscape(proxyName(identity)) + "/delay?timeout=2000&expected=204&url=" + url.QueryEscape(target)
+	started := time.Now()
+	status, drain, e := m.delayController(ctx, path)
+	draining = drain
 	if e != nil {
 		return result, e
 	}
-	if e = m.Validate(ctx, l.ID); e != nil {
+	if status != 200 && status != 503 && status != 504 {
+		return result, errors.New("Mihomo delay infrastructure error")
+	}
+	validation, finish := context.WithTimeout(ctx, delayValidationTimeout)
+	defer finish()
+	var raw []byte
+	if e = m.validate(validation, l.ID, func(body []byte) { raw = body }); e != nil {
+		return result, e
+	}
+	success, delay, e := delayEvidence(raw, target, started)
+	if e != nil {
 		return result, e
 	}
 	result.Generation = l.Generation
 	result.CheckedAt = time.Now().UTC()
-	if status == 200 {
-		var d struct {
-			Delay int `json:"delay"`
-		}
-		if json.Unmarshal(raw, &d) != nil {
-			return result, errors.New("invalid controller delay response")
-		}
-		result.Success = true
-		result.Delay = d.Delay
-	} else if status != 503 && status != 504 {
-		return result, errors.New("Mihomo delay infrastructure error")
-	}
+	result.Success = success
+	result.Delay = delay
 	return result, nil
+}
+
+// Mihomo's URLTest outlives a cancelled HTTP caller. Drain its bounded response
+// in the background before allowing the same identity to write history again.
+// Cancellation still releases the caller/round immediately for recovery.
+func (m *Manager) delayController(ctx context.Context, path string) (int, <-chan struct{}, error) {
+	probe, stop := context.WithTimeout(context.WithoutCancel(ctx), delayControllerTimeout)
+	type response struct {
+		status int
+		err    error
+	}
+	result := make(chan response, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer stop()
+		_, status, err := m.controller(probe, http.MethodGet, path, nil)
+		result <- response{status, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return 0, done, ctx.Err()
+	case response := <-result:
+		return response.status, nil, response.err
+	}
+}
+
+// Mihomo v1.19.27's /delay status ignores `expected`, and treats a rounded 0ms
+// as an error. Only extra[target].alive applies the expected HTTP status.
+// Missing or old history is infrastructure uncertainty, never node evidence.
+func delayEvidence(raw []byte, target string, started time.Time) (bool, int, error) {
+	var proxy struct {
+		Extra map[string]struct {
+			Alive   *bool `json:"alive"`
+			History []struct {
+				Time  time.Time `json:"time"`
+				Delay int       `json:"delay"`
+			} `json:"history"`
+		} `json:"extra"`
+	}
+	if json.Unmarshal(raw, &proxy) == nil {
+		state, ok := proxy.Extra[target]
+		if ok && state.Alive != nil && len(state.History) > 0 {
+			latest := state.History[len(state.History)-1]
+			if !latest.Time.Before(started) && latest.Delay >= 0 {
+				return *state.Alive, latest.Delay, nil
+			}
+		}
+	}
+	return false, 0, errors.New("missing or stale Mihomo delay evidence")
 }
 func (m *Manager) Handler(secret string) http.Handler {
 	mux := http.NewServeMux()

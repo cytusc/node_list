@@ -5,6 +5,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/cytusc/node_list/backend/internal/transport"
 )
 
 // Calls to start/stop/withReload belong to the config loop. The process mutex
@@ -18,19 +20,32 @@ type sweepRunner struct {
 	kernel sync.Mutex
 	mu     sync.Mutex
 	state  sweepStatus
+	// Protected by mu. Retry batches never postpone the next full sweep.
+	fullNext   time.Time
+	pending    map[string]struct{}
+	retryDelay time.Duration
 }
+
+const sweepRetryMin = 30 * time.Second
+const sweepRetryMax = 5 * time.Minute
+
 type sweepStatus struct {
-	Phase          string    `json:"phase,omitempty"`
-	Candidates     int       `json:"candidates"`
-	Observations   int       `json:"observations"`
-	ProbeMillis    int64     `json:"probe_ms"`
-	CommitMillis   int64     `json:"commit_ms"`
-	Running        bool      `json:"running"`
-	StartedAt      time.Time `json:"started_at,omitempty"`
-	FinishedAt     time.Time `json:"finished_at,omitempty"`
-	DurationMillis int64     `json:"duration_ms"`
-	Outcome        string    `json:"outcome,omitempty"`
-	NextRunAt      time.Time `json:"next_run_at,omitempty"`
+	Kind           string         `json:"kind,omitempty"`
+	Phase          string         `json:"phase,omitempty"`
+	Candidates     int            `json:"candidates"`
+	Observations   int            `json:"observations"`
+	Skipped        int            `json:"skipped"`
+	Rejected       int            `json:"rejected"`
+	Pending        int            `json:"pending"`
+	SkipReasons    map[string]int `json:"skip_reasons,omitempty"`
+	ProbeMillis    int64          `json:"probe_ms"`
+	CommitMillis   int64          `json:"commit_ms"`
+	Running        bool           `json:"running"`
+	StartedAt      time.Time      `json:"started_at,omitempty"`
+	FinishedAt     time.Time      `json:"finished_at,omitempty"`
+	DurationMillis int64          `json:"duration_ms"`
+	Outcome        string         `json:"outcome,omitempty"`
+	NextRunAt      time.Time      `json:"next_run_at,omitempty"`
 }
 
 func newSweepRunner(every time.Duration) *sweepRunner {
@@ -49,7 +64,7 @@ func (s *sweepRunner) start(parent context.Context, run func(context.Context) er
 			s.cancel()
 			s.done = nil
 			state := s.status()
-			s.next = state.FinishedAt.Add(s.every)
+			s.next = state.NextRunAt
 		default:
 			return false
 		}
@@ -66,7 +81,7 @@ func (s *sweepRunner) start(parent context.Context, run func(context.Context) er
 	done := s.done
 	started := time.Now()
 	s.mu.Lock()
-	s.state = sweepStatus{Running: true, StartedAt: started, Phase: "loading"}
+	s.state = sweepStatus{Running: true, StartedAt: started, Phase: "loading", Pending: len(s.pending)}
 	s.mu.Unlock()
 	go func() {
 		defer close(done)
@@ -81,17 +96,41 @@ func (s *sweepRunner) start(parent context.Context, run func(context.Context) er
 		}
 		finished := time.Now()
 		s.mu.Lock()
+		if outcome == "completed" {
+			if s.state.Kind != "retry" {
+				s.fullNext = finished.Add(s.every)
+			}
+			if s.state.Skipped > 0 {
+				outcome = "partial"
+			}
+		}
+		next := s.fullNext
+		if err != nil || ctx.Err() != nil || len(s.pending) > 0 {
+			if s.retryDelay == 0 || (err == nil && s.state.Observations > 0) {
+				s.retryDelay = sweepRetryMin
+			} else {
+				s.retryDelay = min(s.retryDelay*2, sweepRetryMax)
+			}
+			next = finished.Add(s.retryDelay)
+			if !s.fullNext.IsZero() && s.fullNext.Before(next) && (s.fullNext.After(finished) || s.state.Kind == "retry") {
+				next = s.fullNext
+			}
+		} else {
+			s.retryDelay = 0
+		}
 		s.state.Running = false
 		s.state.Phase = "finished"
 		s.state.FinishedAt = finished
 		s.state.DurationMillis = finished.Sub(started).Milliseconds()
 		s.state.Outcome = outcome
-		s.state.NextRunAt = finished.Add(s.every)
+		s.state.NextRunAt = next
+		s.state.Pending = len(s.pending)
+		state := s.state
 		s.mu.Unlock()
 		if err != nil && ctx.Err() == nil {
 			log.Printf("mihomo-manager: sweep round failed: %s", taskFailureReason(err))
 		}
-		log.Printf("mihomo-manager: sweep round %s duration=%s", outcome, finished.Sub(started).Round(time.Millisecond))
+		log.Printf("mihomo-manager: sweep round %s kind=%s candidates=%d observations=%d skipped=%d rejected=%d pending=%d duration=%s", outcome, state.Kind, state.Candidates, state.Observations, state.Skipped, state.Rejected, state.Pending, finished.Sub(started).Round(time.Millisecond))
 	}()
 	return true
 }
@@ -120,7 +159,7 @@ func (s *sweepRunner) stop() {
 	select {
 	case <-s.done:
 		// A completed round retains its completion-based interval.
-		s.next = s.status().FinishedAt.Add(s.every)
+		s.next = s.status().NextRunAt
 	default:
 		s.cancel()
 		<-s.done
@@ -135,4 +174,60 @@ func (s *sweepRunner) progress(update func(*sweepStatus)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	update(&s.state)
+}
+
+// Always select from the current registry: departed nodes disappear, while a
+// changed incarnation/configuration is retried using its fresh kernel entry.
+func (s *sweepRunner) selectEntries(live []transport.RegistryEntry) []transport.RegistryEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.Kind = "full"
+	if len(s.pending) == 0 || !time.Now().Before(s.fullNext) {
+		return live
+	}
+	s.state.Kind = "retry"
+	entries := make([]transport.RegistryEntry, 0, len(s.pending))
+	for _, entry := range live {
+		if _, ok := s.pending[entry.Identity]; ok {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+// Only commitPending may advance coverage. A failed/cancelled transaction
+// leaves the previous retry set intact, so uncommitted evidence is reprobed.
+func (s *sweepRunner) observations(entries []transport.RegistryEntry, results []sweepObservation) map[string]struct{} {
+	pending := map[string]struct{}{}
+	reasons := map[string]int{}
+	observed, rejected := 0, 0
+	for i, entry := range entries {
+		if results[i].entry.Identity != "" {
+			observed++
+			continue
+		}
+		reason := results[i].skip
+		if reason == "" {
+			reason = "cancelled"
+		}
+		reasons[reason]++
+		if reason == "config_rejected" {
+			rejected++ // Permanent configuration errors wait for a config change/full sweep.
+		} else {
+			pending[entry.Identity] = struct{}{}
+		}
+	}
+	s.progress(func(state *sweepStatus) {
+		state.Observations = observed
+		state.Skipped = len(entries) - observed
+		state.Rejected = rejected
+		state.SkipReasons = reasons
+	})
+	return pending
+}
+
+func (s *sweepRunner) commitPending(pending map[string]struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pending = pending
 }

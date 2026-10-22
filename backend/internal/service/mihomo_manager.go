@@ -150,19 +150,14 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 				if e != nil {
 					return e
 				}
+				live = sweeps.selectEntries(live)
 				sweeps.progress(func(s *sweepStatus) { s.Phase = "probing"; s.Candidates = len(live) })
 				started := time.Now()
 				results := r.sweepAll(round, m, live, sweepConcurrency)
 				probeMillis := time.Since(started).Milliseconds()
-				observations := 0
-				for _, res := range results {
-					if res.entry.Identity != "" {
-						observations++
-					}
-				}
+				pending := sweeps.observations(live, results)
 				sweeps.progress(func(s *sweepStatus) {
 					s.Phase = "committing"
-					s.Observations = observations
 					s.ProbeMillis = probeMillis
 				})
 				if e = round.Err(); e != nil {
@@ -170,6 +165,9 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 				}
 				started = time.Now()
 				e = r.sweepCommit(round, m, results)
+				if e == nil {
+					sweeps.commitPending(pending)
+				}
 				sweeps.progress(func(s *sweepStatus) { s.CommitMillis = time.Since(started).Milliseconds() })
 				return e
 			})

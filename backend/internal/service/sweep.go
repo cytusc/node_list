@@ -21,6 +21,7 @@ import (
 type sweepObservation struct {
 	entry transport.RegistryEntry
 	delay transport.DelayResult
+	skip  string
 }
 
 // The sweeper shares the manager's controller lease; each probe borrows it
@@ -75,11 +76,26 @@ func (r *Repository) sweepAll(ctx context.Context, m sweepKernel, entries []tran
 				if ctx.Err() != nil {
 					return
 				}
-				probe, cancel := context.WithTimeout(ctx, 8*time.Second)
-				result, err := m.Delay(probe, transport.LeaseRequest{Targets: []transport.RegistryEntry{entries[i]}})
-				cancel()
+				// Manager.Delay bounds capacity wait, controller probe and validation.
+				// A second, shorter timer here would discard valid slow observations.
+				result, err := m.Delay(ctx, transport.LeaseRequest{Targets: []transport.RegistryEntry{entries[i]}})
 				if err == nil && ctx.Err() == nil && !result.CheckedAt.IsZero() && result.Generation != "" {
 					results[i] = sweepObservation{entry: entries[i], delay: result}
+				} else {
+					reason := "infrastructure"
+					switch {
+					case errors.Is(err, transport.ErrConfigRejected):
+						reason = "config_rejected"
+					case errors.Is(err, transport.ErrConfigChanged):
+						reason = "config_changed"
+					case errors.Is(err, transport.ErrManagerBusy):
+						reason = "busy"
+					case errors.Is(err, context.DeadlineExceeded):
+						reason = "timeout"
+					case ctx.Err() != nil || errors.Is(err, context.Canceled):
+						reason = "cancelled"
+					}
+					results[i].skip = reason
 				}
 			}
 		}()
