@@ -260,6 +260,11 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	if j.Payload.Incarnation == "" {
 		j.Payload.Incarnation = t.Incarnation
 	}
+	previous, err := r.Repo.Exit(ctx, t.Identity)
+	if err != nil {
+		return err
+	}
+	started := time.Now()
 	paths, release, err := r.reserve(ctx, []domain.Node{t.Node}, high)
 	if err != nil {
 		if errors.Is(err, transport.ErrConfigRejected) {
@@ -270,7 +275,7 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	defer release()
 	ctx, cancelLease := pathContext(ctx, paths)
 	defer cancelLease()
-	v := domain.ExitState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	v := domain.ExitState{Incarnation: t.Incarnation, CheckedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	path := paths[t.Identity]
 	if path != nil {
 		v.KernelGeneration = path.Generation
@@ -291,15 +296,27 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	} else {
 		probeCtx, cancel := context.WithTimeout(ctx, 75*time.Second)
 		defer cancel()
-		o, e := collector.ResolveExitIPInfo(probeCtx, path.Client, 5*time.Second, nil, nil)
+		var preferred []string
+		if previous != nil && previous.Incarnation == t.Incarnation && previous.Endpoint != "" {
+			preferred = []string{previous.Endpoint}
+		}
+		o, e := collector.ResolveExitIPInfo(probeCtx, path.Client, 5*time.Second, preferred, nil)
 		if e != nil || o == nil {
 			v.Error = "出口探测失败"
 		} else {
-			v.IP, v.Source, v.Country, v.AddressFamily = o.IP, o.Provider, o.Country, o.AddressFamily
+			v.IP, v.Source, v.Country, v.AddressFamily, v.Endpoint = o.IP, o.Provider, o.Country, o.AddressFamily, o.Endpoint
 		}
 	}
 	v.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	v.ProbeMillis = time.Since(started).Milliseconds()
 	checkExpectedExit(&v, j.Payload.ExpectedIP)
+	if j.Payload.Session == "" && v.Error != "" {
+		v.FailureStreak = 1
+		if previous != nil && previous.Error != "" && (previous.Incarnation == "" || previous.Incarnation == t.Incarnation) {
+			v.FailureStreak = min(16, max(1, previous.FailureStreak)+1)
+			v.Endpoint = previous.Endpoint
+		}
+	}
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
 		if err := validatePaths(ctx, tx, paths); err != nil {
 			return err

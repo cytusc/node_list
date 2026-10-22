@@ -6,6 +6,7 @@ dist/
 release.env
 release.env.tmp
 .update.lock
+.update-state/
 .pg-backup.lock
 backups/
 data/

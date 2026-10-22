@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -220,5 +221,46 @@ func TestBusinessASNDoesNotBecomeDatacenter(t *testing.T) {
 				t.Fatalf("got %v", v.Attributes)
 			}
 		})
+	}
+}
+
+func TestExitReturnsFirstIPv4AndCancelsSlowLosers(t *testing.T) {
+	var active, countries atomic.Int32
+	client := &http.Client{Transport: echoTransport(func(r *http.Request) (*http.Response, error) {
+		active.Add(1)
+		defer active.Add(-1)
+		switch r.URL.Host {
+		case "www.cloudflare.com":
+			countries.Add(1)
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ip=1.1.1.1\nloc=US\n")), Header: make(http.Header)}, nil
+		case "api.ipify.org":
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("1.1.1.1")), Header: make(http.Header)}, nil
+		default:
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}
+	})}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	o, err := ResolveExitIPInfo(ctx, client, 5*time.Second, nil, nil)
+	if err != nil || o == nil || o.IP != "1.1.1.1" || o.Country != "US" {
+		t.Fatalf("fast winner waited for slow peers: %+v %v", o, err)
+	}
+	if active.Load() != 0 || countries.Load() != 1 {
+		t.Fatalf("leaked requests or duplicate country: %d %d", active.Load(), countries.Load())
+	}
+}
+
+func TestExitIPv6DoesNotCancelIPv4Fallback(t *testing.T) {
+	client := &http.Client{Transport: echoTransport(func(r *http.Request) (*http.Response, error) {
+		body := "2001:4860:4860::8888"
+		if r.URL.Host == "ifconfig.me" {
+			body = "8.8.8.8"
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+	o, err := ResolveExitIPInfo(context.Background(), client, time.Second, nil, nil)
+	if err != nil || o == nil || o.IP != "8.8.8.8" {
+		t.Fatalf("IPv4 fallback skipped: %+v %v", o, err)
 	}
 }

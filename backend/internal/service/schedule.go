@@ -108,7 +108,7 @@ func (r *Runner) schedule(ctx context.Context) error {
 	// exit-provision keeps re-deriving exit checks and risk top-ups for the
 	// unretired set ahead of their due time; completed rows refresh so repeated
 	// scans stay a no-op for unchanged state.
-	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.identity,c.payload,e.payload,a.payload
+	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.identity,n.incarnation,c.payload,e.payload,a.payload
 	FROM node_explorer_node_registry n LEFT JOIN node_explorer_connectivity c USING(identity)
 	LEFT JOIN node_explorer_exits e USING(identity) LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
 	LEFT JOIN node_explorer_retired_nodes t USING(identity)
@@ -118,13 +118,13 @@ func (r *Runner) schedule(ctx context.Context) error {
 		return err
 	}
 	type item struct {
-		id      string
-		c, e, a []byte
+		id, incarnation string
+		c, e, a         []byte
 	}
 	items := []item{}
 	for rows.Next() {
 		var i item
-		if err = rows.Scan(&i.id, &i.c, &i.e, &i.a); err != nil {
+		if err = rows.Scan(&i.id, &i.incarnation, &i.c, &i.e, &i.a); err != nil {
 			rows.Close()
 			return err
 		}
@@ -168,7 +168,7 @@ func (r *Runner) schedule(ctx context.Context) error {
 			priority = 1
 		}
 		p := Payload{Identity: i.id}
-		work = append(work, scheduledWork{Kind: KindExit, Key: i.id, Payload: p, Priority: priority, Due: nextDue(exit.CheckedAt, r.Config.NormalInterval)})
+		work = append(work, scheduledWork{Kind: KindExit, Key: i.id, Payload: p, Priority: priority, Due: ordinaryExitDue(exit, connectivity, i.incarnation, r.Config.NormalInterval, now)})
 		if exit.IP != "" && missingTrafficRatio(attr, now) {
 			work = append(work, scheduledWork{Kind: KindRisk, Key: exit.IP, Payload: Payload{IP: exit.IP, Identity: i.id}, Priority: priority, Due: now, Mode: "risk"})
 		}
@@ -177,6 +177,32 @@ func (r *Runner) schedule(ctx context.Context) error {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// Repeated ordinary exit failures back off without slowing independent recovery
+// proofs. A new incarnation or a newer successful connectivity proof retries now.
+func ordinaryExitDue(exit domain.ExitState, live domain.ConnectivityState, incarnation string, base time.Duration, now time.Time) time.Time {
+	if exit.Incarnation != "" && exit.Incarnation != incarnation {
+		return now
+	}
+	if base <= 0 {
+		base = 30 * time.Minute
+	}
+	interval := base
+	if exit.Error != "" {
+		checked, _ := time.Parse(time.RFC3339Nano, exit.CheckedAt)
+		observed, e := time.Parse(time.RFC3339Nano, live.CheckedAt)
+		if e == nil && live.Reachable && observed.After(checked) {
+			return now
+		}
+		for i := 1; i < min(exit.FailureStreak, 16); i++ {
+			if interval >= 6*time.Hour {
+				break
+			}
+			interval = min(6*time.Hour, interval*2)
+		}
+	}
+	return nextDue(exit.CheckedAt, interval)
 }
 
 func nextDue(stamp string, interval time.Duration) time.Time {

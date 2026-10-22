@@ -145,6 +145,7 @@ services:
       MIHOMO_CONTROLLER: http://shared-mihomo:9090
       MIHOMO_PROXY_URL: http://shared-mihomo:7890
       MIHOMO_CONTROLLER_SECRET: ${MIHOMO_CONTROLLER_SECRET:?Set MIHOMO_CONTROLLER_SECRET in .env}
+      MIHOMO_REGISTRY_POLL_SECONDS: ${MIHOMO_REGISTRY_POLL_SECONDS:-30}
       SWEEP_INTERVAL_SECONDS: ${SWEEP_INTERVAL_SECONDS:-1800}
       SWEEP_CONCURRENCY: ${SWEEP_CONCURRENCY:-32}
     depends_on:
@@ -153,7 +154,7 @@ services:
       test: [CMD, node-worker, -role, mihomo-manager, -health]
       interval: 10s
       timeout: 5s
-      start_period: 30s
+      start_period: 120s
   shared-mihomo:
     <<: *proxy
     cpus: ${MIHOMO_CPUS:-1.0}

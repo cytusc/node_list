@@ -22,27 +22,31 @@ healthy() {
 update_one() {
   local service=$1 variable=$2 repository=$3 old_tag new_tag
   old_tag=$(sed -n "s/^$variable=//p" release.env)
+  local lookup_status
+  if new_tag=$(python3 deploy/github_release.py "$repository" .update-state); then
+    :
+  else
+    lookup_status=$?
+    if [[ "$lookup_status" == 75 ]]; then
+      echo "$service release check deferred; keeping $old_tag"
+      return 0
+    fi
+    return "$lookup_status"
+  fi
   if [[ "$service" == node-explorer ]]; then
-    # A release is created only after the image passes its smoke tests. Compare
-    # numerically and retain a manually deployed newer hotfix tag.
-    new_tag=$(curl --fail --silent --show-error --retry 2 --max-time 30 \
-      "https://api.github.com/repos/$repository/releases/latest" | \
-      python3 -c '
-import json, re, sys
+    # Never downgrade a manually deployed newer tag, including a hotfix suffix.
+    new_tag=$(python3 - "$old_tag" "$new_tag" <<'PYVERSION'
+import re, sys
 def version(tag, current=False):
     suffix = r"(?:-[A-Za-z0-9._-]+)?" if current else ""
     match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)" + suffix, tag)
     if not match:
         raise ValueError("Invalid stable version: " + tag)
     return tuple(map(int, match.groups()))
-current = sys.argv[1]
-latest = json.load(sys.stdin)["tag_name"]
+current, latest = sys.argv[1:]
 print(latest if version(latest) > version(current, current=True) else current)
-' "$old_tag") || return 1
-  else
-    new_tag=$(curl --fail --silent --show-error --retry 2 --max-time 30 \
-      "https://api.github.com/repos/$repository/releases/latest" | \
-      python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])') || return 1
+PYVERSION
+) || return 1
   fi
   if [[ "$new_tag" == "$old_tag" ]]; then
     echo "$service already running $old_tag"
@@ -69,7 +73,7 @@ for name, service in config["services"].items():
   fi
   echo "Updating $service $old_tag -> $new_tag"
   compose_tag "$variable" "$new_tag" pull "${targets[@]}" || return 1
-  if compose_tag "$variable" "$new_tag" up -d --no-deps --wait --wait-timeout 120 "${targets[@]}" && healthy "$service"; then
+  if compose_tag "$variable" "$new_tag" up -d --no-deps --wait --wait-timeout 180 "${targets[@]}" && healthy "$service"; then
     sed "/^$variable=/d" release.env > release.env.tmp
     printf '%s=%s\n' "$variable" "$new_tag" >> release.env.tmp
     chmod 600 release.env.tmp
@@ -77,7 +81,7 @@ for name, service in config["services"].items():
     echo "Updated $service to $new_tag"
   else
     echo "Update failed; rolling back $service to $old_tag" >&2
-    compose_tag "$variable" "$old_tag" up -d --no-deps --wait --wait-timeout 120 "${targets[@]}" || return 1
+    compose_tag "$variable" "$old_tag" up -d --no-deps --wait --wait-timeout 180 "${targets[@]}" || return 1
     return 1
   fi
 }

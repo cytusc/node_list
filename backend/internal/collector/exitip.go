@@ -133,105 +133,73 @@ func ResolveExitIPInfo(ctx context.Context, client *http.Client, timeout time.Du
 		}
 	}
 
-	var observed *ExitOutcome
 	var ipv6 *ExitOutcome
 	failures := 0
-	var mu sync.Mutex
-
 	for offset := 0; offset < len(services); offset += ExitProbeBatch {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		end := offset + ExitProbeBatch
-		if end > len(services) {
-			end = len(services)
-		}
-		batch := services[offset:end]
-		results := make([]struct {
+		batch := services[offset:min(offset+ExitProbeBatch, len(services))]
+		batchCtx, cancel := context.WithCancel(ctx)
+		type result struct {
+			service exitProbe
 			outcome *ExitOutcome
 			err     error
 			elapsed int64
-		}, len(batch))
-
-		var wg sync.WaitGroup
-		for i, service := range batch {
-			wg.Add(1)
-			go func(i int, service exitProbe) {
-				defer wg.Done()
-				started := time.Now()
-				outcome, err := probeOneEndpoint(ctx, client, timeout, service)
-				mu.Lock()
-				results[i].outcome = outcome
-				results[i].err = err
-				results[i].elapsed = time.Since(started).Milliseconds()
-				mu.Unlock()
-			}(i, service)
 		}
-		wg.Wait()
-
-		for i, service := range batch {
-			result := results[i]
-			if result.err != nil {
-				code := exitProbeCode(result.err)
-				if onAttempt != nil {
-					onAttempt(ExitAttempt{
-						Provider:  service.Provider,
-						Endpoint:  service.URL,
-						Round:     1,
-						ElapsedMs: result.elapsed,
-						Outcome:   "error",
-						Code:      code,
-					})
+		results := make(chan result, len(batch))
+		for _, service := range batch {
+			go func(service exitProbe) {
+				started := time.Now()
+				outcome, err := probeOneEndpoint(batchCtx, client, timeout, service)
+				results <- result{service, outcome, err, time.Since(started).Milliseconds()}
+			}(service)
+		}
+		var winner *ExitOutcome
+		// Drain cancelled losers before releasing the node's execution lease.
+		for range batch {
+			r := <-results
+			if r.err != nil {
+				if winner == nil {
+					failures++
+				}
+				if onAttempt != nil && batchCtx.Err() == nil {
+					onAttempt(ExitAttempt{Provider: r.service.Provider, Endpoint: r.service.URL, Round: 1, ElapsedMs: r.elapsed, Outcome: "error", Code: exitProbeCode(r.err)})
 				}
 				continue
 			}
+			outcome := "ipv6"
+			if r.outcome.AddressFamily == 4 {
+				outcome = "ipv4"
+			}
 			if onAttempt != nil {
-				outcome := "ipv6"
-				if result.outcome.AddressFamily == 4 {
-					outcome = "ipv4"
-				}
-				onAttempt(ExitAttempt{
-					Provider:  service.Provider,
-					Endpoint:  service.URL,
-					Round:     1,
-					ElapsedMs: result.elapsed,
-					Outcome:   outcome,
-				})
+				onAttempt(ExitAttempt{Provider: r.service.Provider, Endpoint: r.service.URL, Round: 1, ElapsedMs: r.elapsed, Outcome: outcome})
 			}
-			if result.outcome.AddressFamily == 4 {
-				if observed == nil {
-					observed = result.outcome
-				}
-			} else if ipv6 == nil {
-				ipv6 = result.outcome
+			if r.outcome.AddressFamily == 4 && winner == nil {
+				winner = r.outcome
+				cancel()
+			} else if r.outcome.AddressFamily == 6 && ipv6 == nil {
+				ipv6 = r.outcome
 			}
 		}
-		if observed != nil {
-			return observed, nil
+		cancel()
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		failures += len(batch) - countSuccesses(results)
-		// Timeouts only prove these destinations are unreachable. Regional
-		// proxies may still reach another echo, so always try the next batch.
+		if winner != nil {
+			// Country is optional enrichment. Query once for the winner, with a short
+			// budget; it must not turn a successful IP echo into another full timeout.
+			if winner.Country == "" {
+				winner.Country, _ = ResolveExitCountry(ctx, client, min(timeout, time.Second))
+			}
+			return winner, nil
+		}
+		// An unreachable batch must not suppress regional fallback endpoints.
 	}
 	if ipv6 != nil {
 		return ipv6, nil
 	}
-	failure := fmt.Errorf("出口 IP 探测失败：%d 个查询入口均未取得有效 IP", failures)
-	return nil, &exitError{code: "EXIT_IP", err: failure}
-}
-
-func countSuccesses(results []struct {
-	outcome *ExitOutcome
-	err     error
-	elapsed int64
-}) int {
-	n := 0
-	for _, r := range results {
-		if r.err == nil {
-			n++
-		}
-	}
-	return n
+	return nil, &exitError{code: "EXIT_IP", err: fmt.Errorf("出口 IP 探测失败：%d 个查询入口均未取得有效 IP", failures)}
 }
 
 func probeOneEndpoint(ctx context.Context, client *http.Client, timeout time.Duration, service exitProbe) (*ExitOutcome, error) {
@@ -297,13 +265,6 @@ func probeOneEndpoint(ctx context.Context, client *http.Client, timeout time.Dur
 	if service.Trace {
 		if match := traceCountryPattern.FindStringSubmatch(body); match != nil {
 			outcome.Country = strings.ToUpper(match[1])
-		}
-	} else if family == 4 {
-		// One extra request over the already-open tunnel buys the exit country.
-		// IPv6 outcomes skip it: IPPure rejects IPv6 anyway, and the lookup
-		// would be wasted whenever a later endpoint yields IPv4.
-		if country, err := ResolveExitCountry(ctx, client, timeout); err == nil {
-			outcome.Country = country
 		}
 	}
 	return outcome, nil

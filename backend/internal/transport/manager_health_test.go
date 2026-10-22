@@ -244,3 +244,52 @@ func TestManagerStaleValidationCannotInvalidateReloadedKernel(t *testing.T) {
 		t.Fatal("old generation response invalidated a replacement kernel")
 	}
 }
+
+func TestManagerTransientHealthTimeoutKeepsUnrelatedLease(t *testing.T) {
+	var stall atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			return
+		}
+		if stall.Swap(false) {
+			<-r.Context().Done()
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	m := NewManager(MihomoConfig{Controller: server.URL, ProxyURL: "http://localhost:7890"})
+	targets := []RegistryEntry{entry("a")}
+	if err := m.Sync(context.Background(), targets); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := m.Acquire(LeaseRequest{Targets: targets, Kind: "exit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stall.Store(true)
+	if err := m.Check(context.Background()); err != nil || !m.Stats().Healthy {
+		t.Fatalf("transient health timeout caused reload: %v", err)
+	}
+	if err := m.Validate(context.Background(), lease.ID); err != nil {
+		t.Fatalf("unrelated lease lost: %v", err)
+	}
+}
+
+func TestManagerWaitingHealthCheckHonorsCallerDeadline(t *testing.T) {
+	m, _, _ := fakeManager(t)
+	m.healthMu.Lock()
+	defer m.healthMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- m.Check(ctx) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("health serialization ignored caller cancellation")
+	}
+}

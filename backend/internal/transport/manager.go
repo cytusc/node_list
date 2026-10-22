@@ -110,36 +110,42 @@ type DelayResult struct {
 	CheckedAt  time.Time `json:"checkedAt"`
 }
 type ManagerStats struct {
-	Generation   string `json:"generation"`
-	Loaded       int    `json:"loaded"`
-	Quarantined  int    `json:"quarantined"`
-	Reloads      int    `json:"reloads"`
-	ReloadMillis int64  `json:"reloadMillis"`
-	FastRunning  int    `json:"fastRunning"`
-	Healthy      bool   `json:"healthy"`
+	Generation        string `json:"generation"`
+	Loaded            int    `json:"loaded"`
+	Quarantined       int    `json:"quarantined"`
+	Reloads           int    `json:"reloads"`
+	ReloadMillis      int64  `json:"reloadMillis"`
+	ReloadPauseMillis int64  `json:"reloadPauseMillis"`
+	ReloadDrainMillis int64  `json:"reloadDrainMillis"`
+	ConfigLoads       int    `json:"configLoads"`
+	FastRunning       int    `json:"fastRunning"`
+	Healthy           bool   `json:"healthy"`
 }
 
 // Manager is the sole controller writer. Leases fence reloads and are never renewed.
 // The owner must terminate it immediately upon losing the DB ownership session.
 type Manager struct {
+	healthMu sync.Mutex
 	Instance MihomoConfig
 	// ExitConcurrency is configured before serving requests.
-	ExitConcurrency               int
-	mu                            sync.Mutex
-	entries                       map[string]RegistryEntry
-	rejected                      map[string]string
-	credentials                   map[string]string
-	leases                        map[string]Lease
-	delaying                      map[string]bool
-	generation, epoch             string
-	sequence                      int
-	reloading, healthy            bool
-	reloads                       int
-	reloadMillis                  int64
-	fingerprint                   string
-	lastPayload                   []byte
-	fast, fastNormal, highWaiting int
-	OnDelay                       func(context.Context, bool, bool)
+	ExitConcurrency                      int
+	mu                                   sync.Mutex
+	entries                              map[string]RegistryEntry
+	rejected                             map[string]string
+	credentials                          map[string]string
+	leases                               map[string]Lease
+	delaying                             map[string]bool
+	generation, epoch                    string
+	sequence                             int
+	reloading, healthy                   bool
+	reloads                              int
+	reloadMillis                         int64
+	reloadPauseMillis, reloadDrainMillis int64
+	configLoads                          int
+	fingerprint                          string
+	lastPayload                          []byte
+	fast, fastNormal, highWaiting        int
+	OnDelay                              func(context.Context, bool, bool)
 }
 
 func NewManager(instance MihomoConfig) *Manager {
@@ -155,7 +161,7 @@ func (m *Manager) prune() {
 func (m *Manager) Stats() ManagerStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return ManagerStats{m.generation, len(m.entries) - len(m.rejected), len(m.rejected), m.reloads, m.reloadMillis, m.fast, m.healthy && !m.reloading}
+	return ManagerStats{Generation: m.generation, Loaded: len(m.entries) - len(m.rejected), Quarantined: len(m.rejected), Reloads: m.reloads, ReloadMillis: m.reloadMillis, ReloadPauseMillis: m.reloadPauseMillis, ReloadDrainMillis: m.reloadDrainMillis, ConfigLoads: m.configLoads, FastRunning: m.fast, Healthy: m.healthy && !m.reloading}
 }
 
 // Generation fences follow-up work against a kernel reload since the given
@@ -188,6 +194,9 @@ func (m *Manager) controller(ctx context.Context, method, path string, body []by
 	return raw, resp.StatusCode, err
 }
 func (m *Manager) push(ctx context.Context, payload []byte) (int, error) {
+	m.mu.Lock()
+	m.configLoads++
+	m.mu.Unlock()
 	body, _ := json.Marshal(map[string]string{"payload": string(payload)})
 	raw, status, err := m.controller(ctx, http.MethodPut, "/configs?force=true", body)
 	if err != nil {
@@ -223,9 +232,17 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 		m.mu.Unlock()
 		return nil
 	}
+	previousEntries := m.entries
+	previousRejected := m.rejected
 	m.reloading = true
 	m.mu.Unlock()
-	defer func() { m.mu.Lock(); m.reloading = false; m.mu.Unlock() }()
+	pauseStarted := time.Now()
+	defer func() {
+		m.mu.Lock()
+		m.reloadPauseMillis = time.Since(pauseStarted).Milliseconds()
+		m.reloading = false
+		m.mu.Unlock()
+	}()
 	for {
 		m.mu.Lock()
 		m.prune()
@@ -240,6 +257,9 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+	m.mu.Lock()
+	m.reloadDrainMillis = time.Since(pauseStarted).Milliseconds()
+	m.mu.Unlock()
 	base, err := url.Parse(m.Instance.ProxyURL)
 	if err != nil {
 		return err
@@ -257,7 +277,14 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 	rejected := map[string]string{}
 	credentials := map[string]string{}
 	valid := []RegistryEntry{}
+	changed := []RegistryEntry{}
 	for _, entry := range entries {
+		old, known := previousEntries[entry.Identity]
+		same := known && old.Digest == entry.Digest
+		if same && previousRejected[entry.Identity] != "" {
+			rejected[entry.Identity] = previousRejected[entry.Identity]
+			continue
+		}
 		p := outboundConfig(entry.Node)
 		// Original display names cannot safely resolve arbitrary cross-node chains.
 		if p == nil || p["dialer-proxy"] != nil || p["detour"] != nil {
@@ -276,6 +303,9 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 			continue
 		}
 		valid = append(valid, entry)
+		if !same {
+			changed = append(changed, entry)
+		}
 	}
 	// Truncated display names must stay injective (§6.4): a 64-bit collision
 	// is astronomically unlikely, but one is quarantined with a log line so a
@@ -293,16 +323,17 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 	}
 	valid = deduped
 	start := time.Now()
-	// Bound bad-config isolation cost: retry only a small batch, then install the
-	// complete valid registry once. No lease is admitted during these loads.
-	if len(valid) > 256 {
-		filtered := make([]RegistryEntry, 0, len(valid))
-		for offset := 0; offset < len(valid); offset += 256 {
+	// Bound bad-config isolation to new/changed connection digests. Unchanged
+	// configs were already installed successfully, including known rejections.
+	// A small update needs only the final install; large imports validate in batches.
+	// No lease is admitted during these loads.
+	if len(changed) > 256 {
+		for offset := 0; offset < len(changed); offset += 256 {
 			end := offset + 256
-			if end > len(valid) {
-				end = len(valid)
+			if end > len(changed) {
+				end = len(changed)
 			}
-			batch := append([]RegistryEntry(nil), valid[offset:end]...)
+			batch := append([]RegistryEntry(nil), changed[offset:end]...)
 			for {
 				check := config
 				check.Proxies = nil
@@ -330,7 +361,12 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 				rejected[batch[index].Identity] = "kernel-rejected"
 				batch = append(batch[:index], batch[index+1:]...)
 			}
-			filtered = append(filtered, batch...)
+		}
+		filtered := valid[:0]
+		for _, entry := range valid {
+			if rejected[entry.Identity] == "" {
+				filtered = append(filtered, entry)
+			}
 		}
 		valid = filtered
 	}
@@ -463,9 +499,22 @@ func (m *Manager) invalidate(generation, reason string, status int) {
 	}
 }
 
-// Check owns health decisions. Its own bounded probe may confirm an outage;
-// cancellation of the caller (including shutdown) is never kernel evidence.
+// Check confirms transient controller errors with a second independent probe.
+// Missing registered proxies prove state loss immediately. Cancellation of the
+// caller remains a single request failure, never evidence about global health.
 func (m *Manager) Check(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Avoid many failing proof validators simultaneously probing the controller.
+	for !m.healthMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	defer m.healthMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -483,19 +532,24 @@ func (m *Manager) Check(ctx context.Context) error {
 	if !healthy {
 		return errors.New("kernel not ready")
 	}
-	check, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	_, status, err := m.controller(check, http.MethodGet, path, nil)
-	if err != nil || status != 200 {
+	for attempt, budget := range []time.Duration{2 * time.Second, 3 * time.Second} {
+		check, cancel := context.WithTimeout(ctx, budget)
+		_, status, err := m.controller(check, http.MethodGet, path, nil)
+		cancel()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		reason := "health_probe_failed"
-		if errors.Is(err, context.DeadlineExceeded) {
-			reason = "health_probe_timeout"
+		if err == nil && status == 200 {
+			return nil
 		}
-		m.invalidate(generation, reason, status)
-		return errors.New("kernel unavailable or restarted")
+		if status == http.StatusNotFound || attempt == 1 {
+			reason := "health_probe_failed"
+			if errors.Is(err, context.DeadlineExceeded) {
+				reason = "health_probe_timeout"
+			}
+			m.invalidate(generation, reason, status)
+			return errors.New("kernel unavailable or restarted")
+		}
 	}
 	return nil
 }

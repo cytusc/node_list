@@ -20,6 +20,10 @@ type ConnectivityState struct {
 }
 
 type ExitState struct {
+	Incarnation      string `json:"incarnation,omitempty"`
+	Endpoint         string `json:"endpoint,omitempty"`
+	FailureStreak    int    `json:"failureStreak,omitempty"`
+	ProbeMillis      int64  `json:"probeMillis,omitempty"`
 	KernelGeneration string `json:"kernelGeneration,omitempty"`
 	IP               string `json:"ip,omitempty"`
 	CheckedAt        string `json:"checkedAt"`

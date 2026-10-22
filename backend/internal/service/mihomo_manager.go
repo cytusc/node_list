@@ -111,21 +111,27 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 	lastFingerprint := ""
 	changedAt := time.Time{}
 	nextAttempt := time.Time{}
+	nextRegistryPoll := time.Time{}
+	registryPoll := Seconds("MIHOMO_REGISTRY_POLL_SECONDS", 30)
 	for {
 		if m.Stats().Healthy {
 			_ = m.Check(ctx)
 		}
-		entries, e := r.kernelEntries(ctx)
-		if e != nil {
-			return e
+		if !time.Now().Before(nextRegistryPoll) {
+			entries, e := r.kernelEntries(ctx)
+			if e != nil {
+				return e
+			}
+			raw, _ := json.Marshal(entries)
+			fingerprint := string(raw)
+			if fingerprint != lastFingerprint {
+				pending = entries
+				lastFingerprint = fingerprint
+				changedAt = time.Now()
+			}
+			nextRegistryPoll = time.Now().Add(registryPoll)
 		}
-		raw, _ := json.Marshal(entries)
-		fingerprint := string(raw)
-		if fingerprint != lastFingerprint {
-			pending = entries
-			lastFingerprint = fingerprint
-			changedAt = time.Now()
-		}
+
 		if time.Now().After(nextAttempt) && ((!changedAt.IsZero() && time.Since(changedAt) >= 5*time.Second) || !m.Stats().Healthy) {
 			reloadKernel := func() error {
 				reload, stop := context.WithTimeout(ctx, transport.LeaseTTL+30*time.Second)
