@@ -10,7 +10,7 @@ func TestRecoveryStatisticsMigrationImportsOnlyRetainedOutcomes(t *testing.T) {
 	ctx := context.Background()
 	_, err := a.pool.Exec(ctx, `
 	 DROP TABLE node_explorer_recovery_events,node_explorer_recovery_totals;
-	 DELETE FROM node_explorer_service_migrations WHERE version IN (7,8);
+	 DELETE FROM node_explorer_service_migrations WHERE version IN (7,8,9);
 	 INSERT INTO node_explorer_service_migrations(version) VALUES(6) ON CONFLICT DO NOTHING;
 	 INSERT INTO node_explorer_work(kind,key,state,due_at,payload) VALUES
 	 ('normal-recovery','mixed','queued',now(),jsonb_build_object(
