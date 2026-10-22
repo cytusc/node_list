@@ -109,7 +109,7 @@
 
 ## 5. source-ingest 拆分与去重（原 2 号改造）
 
-- **拆分**：抽 source provider 接口（`subs-check watcher` / `Qilan poller` / 未来来源均实现），每来源独立 Compose 容器、各自挂载；
+- **统一采集**：抽 source provider 接口（`subs-check watcher` / `Qilan poller` / 未来来源均实现），统一由 `source-ingest` 容器运行，按来源配置挂载；
 - **去重**：现状节点级幂等是 `ON CONFLICT(identity) DO UPDATE`（registry.go:184，覆盖更新而非跳过）；补入库前去重层（ingest 前置阶段按 `AggregateIdentity` 判重并计数），保留快照指纹幂等（ON CONFLICT(fingerprint) DO NOTHING）；
 - **约束**：不改 `AggregateIdentity` 哈希输入（identity.go:159 持久化稳定性警告）；vmess 规范化已收敛（commit 531aуля5），不重开。
 
@@ -164,7 +164,7 @@
 ## 11. 实施记录（回写）
 
 - **批次 1**：ip-service 拆 `exit-provision` / `exit-attributes`（compose + kind 路由 + 住宅快判 `quickverdict.go`，判定复用 `ipcheck.Score`，兜底④回补落 `probes.go` risk()）。
-- **批次 2**：`SourceProvider` 接口 + `SOURCE_PROVIDERS` 选择（compose 拆 source-ingest / source-qilan 双容器）；`importLocked` 节点级去重（`AggregateIdentity` 判重，首个胜出，duplicates 计数落日志）。
+- **批次 2**：`SourceProvider` 接口 + `SOURCE_PROVIDERS` 选择（统一由 `source-ingest` 运行所选来源）；`importLocked` 节点级去重（`AggregateIdentity` 判重，首个胜出，duplicates 计数落日志）。
 - **批次 3**：sweeper 并入 mihomo-manager 主循环（`sweep.go`：`SWEEP_INTERVAL_SECONDS=1800`、`SWEEP_CONCURRENCY=32` 可配至 64、delay timeout=2000/expected=204、轮末单事务批量写 fast_results+connectivity、3 连败 `accumulateFailures/retirementConfirmed`+guard 复核+`LIFECYCLE_DRY_RUN` 开关、退役本轮通过→once(KindRecovery)、无 IP→once(KindExit)、缺分类/风险→KindAttributes/KindRisk）；connectivity/residential/normal-recovery/lifecycle 四进程退场，合并为 `recovery` 角色（消费 KindRecovery/KindNormalRecovery/KindFast/KindLive/KindLifecycle，调度侧 retryResidentialRecovery/skipHostingRecovery/scheduleNormalRecovery 原样挂靠）；mihomo-manager 去 taskqueue 依赖（RecordFast/FastScores 删除）；node-cleanup 顺带清扫 >30min 陈旧心跳行（§8.5 幽灵服务消除）。
 - **批次 4**：§6 四项落地——`ShareLinkParseFailures` 原子计数 + `sharelink_coverage_test.go` 协议夹具；`decorativeConfigFields` 剔除表（identity 与 ConfigDigest 共用）；ConfigureProxyBatch 段位 <4096 提前告警；`proxyNameHex=16` 截断（identity↔name 纯函数映射，Sync 碰撞隔离守卫）。
 - **删除清单**：`backend/internal/taskqueue/fast_stats.go`、`fast_stats_test.go`、schedule.go 大扫描 connectivity/residential 分支、runner/config/main 的旧 role 枚举、compose 四服务块（connectivity/residential-recovery/normal-recovery/node-lifecycle）。

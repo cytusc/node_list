@@ -50,7 +50,7 @@ curl --fail http://127.0.0.1:3001/api/health
 
 来源服务监听 `SUBS_CHECK_DIR` 下 `config/cache/config/results.json`、`output/all.yaml` 和 `output/base64.txt`，防抖导入，并周期兜底。`RESULTS_FILE` 可覆盖结果文件路径。来源批次按检测内容去重；同步游标持久化，仅在批次新增或修改时更新连接注册表，不在空闲时遍历全部批次。
 
-Qilan 来源在 `COMPOSE_FILE` 追加 `:compose.qilan.yaml`，设置 `QILAN_SESSION_HOST_FILE` 为宿主会话文件；挂载到来源服务，文件只含 session Cookie 值。可设置 `QILAN_REFRESH_INTERVAL_SECONDS`（默认 900，至少 60）、`QILAN_USER_AGENT`。非容器运行支持 `QILAN_SESSION` 或 `QILAN_SESSION_FILE`。`FEISHU_WEBHOOK_URL` 是可选的会话过期／恢复通知配置。Cookie 和节点凭据不进入公开 API。
+Qilan 来源在 `COMPOSE_FILE` 追加 `:compose.qilan.yaml`，设置 `QILAN_SESSION_HOST_FILE` 为宿主会话文件；挂载到唯一的采集服务 `source-ingest`，文件只含 session Cookie 值。该 overlay 默认启用 `qilan` 来源；若显式设置了 `SOURCE_PROVIDERS`，需将 `qilan` 加入列表。可设置 `QILAN_REFRESH_INTERVAL_SECONDS`（默认 900，至少 60）、`QILAN_USER_AGENT`。非容器运行支持 `QILAN_SESSION` 或 `QILAN_SESSION_FILE`。`FEISHU_WEBHOOK_URL` 是可选的会话过期／恢复通知配置。Cookie 和节点凭据不进入公开 API。
 
 历史快照保存完整 `rawConfig` 或分享链接，作为后续检测的连接依据。同一连接跨批次按配置身份合并，当前连通性、出口和 IP 属性按身份保存；页面每次请求直接关联这些当前记录，在 SQL 中筛选、排序和分页，不读取来源批次的完整内容。数据库备份包含连接凭据，按私有订阅管理。
 

@@ -2,6 +2,7 @@
 services:
   source-ingest:
     environment:
+      SOURCE_PROVIDERS: ${SOURCE_PROVIDERS:-subs-check,qilan,proxio-all,Jakee-http,xyzs996-all}
       QILAN_SESSION_FILE: /run/secrets/qilan-session.txt
       QILAN_REFRESH_INTERVAL_SECONDS: ${QILAN_REFRESH_INTERVAL_SECONDS:-900}
       QILAN_USER_AGENT: ${QILAN_USER_AGENT:-Mozilla/5.0}

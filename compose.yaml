@@ -73,14 +73,6 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 60s
-  source-qilan:
-    <<: *app
-    command: [node-worker, -role, source]
-    environment:
-      <<: *environment
-      SOURCE_PROVIDERS: qilan
-      QILAN_SESSION: ${QILAN_SESSION:-}
-      QILAN_SESSION_FILE: /data/qilan/session.txt
   exit-provision:
     <<: *worker
     command: [node-worker, -role, exit-provision]
