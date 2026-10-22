@@ -49,6 +49,7 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 		return fmt.Errorf("Mihomo controller already owned")
 	}
 	m := transport.NewManager(instance)
+	m.ExitConcurrency = Number("MIHOMO_EXIT_CONCURRENCY", 8)
 	sweeps := newSweepRunner(Seconds("SWEEP_INTERVAL_SECONDS", 1800))
 	defer sweeps.stop()
 	server := &http.Server{Addr: Env("MIHOMO_MANAGER_LISTEN", ":9080"), Handler: m.Handler(apiToken), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}

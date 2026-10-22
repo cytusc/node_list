@@ -77,14 +77,15 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	if normal && j.Payload.Action == "" {
 		// P1-3 shortcut: a recent failed fast delay probe is fresher than any
 		// proof this assessment could produce; finish without manager traffic.
-		// Failure covers both recorded shapes: the genuine !success delay
-		// result and the abnormal environment row (no success key at all).
+		// Infrastructure errors carry no node verdict and must not count
+		// as a failed assessment or trigger long node-level backoff.
 		var failed bool
 		if err = r.Repo.Pool.QueryRow(ctx, `SELECT EXISTS(
 		 SELECT 1 FROM node_explorer_fast_results f JOIN node_explorer_node_registry n USING(identity)
 		 WHERE f.identity=$2 AND n.incarnation=$3 AND n.available
 		   AND f.checked_at>now()-$1::interval
-		   AND NOT coalesce((f.payload->>'success')::boolean,false))`,
+		   AND f.payload->>'success'='false'
+	   AND NOT coalesce((f.payload->>'abnormal')::boolean,false))`,
 			recentFastFailureSkipWindow, t.Identity, t.Incarnation).Scan(&failed); err != nil {
 			return err
 		}

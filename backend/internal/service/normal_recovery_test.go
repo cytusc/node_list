@@ -619,7 +619,7 @@ func TestNormalRecoverySkipsWhenFastProbeRecentlyFailed(t *testing.T) {
 		skipTail bool // second state path (browser-fingerprint sponsor)
 	}{
 		{"genuine failure", `{"success":false,"delay":0,"checkedAt":"2025-01-01T00:00:00Z"}`, 10 * time.Minute, true, false},
-		{"abnormal environment", `{"checkedAt":"2025-01-01T00:00:00Z","abnormal":true}`, 10 * time.Minute, true, false},
+		{"abnormal environment", `{"checkedAt":"2025-01-01T00:00:00Z","abnormal":true}`, 10 * time.Minute, false, false},
 		{"stale failure outside window", `{"success":false,"delay":0,"checkedAt":"2025-01-01T00:00:00Z"}`, 2 * time.Hour, false, false},
 		{"recent success", `{"success":true,"delay":120,"checkedAt":"2025-01-01T00:00:00Z"}`, 10 * time.Minute, false, false},
 	}

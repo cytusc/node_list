@@ -79,6 +79,7 @@ type Config struct {
 	Timeout, RetryDelay                 time.Duration
 	ScheduleInterval                    time.Duration
 	HighConcurrency, NormalConcurrency  int
+	ExitConcurrency                     int
 	// LaneConcurrency overrides the consumer count per work kind. Slow lanes
 	// (risk, attributes, lifecycle, recovery) default to one so raising a
 	// count stays an explicit operational choice.
@@ -130,11 +131,12 @@ func ConfigFromEnv(role string) (Config, error) {
 		c.HighRouter = transport.NewRouter(&transport.ManagedEngine{Manager: c.Manager, Kind: kind, High: true})
 		c.NormalRouter = transport.NewRouter(&transport.ManagedEngine{Manager: c.Manager, Kind: kind})
 		if role == "exit-provision" {
-			c.HighConcurrency = 8
-			c.NormalConcurrency = 8
+			c.ExitConcurrency = Number("MIHOMO_EXIT_CONCURRENCY", 8)
+			c.HighConcurrency = Number("IP_SERVICE_HIGH_CONCURRENCY", 8)
+			c.NormalConcurrency = Number("IP_SERVICE_NORMAL_CONCURRENCY", 8)
 		}
 		if role == "exit-attributes" {
-			c.LaneConcurrency[KindRisk] = 2
+			c.LaneConcurrency[KindRisk] = Number("IP_SERVICE_RISK_CONCURRENCY", Number("RISK_CONCURRENCY", 2))
 		}
 		return c, nil
 	}

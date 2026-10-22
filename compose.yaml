@@ -9,6 +9,7 @@ x-environment: &environment
   REDIS_URL: redis://task-redis:6379/0
   REDIS_NAMESPACE: ${REDIS_NAMESPACE:-node-explorer}
   NORMAL_INTERVAL_SECONDS: ${NORMAL_INTERVAL_SECONDS:-1800}
+  MIHOMO_EXIT_CONCURRENCY: ${MIHOMO_EXIT_CONCURRENCY:-8}
   MIHOMO_MANAGER_URL: http://mihomo-manager:9080
   MIHOMO_MANAGER_TOKEN: ${MIHOMO_MANAGER_TOKEN:?Set MIHOMO_MANAGER_TOKEN in .env}
   # Validation mode suppresses automatic retirement, restore and physical deletion.
@@ -78,8 +79,8 @@ services:
     command: [node-worker, -role, exit-provision]
     environment:
       <<: *environment
-      IP_SERVICE_HIGH_CONCURRENCY: ${EXIT_PROVISION_HIGH_CONCURRENCY:-4}
-      IP_SERVICE_NORMAL_CONCURRENCY: ${EXIT_PROVISION_NORMAL_CONCURRENCY:-4}
+      IP_SERVICE_HIGH_CONCURRENCY: ${EXIT_PROVISION_HIGH_CONCURRENCY:-8}
+      IP_SERVICE_NORMAL_CONCURRENCY: ${EXIT_PROVISION_NORMAL_CONCURRENCY:-8}
     depends_on:
       task-redis: { condition: service_healthy }
       mihomo-manager: { condition: service_healthy }

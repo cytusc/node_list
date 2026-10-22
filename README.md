@@ -115,3 +115,11 @@ bash deploy/ip-type-clean.sh --query-proxy http://audit-proxy:7890 --apply # 全
 默认不写数据库；`--apply` 在每个 IP 的事务中锁定当前记录，先将原始 JSON 备份至 `node_explorer_ip_type_clean_backup`（按运行 ID、批次、节点索引唯一），再仅更新 `classification` 和 `attributes`。保留节点、检测时间、风险分数、真实出口及其他字段，避免覆盖并发采集结果。失败重跑会重新读取当前数据，数据库互斥锁阻止两个清洗任务同时运行。JSONL 报告记录每个 IP 的证据、来源缺失和更新数量；终端出现 `COMPLETE` 才表示该次全量处理结束。主标签采用独立来源票数最多的类型；最高票并列时，仅在并列项中按住宅 IP、商业宽带的顺序优先判定，其余平票判为机房 IP，全部弃权时显示“类型未知”，各来源原始类型保留在明细中。
 
 节点七天失效清理与可用时间记录：[NODE_CLEANUP.md](NODE_CLEANUP.md)。
+
+### 队列容量与并发
+
+`MIHOMO_EXIT_CONCURRENCY` 控制出口总执行容量（默认 8，范围 1–64），Compose 将同一值传给 manager 和出口 worker。`EXIT_PROVISION_HIGH_CONCURRENCY`、`EXIT_PROVISION_NORMAL_CONCURRENCY` 控制两个优先级通道的消费者上限（各默认 8）；两个通道在领取任务前共享总容量，空闲通道不占用容量，等待中的消费者按先后顺序获得空位。非 Compose 启动时，消费者参数名为 `IP_SERVICE_HIGH_CONCURRENCY`、`IP_SERVICE_NORMAL_CONCURRENCY`，并需保持 manager 与 worker 的总容量配置一致。
+
+容量不足会触发按任务池共享的指数退避（带随机抖动，上限 30 秒），已领取任务延后 5–10 秒重新入队。出口池拥塞不会阻塞其他池，也不会阻止已有租约校验和释放。`NORMAL_RECOVERY_CONCURRENCY` 同时限制普通恢复消费者和包括等待前置检测在内的在途评估，不再强制扩大到 128；升级前已开始的评估仍继续完成。基础设施异常不作为节点探测失败触发长期退避。
+
+调优时先观察实际完成量、到期任务的最长等待时间、容量拒绝和 CPU 限流，再小幅提高总容量及消费者上限。排队数量包含未来复验任务，退避导致到期数量减少也不等于任务完成。

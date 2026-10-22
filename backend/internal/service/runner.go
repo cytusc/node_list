@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/cytusc/node_list/backend/internal/transport"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/semaphore"
 )
 
 type Runner struct {
@@ -26,6 +28,7 @@ type Runner struct {
 	Config         Config
 	Classification *ipcheck.Client
 	asnCache       *collector.ASNCache
+	exitSlots      *semaphore.Weighted
 }
 
 func (r *Runner) kinds() []string {
@@ -76,10 +79,7 @@ func (r *Runner) Run(ctx context.Context) error {
 func (r *Runner) run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	r.Repo.NormalRecoveryConcurrency = r.laneCount(KindNormalRecovery, false)
-	if r.Config.Manager != nil {
-		r.Repo.NormalRecoveryConcurrency = 128
-	}
+	r.configureAdmission()
 	kinds := r.kinds()
 	if len(kinds) == 0 {
 		return fmt.Errorf("unknown worker role")
@@ -241,13 +241,8 @@ func (r *Runner) consume(ctx context.Context, kind string, high bool) {
 	timer.Stop()
 	defer timer.Stop()
 	for ctx.Err() == nil {
-		if r.Config.Manager != nil {
-			if err := r.Config.Manager.WaitReady(ctx); err != nil {
-				return
-			}
-		}
-		ref, err := r.Queue.Pop(ctx, kind, high)
-		if err != nil || ref == "" {
+		j, release, err := r.nextJob(ctx, kind, high)
+		if err != nil || j == nil {
 			timer.Reset(idleDelay)
 			select {
 			case <-ctx.Done():
@@ -258,39 +253,40 @@ func (r *Runner) consume(ctx context.Context, kind string, high bool) {
 			continue
 		}
 		idleDelay = 250 * time.Millisecond
-		j, err := r.Repo.Claim(ctx, kind, ref, high)
-		if err != nil || j == nil {
-			continue
-		}
-		taskCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		err = r.handle(taskCtx, *j, high)
-		cancel()
-		if err == nil || errors.Is(err, ErrLeaseLost) {
-			continue
-		}
-		delay := time.Duration(min(j.Attempts, 30)) * 10 * time.Second
-		message := "检测暂时失败，等待重试"
-		var pending waiting
-		if errors.Is(err, transport.ErrConfigRejected) {
-			delay = 6 * time.Hour
-			message = configRejectedMessage() + ": " + transport.ConfigRejectionCode(err)
-			log.Printf("%s: task %s: %s; retry in %s", kind, ref, taskFailureReason(err), delay)
-		} else if errors.Is(err, transport.ErrManagerBusy) {
-			delay = time.Second
-			message = "等待内核执行容量"
-		} else if errors.As(err, &pending) {
-			delay = pending.delay
-			message = "等待前置检测结果"
-		} else {
-			message += ": " + taskFailureReason(err)
-			log.Printf("%s: task %s failed: %s; retry in %s", kind, ref, taskFailureReason(err), delay)
-		}
-		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		if retryErr := r.Repo.Retry(cleanup, *j, delay, message); retryErr != nil {
-			log.Printf("%s: task %s retry persistence failed: %s", kind, ref, taskFailureReason(retryErr))
-		}
-		stop()
+		r.executeJob(ctx, *j, high, release)
 	}
+}
+
+func (r *Runner) executeJob(ctx context.Context, j Job, high bool, release func()) {
+	defer release()
+	taskCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	err := r.handle(taskCtx, j, high)
+	cancel()
+	if err == nil || errors.Is(err, ErrLeaseLost) {
+		return
+	}
+	delay := time.Duration(min(j.Attempts, 30)) * 10 * time.Second
+	message := "检测暂时失败，等待重试"
+	var pending waiting
+	if errors.Is(err, transport.ErrConfigRejected) {
+		delay = 6 * time.Hour
+		message = configRejectedMessage() + ": " + transport.ConfigRejectionCode(err)
+		log.Printf("%s: task %s: %s; retry in %s", j.Kind, j.Ref(), taskFailureReason(err), delay)
+	} else if errors.Is(err, transport.ErrManagerBusy) {
+		delay = 5*time.Second + time.Duration(rand.Int64N(int64(5*time.Second)))
+		message = "等待内核执行容量"
+	} else if errors.As(err, &pending) {
+		delay = pending.delay
+		message = "等待前置检测结果"
+	} else {
+		message += ": " + taskFailureReason(err)
+		log.Printf("%s: task %s failed: %s; retry in %s", j.Kind, j.Ref(), taskFailureReason(err), delay)
+	}
+	cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	if retryErr := r.Repo.Retry(cleanup, j, delay, message); retryErr != nil {
+		log.Printf("%s: task %s retry persistence failed: %s", j.Kind, j.Ref(), taskFailureReason(retryErr))
+	}
+	stop()
 }
 
 func (r *Runner) handle(ctx context.Context, j Job, high bool) error {

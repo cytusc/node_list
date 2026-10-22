@@ -122,7 +122,9 @@ type ManagerStats struct {
 // Manager is the sole controller writer. Leases fence reloads and are never renewed.
 // The owner must terminate it immediately upon losing the DB ownership session.
 type Manager struct {
-	Instance                      MihomoConfig
+	Instance MihomoConfig
+	// ExitConcurrency is configured before serving requests.
+	ExitConcurrency               int
 	mu                            sync.Mutex
 	entries                       map[string]RegistryEntry
 	rejected                      map[string]string
@@ -141,7 +143,7 @@ type Manager struct {
 }
 
 func NewManager(instance MihomoConfig) *Manager {
-	return &Manager{Instance: instance, epoch: token(), entries: map[string]RegistryEntry{}, rejected: map[string]string{}, credentials: map[string]string{}, leases: map[string]Lease{}, delaying: map[string]bool{}}
+	return &Manager{Instance: instance, ExitConcurrency: 8, epoch: token(), entries: map[string]RegistryEntry{}, rejected: map[string]string{}, credentials: map[string]string{}, leases: map[string]Lease{}, delaying: map[string]bool{}}
 }
 func (m *Manager) prune() {
 	for id, l := range m.leases {
@@ -411,6 +413,9 @@ func (m *Manager) Acquire(req LeaseRequest) (Lease, error) {
 		return Lease{}, errors.New("manager unavailable")
 	}
 	limit := map[string]int{"strict": 8, "exit": 8, "risk": 2, "delay": 32, "proof": 128}[req.Kind]
+	if req.Kind == "exit" && m.ExitConcurrency > 0 {
+		limit = m.ExitConcurrency
+	}
 	if limit == 0 || len(req.Targets) == 0 || len(req.Targets) > 2 {
 		return Lease{}, errors.New("invalid lease request")
 	}

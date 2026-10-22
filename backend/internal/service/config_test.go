@@ -66,3 +66,33 @@ func TestNormalRecoveryConcurrencyOverride(t *testing.T) {
 		})
 	}
 }
+
+func TestManagedConcurrencyHonorsConfiguration(t *testing.T) {
+	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
+	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
+	t.Setenv("MIHOMO_EXIT_CONCURRENCY", "12")
+	t.Setenv("IP_SERVICE_HIGH_CONCURRENCY", "3")
+	t.Setenv("IP_SERVICE_NORMAL_CONCURRENCY", "9")
+	t.Setenv("IP_SERVICE_RISK_CONCURRENCY", "1")
+	t.Setenv("NORMAL_RECOVERY_CONCURRENCY", "4")
+	cfg, err := ConfigFromEnv("exit-provision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HighConcurrency != 3 || cfg.NormalConcurrency != 9 || cfg.ExitConcurrency != 12 {
+		t.Fatalf("managed exit overrides lost: %+v", cfg)
+	}
+	cfg, err = ConfigFromEnv("exit-attributes")
+	if err != nil || cfg.LaneConcurrency[KindRisk] != 1 {
+		t.Fatalf("risk override: %+v %v", cfg, err)
+	}
+	cfg, err = ConfigFromEnv("recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := Runner{Config: cfg, Repo: &Repository{}}
+	r.configureAdmission()
+	if r.Repo.normalRecoveryLimit() != 4 {
+		t.Fatal("managed assessments ignore configured bound")
+	}
+}

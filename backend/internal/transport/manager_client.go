@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ type ManagerClient struct {
 	URL, Token string
 	mu         sync.Mutex
 	retryAt    time.Time
+	capacity   map[string]capacityCooldown
 }
 
 // All lanes in a worker share the outage cooldown. Wait before claiming work
@@ -45,6 +47,66 @@ func (c *ManagerClient) WaitReady(ctx context.Context) error {
 	}
 }
 
+// Busy is scoped to a pool: saturated exit probes must not pause proof
+// validation, risk probes, or lease release. The map is protected by mu.
+type capacityCooldown struct {
+	retryAt  time.Time
+	failures int
+}
+
+func (c *ManagerClient) WaitCapacity(ctx context.Context, kind string) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		delay := time.Until(c.capacity[kind].retryAt)
+		c.mu.Unlock()
+		if delay <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (c *ManagerClient) pauseCapacity(kind string) {
+	if kind == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.capacity == nil {
+		c.capacity = make(map[string]capacityCooldown)
+	}
+	state := c.capacity[kind]
+	// Responses already in flight belong to the same failed wave. They must
+	// not compound the delay or keep pushing its deadline into the future.
+	if time.Now().Before(state.retryAt) {
+		return
+	}
+	state.failures = min(state.failures+1, 5)
+	ceiling := min(2*time.Second<<(state.failures-1), 30*time.Second)
+	delay := ceiling/2 + time.Duration(rand.Int64N(int64(ceiling/2)))
+	state.retryAt = time.Now().Add(delay)
+	c.capacity[kind] = state
+}
+
+func (c *ManagerClient) capacitySuccess(kind string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	state := c.capacity[kind]
+	state.failures = 0
+	if c.capacity != nil {
+		c.capacity[kind] = state
+	}
+}
+
 func (c *ManagerClient) pause() {
 	c.mu.Lock()
 	c.retryAt = time.Now().Add(2 * time.Second)
@@ -63,6 +125,24 @@ func (c *ManagerClient) call(ctx context.Context, method, path string, in, out a
 	// Release must remain available during outages so reload can drain leases.
 	if method != http.MethodDelete {
 		if err := c.WaitReady(ctx); err != nil {
+			return err
+		}
+	}
+	// Only admission calls wait on busy; existing leases must be able to
+	// validate and finish so that capacity becomes available.
+	capacityKind := ""
+	if method == http.MethodPost {
+		if path == "/v1/delay" {
+			capacityKind = "delay"
+		}
+		if path == "/v1/leases" {
+			if lease, ok := in.(LeaseRequest); ok {
+				capacityKind = lease.Kind
+			}
+		}
+	}
+	if capacityKind != "" {
+		if err := c.WaitCapacity(ctx, capacityKind); err != nil {
 			return err
 		}
 	}
@@ -89,6 +169,7 @@ func (c *ManagerClient) call(ctx context.Context, method, path string, in, out a
 		c.pause()
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
+		c.pauseCapacity(capacityKind)
 		return ErrManagerBusy
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -104,6 +185,9 @@ func (c *ManagerClient) call(ctx context.Context, method, path string, in, out a
 			return ErrConfigChanged
 		}
 		return &ManagerHTTPError{Status: resp.StatusCode}
+	}
+	if capacityKind != "" {
+		c.capacitySuccess(capacityKind)
 	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
