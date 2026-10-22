@@ -64,6 +64,16 @@ IPPure 人机比例接口明确返回空数据时记为“暂无数据”，6 �
 
 首页展示保留期内所有未退役连接。PostgreSQL 默认保留 7 天快照，`SNAPSHOT_RETENTION_DAYS` 设为负值禁用自动清理；没有有效源快照的连接不会被恢复。人工退役由维护操作写入 `node_explorer_retired_nodes`；自动恢复只匹配已知的自动退役原因和原退役时间。
 
+新增公共代理来源默认由 `source-ingest` 每 30 分钟拉取，启动时立即同步：
+
+| 来源标签 | 上游项目 | 导入范围 |
+| --- | --- | --- |
+| `proxio-all` | [proxio.io / proxy-list](https://github.com/proxio-io/proxy-list) | `all.json` 中的 HTTP、CONNECT、SOCKS5 |
+| `Jakee-http` | [Jakee8718 / Free-Proxies](https://github.com/Jakee8718/Free-Proxies) | `proxy/http.txt` |
+| `xyzs996-all` | [xyzs996 / free-proxy-health-list](https://github.com/xyzs996/free-proxy-health-list) | `proxies/all/data.json` 中的 HTTP、CONNECT、SOCKS5 |
+
+可通过 `SOURCE_PROVIDERS` 选择来源（Compose 默认 `subs-check,proxio-all,Jakee-http,xyzs996-all`），通过 `PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS` 调整周期（默认 1800，小于 60 时回退默认值）。修改后重建来源服务。来源名称写入节点的 `subTag`，同一来源内去重；跨来源连接沿用注册表的连接合并规则。JSON 保留协议信息，避免把无协议的 `all.txt` 误当 HTTP。上游的 HTTPS 表示 HTTP CONNECT，导入配置不启用代理端 TLS；SOCKS4 当前检测内核不支持，跳过。上游地区仅作声明保存，不使用上游住宅标签或服务器 IP 代替本系统的出口检测和 IP 分类。请求失败、数据格式错误或空列表时不写入新快照，其他来源继续运行。这里导入完整支持列表，不按“亚太家园”数量或地区筛选；实际可用及住宅数量以本系统检测为准。proxio 数据由 [proxio.io](https://proxio.io) 提供，采用 CC BY 4.0。
+
 ## 调度与展示
 
 全量巡检通过共享 Mihomo 检查 GitHub 连通性并保存当前状态；严格复核另有宿主直连和参考代理对照。自动退役要求跨周期连续失败及有效代际证据。出口服务独立读取出口，按真实出口 IP 合并属性查询，不使用节点服务器地址替代出口。

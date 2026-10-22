@@ -59,7 +59,8 @@ services:
     command: [node-worker, -role, source]
     environment:
       <<: *environment
-      SOURCE_PROVIDERS: subs-check
+      SOURCE_PROVIDERS: ${SOURCE_PROVIDERS:-subs-check,proxio-all,Jakee-http,xyzs996-all}
+      PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS: ${PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS:-1800}
       SUBS_CHECK_DIR: /data/sub
     volumes:
       - type: bind

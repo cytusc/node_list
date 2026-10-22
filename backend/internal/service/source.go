@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cytusc/node_list/backend/internal/publicproxy"
 	"github.com/cytusc/node_list/backend/internal/qilan"
 	"github.com/cytusc/node_list/backend/internal/source"
 	"github.com/cytusc/node_list/backend/internal/store"
@@ -58,7 +59,7 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 	}
 	_ = ingest(ctx)
 	enabled := map[string]bool{}
-	for _, name := range strings.Split(Env("SOURCE_PROVIDERS", "subs-check,qilan"), ",") {
+	for _, name := range strings.Split(Env("SOURCE_PROVIDERS", "subs-check,qilan,proxio-all,Jakee-http,xyzs996-all"), ",") {
 		enabled[strings.TrimSpace(name)] = true
 	}
 	var watcher *source.Watcher
@@ -72,6 +73,11 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 		if _, err := os.Stat(sessionFile); os.Getenv("QILAN_SESSION") != "" || err == nil {
 			q := qilan.NewSource(st, ingestor, qilan.SourceConfig{Session: os.Getenv("QILAN_SESSION"), SessionFile: sessionFile, UserAgent: Env("QILAN_USER_AGENT", "Mozilla/5.0"), Interval: Seconds("QILAN_REFRESH_INTERVAL_SECONDS", 900), Webhook: os.Getenv("FEISHU_WEBHOOK_URL")})
 			providers = append(providers, &qilanProvider{q})
+		}
+	}
+	for _, def := range publicproxy.Definitions() {
+		if enabled[def.Name] {
+			providers = append(providers, publicproxy.New(def, ingestor, Seconds("PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS", 1800)))
 		}
 	}
 	for _, p := range providers {
