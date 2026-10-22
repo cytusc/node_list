@@ -134,3 +134,9 @@ BEGIN
   END IF;
 END $$;
 INSERT INTO node_explorer_service_migrations(version) VALUES (7) ON CONFLICT DO NOTHING;
+
+-- Recovery proofs expire quickly; find their queued exit dependencies without
+-- sorting the periodic exit backlog. Claim retains all normal lease fences.
+CREATE INDEX IF NOT EXISTS node_explorer_work_recovery_exit
+ ON node_explorer_work ((priority>0),due_at,id)
+ WHERE kind='exit' AND state='queued' AND payload->>'session' LIKE 'recovery:%';

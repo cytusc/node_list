@@ -85,16 +85,38 @@ func (r *Runner) fast(ctx context.Context, j Job, high bool) error {
 	})
 }
 
-// Capacity time is persisted after obtaining a proof or strict execution lease.
-// Queue time (including exit backpressure) cannot consume the assessment deadline.
-func (r *Runner) assessmentExpired(ctx context.Context, session string, legacy time.Time) (bool, error) {
+// A proof keeps its three-minute freshness budget. Before any proof exists,
+// bound the whole wait too: legacy done-without-result dependencies otherwise
+// hold an assessment slot forever.
+const assessmentQueueTimeout = 10 * time.Minute
+
+func (r *Runner) assessmentTimeout(ctx context.Context, session string, started time.Time) (string, error) {
 	if r.Config.Manager == nil {
-		return time.Since(legacy) > 3*time.Minute, nil
+		if time.Since(started) > 3*time.Minute {
+			return "timed-out", nil
+		}
+		return "", nil
 	}
 	var stamp *time.Time
 	err := r.Repo.Pool.QueryRow(ctx, `SELECT min((payload->>'capacityAt')::timestamptz) FROM node_explorer_work
  WHERE payload->>'session'=$1 AND kind IN ($2,$3) AND payload ? 'capacityAt'`, session, KindLive, KindFast).Scan(&stamp)
-	return stamp != nil && time.Since(*stamp) > 3*time.Minute, err
+	if err != nil {
+		return "", err
+	}
+	if stamp != nil && time.Since(*stamp) > 3*time.Minute {
+		return "timed-out", nil
+	}
+	if stamp == nil && !started.IsZero() && time.Since(started) > assessmentQueueTimeout {
+		return "capacity-timeout", nil
+	}
+	return "", nil
+}
+
+func (r *Runner) assessmentExpired(ctx context.Context, session string, started time.Time) (bool, error) {
+	reason, err := r.assessmentTimeout(ctx, session, started)
+	// Cleanup retains its proof deadline; capacity waiting only triggers a
+	// recovery retry, never a cleanup failure.
+	return reason == "timed-out", err
 }
 
 func validatePaths(ctx context.Context, tx pgx.Tx, paths map[string]*transport.Outbound) error {

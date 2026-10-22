@@ -29,6 +29,7 @@ type Runner struct {
 	Classification *ipcheck.Client
 	asnCache       *collector.ASNCache
 	exitSlots      *semaphore.Weighted
+	recoveryExits  [2]recoveryExitAdmission
 }
 
 func (r *Runner) kinds() []string {

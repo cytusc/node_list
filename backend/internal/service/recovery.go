@@ -48,6 +48,13 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	}
 	finish := func(result, ip string) error {
 		return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+			// Stop queued dependencies of a completed round; running tasks
+			// retain their lease fences and may finish normally.
+			session := "recovery:" + j.Ref()
+			if _, err := tx.Exec(ctx, `UPDATE node_explorer_work SET state='done',error='assessment finished'
+              WHERE kind IN ('fast-delay','connectivity','exit') AND key=ANY($1::text[]) AND state='queued'`, []string{session, session + ":verify"}); err != nil {
+				return err
+			}
 			return recordRecoveryResult(ctx, tx, j, result, ip)
 		})
 	}
@@ -66,12 +73,12 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 			return finish("skipped-datacenter-asn", previous.IP)
 		}
 	}
-	expired, err := r.assessmentExpired(ctx, "recovery:"+j.Ref(), j.Payload.StartedAt)
+	timeout, err := r.assessmentTimeout(ctx, "recovery:"+j.Ref(), j.Payload.StartedAt)
 	if err != nil {
 		return err
 	}
-	if expired {
-		return finish("timed-out", "")
+	if timeout != "" {
+		return finish(timeout, "")
 	}
 
 	if normal && j.Payload.Action == "" {
@@ -95,6 +102,7 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	}
 	session := "recovery:" + j.Ref()
 	p := j.Payload
+	p.Incarnation = t.Incarnation
 	p.RecoveryMode = ""
 	if normal {
 		p.RecoveryMode = "normal"
@@ -112,7 +120,7 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	}
 	err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
 		for _, kind := range kinds {
-			if e := once(ctx, tx, kind, session, p, j.Priority); e != nil {
+			if e := ensureRecoveryProbe(ctx, tx, kind, session, p, j.Priority); e != nil {
 				return e
 			}
 		}
@@ -157,7 +165,7 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 			return finish("probe-failed", "")
 		}
 		if err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
-			return once(ctx, tx, KindExit, session, p, j.Priority)
+			return ensureRecoveryProbe(ctx, tx, KindExit, session, p, j.Priority)
 		}); err != nil {
 			return err
 		}
@@ -205,7 +213,7 @@ func (r *Runner) recovery(ctx context.Context, j Job) error {
 	}
 	p.Session = session + ":verify"
 	p.ExpectedIP = exit.IP
-	if err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error { return once(ctx, tx, KindExit, p.Session, p, j.Priority) }); err != nil {
+	if err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error { return ensureRecoveryProbe(ctx, tx, KindExit, p.Session, p, j.Priority) }); err != nil {
 		return err
 	}
 	var final domain.ExitState
@@ -269,7 +277,7 @@ func recordRecoveryResult(ctx context.Context, tx pgx.Tx, j Job, result, ip stri
 	_, err = tx.Exec(ctx, `UPDATE node_explorer_work SET payload=(payload-'startedAt') ||
 	 jsonb_build_object('recoveryResult',$2::text,'checkedAt',$3::text,'ip',$4::text,
 	 'recoveryAttempts',$5::integer,'recoveryHistory',$6::jsonb) WHERE id=$1`,
-		j.ID, result, stamp, ip, attempts+1, raw)
+		j.ID, result, stamp, ip, attempts+recoveryAttemptIncrement(result), raw)
 	return err
 }
 
@@ -404,4 +412,30 @@ func (r *Runner) lifecycle(ctx context.Context, j Job) error {
 		_, e = tx.Exec(ctx, `INSERT INTO node_explorer_lifecycle_events(identity,action,dry_run,reason) VALUES($1,$2,$3,$4)`, j.Payload.Identity, j.Payload.Action, r.Config.DryRun, reason)
 		return e
 	})
+}
+
+// Infrastructure waiting must not increase the node-failure backoff ladder.
+func recoveryAttemptIncrement(result string) int {
+	if result == "capacity-timeout" {
+		return 0
+	}
+	return 1
+}
+
+// Legacy or interrupted work may be done without the corresponding proof.
+// Repair only that case. Existing results, active leases and delayed retries
+// remain untouched; a new generation fences any stale Redis delivery.
+func ensureRecoveryProbe(ctx context.Context, tx pgx.Tx, kind, key string, p Payload, priority int) error {
+	if err := once(ctx, tx, kind, key, p, priority); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE node_explorer_work w SET state='queued',generation=generation+1,
+ payload=$3,priority=$4,due_at=now(),attempts=0,error='',lease_token=NULL,lease_until=NULL
+ WHERE w.kind=$1 AND w.key=$2 AND w.state='done'
+ AND NOT EXISTS(SELECT 1 FROM node_explorer_probe_results r WHERE r.session=$2 AND r.kind=$1)`, kind, key, raw, priority)
+	return err
 }

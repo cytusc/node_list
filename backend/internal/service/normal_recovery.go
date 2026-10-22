@@ -40,6 +40,9 @@ func normalRecoveryFirstDue(identity, retiredAt string, now time.Time, interval 
 // out entirely instead of trusting an interval. normal_recovery.go and the
 // prefetch UPDATE below enforce that contract on persisted state.
 func retryIntervalFor(result string, attempts int, base time.Duration) time.Duration {
+	if result == "capacity-timeout" {
+		return time.Minute
+	}
 	if result == "config-rejected-dead" {
 		return time.Duration(1 << 62) // terminal result; scheduling is gated elsewhere
 	}
