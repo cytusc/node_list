@@ -84,7 +84,29 @@ func (r *Repository) Probe(ctx context.Context, session, kind string, out any) (
 	return true, json.Unmarshal(b, out)
 }
 
+// applyRisk copies the fields the risk probe owns. A successful answer replaces
+// exactly these and nothing else: the classification, the exit metadata and the
+// attempt counters belong to other writers sharing this row.
+func applyRisk(dst *domain.IPPureResult, src domain.IPPureResult) {
+	dst.Status = src.Status
+	dst.ASN, dst.Organization = src.ASN, src.Organization
+	dst.Country, dst.Source = src.Country, src.Source
+	dst.Attributes, dst.Score, dst.Label = src.Attributes, src.Score, src.Label
+	dst.HumanPercent, dst.BotPercent = src.HumanPercent, src.BotPercent
+	dst.TrafficRatioStatus, dst.TrafficRatioError = src.TrafficRatioStatus, src.TrafficRatioError
+	dst.QueryMode = src.QueryMode
+	dst.FailureStage, dst.Error = src.FailureStage, src.Error
+}
+
 // mergeAttributes serializes independent classification/risk writes for one IP.
+//
+// Two writers share this row and neither may erase the other's result. A failed
+// lookup describes the attempt, not the address: it moves the attempt marker
+// and leaves the last verdict, its evidence and its timestamps exactly as the
+// successful query left them. Overwriting them turned one refused refresh into
+// permanent data loss — the evidence that made an address residential was
+// replaced by a "request-failed" row, the verdict fell back to unknown, and the
+// exit list, which only publishes residential nodes, dropped the node.
 func mergeAttributes(ctx context.Context, tx pgx.Tx, ip string, evidence []ipcheck.Evidence, verdict *domain.IPPureResult) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext($1))`, "attributes:"+ip); err != nil {
 		return err
@@ -100,34 +122,37 @@ func mergeAttributes(ctx context.Context, tx pgx.Tx, ip string, evidence []ipche
 			return err
 		}
 	}
+	now := time.Now().UTC()
+	stamp := now.Format(time.RFC3339Nano)
+	// Evidence accumulates: the stored rows are the only copy of what the
+	// sources said last time they answered, so a new observation is added to
+	// them instead of replacing them. Score keeps one answer and one attempt per
+	// provider, which bounds the payload without discarding the answer.
 	all := evidence
 	if v.Classification != nil {
 		all = append(append([]ipcheck.Evidence{}, v.Classification.Evidence...), all...)
 	}
 	if verdict != nil {
-		if verdict.Status == "success" {
-			v = *verdict
-		} else if v.Status != "success" {
-			v.Error = verdict.Error
-			v.FailureStage = verdict.FailureStage
+		switch {
+		case verdict.Status == "success":
+			applyRisk(&v, *verdict)
+			v.CheckedAt, v.TrafficRatioCheckedAt, v.RiskQueryCheckedAt = stamp, stamp, stamp
+			v.RiskQueryStatus, v.RiskQueryError = "success", ""
+		case v.Status != "success":
+			// Nothing has ever succeeded for this address, so the failure is
+			// the whole record.
+			v.Error, v.FailureStage = verdict.Error, verdict.FailureStage
+			v.CheckedAt, v.RiskQueryStatus, v.RiskQueryError = stamp, verdict.RiskQueryStatus, verdict.RiskQueryError
+		default:
+			// A verdict is already stored. Keep its status, values and
+			// timestamp; record only that another attempt just failed.
+			v.RiskQueryError = verdict.RiskQueryError
 		}
-	}
-	now := time.Now().UTC()
-	if verdict != nil {
-		v.RiskQueryStatus = verdict.RiskQueryStatus
-		v.RiskQueryError = verdict.RiskQueryError
-		v.RiskQueryCheckedAt = now.Format(time.RFC3339Nano)
+		v.RiskQueryAttemptAt = stamp
 	}
 	votes := ipcheck.Score(ip, all, now)
 	v.Classification = &votes
 	v.Attributes = votes.Attributes(v.Attributes)
-	// Classification refreshes must not refresh the timestamp of an old risk score.
-	if verdict != nil && (verdict.Status == "success" || v.Status != "success") {
-		v.CheckedAt = now.Format(time.RFC3339Nano)
-	}
-	if verdict != nil && verdict.Status == "success" {
-		v.TrafficRatioCheckedAt = now.Format(time.RFC3339Nano)
-	}
 	v.IP = ip
 	b, err = json.Marshal(v)
 	if err != nil {

@@ -83,6 +83,7 @@ type IPPureResult struct {
 	RiskQueryStatus       string   `json:"riskQueryStatus,omitempty"`
 	RiskQueryError        string   `json:"riskQueryError,omitempty"`
 	RiskQueryCheckedAt    string   `json:"riskQueryCheckedAt,omitempty"`
+	RiskQueryAttemptAt    string   `json:"riskQueryAttemptAt,omitempty"`
 	TrafficRatioCheckedAt string   `json:"trafficRatioCheckedAt,omitempty"`
 	Score                 float64  `json:"score,omitempty"`
 	Label                 string   `json:"label,omitempty"`

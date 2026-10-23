@@ -270,10 +270,17 @@ func missingTrafficRatio(attr domain.IPPureResult, now time.Time) bool {
 	if attr.Status != "success" {
 		return false
 	}
-	// A failed required query retains the last successful verdict. Its old
-	// ratio timestamp must not bypass the failed query's retry backoff.
-	if attr.RiskQueryStatus == "query-failed" {
-		if t, err := time.Parse(time.RFC3339Nano, attr.RiskQueryCheckedAt); err == nil && now.Sub(t) < trafficRatioErrorRetryInterval {
+	// A failed attempt retains the last successful verdict, so the stored ratio
+	// timestamp is older than the refusal. The backoff follows the attempt, not
+	// the verdict, or the backfill would be re-queued on every pass.
+	if attr.RiskQueryError != "" || attr.RiskQueryStatus == "query-failed" {
+		attempt := attr.RiskQueryAttemptAt
+		if attempt == "" {
+			// Rows written before the attempt marker existed only have the
+			// check time, which used to move on every attempt.
+			attempt = attr.RiskQueryCheckedAt
+		}
+		if t, err := time.Parse(time.RFC3339Nano, attempt); err == nil && now.Sub(t) < trafficRatioErrorRetryInterval {
 			return false
 		}
 	}
