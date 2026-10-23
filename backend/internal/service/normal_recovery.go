@@ -30,6 +30,20 @@ func normalRecoveryFirstDue(identity, retiredAt string, now time.Time, interval 
 	return due.Add(time.Duration(hash.Sum64() % uint64(spread)))
 }
 
+// spreadDue offsets a re-queued job by up to a quarter of its interval, keyed by
+// the job key so the same job always lands in the same slot. The tiered backoff
+// tops out at a day, so every node that exhausted its attempts on the same pass
+// lands on the same second: 38k retired nodes produced an 11.9k/hour spike
+// against a 3.6k/hour exit lane. Spreading keeps the queue a stream.
+func spreadDue(due time.Time, key string, interval time.Duration) time.Time {
+	if interval <= time.Second {
+		return due
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(key))
+	return due.Add(time.Duration(hash.Sum64() % uint64(interval/4)))
+}
+
 // retryIntervalFor decides how long a completed assessment must wait before its
 // next attempt. The first repeat waits one base interval; every further
 // recorded failure multiplies it by six up to a daily ceiling, so a node whose
@@ -68,8 +82,15 @@ func (r *Runner) scheduleNormalRecovery(ctx context.Context) error {
 	// replace a running assessment or its session/generation proofs. Jobs past
 	// their first attempt carry a tiered deadline that may legitimately exceed
 	// one interval, so only fresh failures are eligible for an early advance.
+	//
+	// Retired-at plus a fixed interval puts every node retired in the same wave
+	// on the same due second: 39k nodes collapsed into two hourly spikes and
+	// buried the exit lane for hours. The offset is a hash of the job key, so it
+	// is stable across ticks but spreads the queue over 0.6x–1.6x of the
+	// interval.
 	if _, err := r.Repo.Pool.Exec(ctx, `UPDATE node_explorer_work SET
-      due_at=greatest(now(),coalesce((payload->>'checkedAt')::timestamptz,(payload->>'retiredAt')::timestamptz)+$1::interval),
+      due_at=greatest(now(),coalesce((payload->>'checkedAt')::timestamptz,(payload->>'retiredAt')::timestamptz)
+        +$1::interval*(0.6+(abs(hashtext(key)::bigint)%100)::float8/100.0)),
       generation=generation+1
       WHERE kind='normal-recovery' AND state='queued' AND NOT(payload ? 'startedAt')
       AND coalesce(payload->>'recoveryResult','') NOT IN ('config-rejected','config-rejected-dead')
@@ -138,7 +159,8 @@ func (r *Runner) scheduleNormalRecovery(ctx context.Context) error {
 			// Keep the result/history and start fresh session proofs at the next
 			// interval. Repeated failures back off instead of re-queueing every
 			// interval unconditionally.
-			dueAt := stamp.Add(retryIntervalFor(c.payload.RecoveryResult, c.payload.RecoveryAttempts, interval))
+			wait := retryIntervalFor(c.payload.RecoveryResult, c.payload.RecoveryAttempts, interval)
+			dueAt := spreadDue(stamp.Add(wait), c.identity+":"+c.retiredAt, wait)
 			_, err = r.Repo.Pool.Exec(ctx, `UPDATE node_explorer_work w SET state='queued',generation=generation+1,
     due_at=$4,payload=payload-'startedAt',lease_token=NULL,lease_until=NULL,attempts=0,error=''
     WHERE id=$1 AND generation=$2 AND state='done' AND payload->>'checkedAt'=$3
