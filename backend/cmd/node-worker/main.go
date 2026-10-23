@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cytusc/node_list/backend/internal/ratelimit"
 	"github.com/cytusc/node_list/backend/internal/service"
 	"github.com/cytusc/node_list/backend/internal/store"
 	"github.com/cytusc/node_list/backend/internal/store/postgres"
@@ -63,5 +64,8 @@ func run() error {
 		return err
 	}
 	defer q.Close()
+	// Provider pacing is shared through the same Redis connection, so every
+	// replica draws from one GCRA clock instead of one row lock per call.
+	repo.Limiter = ratelimit.New(q.Client())
 	return (&service.Runner{Repo: repo, Queue: q, Config: c}).Run(ctx)
 }

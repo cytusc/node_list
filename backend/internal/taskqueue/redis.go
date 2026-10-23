@@ -100,3 +100,8 @@ func (q *Redis) Pop(ctx context.Context, kind string, high bool) (string, error)
 	return popDue.Run(ctx, q.client, []string{q.key(kind, high)}, time.Now().UnixMilli()).Text()
 }
 func (q *Redis) Close() error { return q.client.Close() }
+
+// Client exposes the shared connection so other infrastructure that needs the
+// same Redis (provider rate limiting) reuses it instead of opening a second
+// pool. Callers must not close it.
+func (q *Redis) Client() *redis.Client { return q.client }

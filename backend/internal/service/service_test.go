@@ -15,6 +15,7 @@ import (
 
 	"github.com/cytusc/node_list/backend/internal/domain"
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
+	"github.com/cytusc/node_list/backend/internal/ratelimit"
 	"github.com/cytusc/node_list/backend/internal/store"
 	"github.com/cytusc/node_list/backend/internal/store/postgres"
 	"github.com/cytusc/node_list/backend/internal/taskqueue"
@@ -441,23 +442,32 @@ func TestClassificationRefreshPreservesRiskTimestamp(t *testing.T) {
 	}
 }
 
-func TestProviderCooldownSurvivesNewRepository(t *testing.T) {
+// A cooldown published by one replica must stop the others. In production the
+// clock lives in Redis; here two repositories share one limiter, which is the
+// same contract without a Redis dependency in the test.
+func TestProviderCooldownIsSharedAcrossRepositories(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
+	limiter := ratelimit.New(nil)
+	f.repo.Limiter = limiter
 	until := time.Now().Add(time.Minute)
 	if err := f.repo.AfterProvider(ctx, "ipinfo", until); err != nil {
 		t.Fatal(err)
 	}
-	other := &Repository{Pool: f.repo.Pool}
+	other := &Repository{Pool: f.repo.Pool, Limiter: limiter}
 	if err := other.BeforeProvider(ctx, "ipinfo"); !isWaiting(err) {
-		t.Fatal("another replica ignored persisted cooldown", err)
+		t.Fatal("another replica ignored the shared cooldown", err)
 	}
-	if err := other.AfterProvider(ctx, "ipinfo", time.Now()); err != nil {
+	// A shorter cooldown must not re-open the provider early.
+	if err := other.AfterProvider(ctx, "ipinfo", time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	var persisted time.Time
-	if err := f.repo.Pool.QueryRow(ctx, `SELECT next_at FROM node_explorer_provider_limits WHERE provider='ipinfo'`).Scan(&persisted); err != nil || persisted.Before(until.Add(-time.Millisecond)) {
-		t.Fatal("shorter cooldown overwrote Retry-After", err)
+	wait, err := limiter.Allow(ctx, ratelimit.Key("provider", "ipinfo"), time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wait < 30*time.Second {
+		t.Fatalf("short cooldown overwrote Retry-After: %s", wait)
 	}
 }
 

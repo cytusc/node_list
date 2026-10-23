@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
+	"github.com/cytusc/node_list/backend/internal/ratelimit"
 	"github.com/cytusc/node_list/backend/internal/store"
 	"github.com/cytusc/node_list/backend/internal/taskqueue"
 	"github.com/jackc/pgx/v5"
@@ -71,9 +72,12 @@ func (j Job) Ref() string { return fmt.Sprintf("%d:%d", j.ID, j.Generation) }
 type Repository struct {
 	Pool                      *pgxpool.Pool
 	NormalRecoveryConcurrency int
-	registryMu                sync.Mutex
-	registryVersion           int64
-	registryReady             bool
+	// Limiter paces outbound provider calls across replicas. Nil means this
+	// process paces alone, which is correct for a single-replica deployment.
+	Limiter         *ratelimit.Limiter
+	registryMu      sync.Mutex
+	registryVersion int64
+	registryReady   bool
 }
 
 // Use the same bound for delivery and full-assessment admission. All replicas of

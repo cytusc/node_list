@@ -3,44 +3,59 @@ package service
 import (
 	"context"
 	"time"
+
+	"github.com/cytusc/node_list/backend/internal/ratelimit"
 )
 
-// Provider quotas survive restarts and are shared across worker replicas.
+// providerInterval is the minimum spacing between two calls to the same
+// upstream. The free tiers are expressed as requests per minute, and pacing
+// them one at a time keeps sibling providers running in parallel.
+const providerInterval = 1500 * time.Millisecond
+
+// providerWaitLimit is the longest wait a single assessment will sit through
+// before it treats the provider as unavailable for this round.
+const providerWaitLimit = 2 * time.Second
+
+// BeforeProvider reserves the next slot for one upstream. The clock lives in
+// Redis (GCRA via redis_rate) so every replica shares it; a single-replica
+// deployment or a test without Redis falls back to an in-process token bucket.
+//
+// This replaces the row-locked node_explorer_provider_limits transaction that
+// used to serialise every call: one Eval round trip instead of a transaction,
+// and no lock contention between replicas.
 func (r *Repository) BeforeProvider(ctx context.Context, provider string) error {
-	tx, e := r.Pool.Begin(ctx)
-	if e != nil {
-		return e
+	wait, err := r.limiter().Allow(ctx, ratelimit.Key("provider", provider), providerInterval)
+	if err != nil {
+		return err
 	}
-	defer tx.Rollback(ctx)
-	if _, e = tx.Exec(ctx, `INSERT INTO node_explorer_provider_limits(provider,next_at) VALUES($1,now()) ON CONFLICT DO NOTHING`, provider); e != nil {
-		return e
+	if wait > providerWaitLimit {
+		return waiting{wait}
 	}
-	var next time.Time
-	if e = tx.QueryRow(ctx, `SELECT next_at FROM node_explorer_provider_limits WHERE provider=$1 FOR UPDATE`, provider).Scan(&next); e != nil {
-		return e
+	if wait <= 0 {
+		return nil
 	}
-	if time.Until(next) > 2*time.Second {
-		return waiting{time.Until(next)}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
-	if _, e = tx.Exec(ctx, `UPDATE node_explorer_provider_limits SET next_at=greatest(now(),next_at)+interval '1500 milliseconds' WHERE provider=$1`, provider); e != nil {
-		return e
-	}
-	if e = tx.Commit(ctx); e != nil {
-		return e
-	}
-	if wait := time.Until(next); wait > 0 {
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return nil
 }
 
+// AfterProvider publishes an upstream cooldown (Retry-After, an exhausted
+// daily quota, or a 429) to every replica.
 func (r *Repository) AfterProvider(ctx context.Context, provider string, next time.Time) error {
-	_, e := r.Pool.Exec(ctx, `INSERT INTO node_explorer_provider_limits(provider,next_at) VALUES($1,$2) ON CONFLICT(provider) DO UPDATE SET next_at=greatest(node_explorer_provider_limits.next_at,EXCLUDED.next_at)`, provider, next)
-	return e
+	wait := time.Until(next)
+	if wait <= 0 {
+		return nil
+	}
+	return r.limiter().Block(ctx, ratelimit.Key("provider", provider), wait)
+}
+
+// limiter returns the shared pacer. A nil field is a valid single-process
+// deployment, and ratelimit treats a nil Limiter as an in-process clock.
+func (r *Repository) limiter() *ratelimit.Limiter {
+	return r.Limiter
 }
