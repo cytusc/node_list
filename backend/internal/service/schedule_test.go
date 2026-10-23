@@ -10,17 +10,25 @@ import (
 )
 
 func TestRiskRefreshIntervalDistinguishesFailureFromNoData(t *testing.T) {
-	p := 50.0
+	p, clean, dirty := 50.0, 10.0, 30.0
 	for _, tc := range []struct {
 		v    domain.IPPureResult
+		base time.Duration
 		want time.Duration
 	}{
-		{domain.IPPureResult{TrafficRatioStatus: "query-failed"}, 30 * time.Minute},
-		{domain.IPPureResult{TrafficRatioStatus: "no-data"}, 6 * time.Hour},
-		{domain.IPPureResult{HumanPercent: &p, BotPercent: &p, TrafficRatioStatus: "available"}, 24 * time.Hour},
+		{domain.IPPureResult{TrafficRatioStatus: "query-failed"}, 0, 30 * time.Minute},
+		{domain.IPPureResult{TrafficRatioStatus: "no-data"}, 0, 6 * time.Hour},
+		// A clean ASN keeps the configured steady-state window.
+		{domain.IPPureResult{HumanPercent: &p, BotPercent: &clean, TrafficRatioStatus: "available"}, 24 * time.Hour, 24 * time.Hour},
+		{domain.IPPureResult{HumanPercent: &p, BotPercent: &clean, TrafficRatioStatus: "available"}, 6 * time.Hour, 6 * time.Hour},
+		// A dirty ASN re-checks at least four times faster, but never slower
+		// than the configured base: one IP swung from 2% to 70% in two hours.
+		{domain.IPPureResult{HumanPercent: &p, BotPercent: &dirty, TrafficRatioStatus: "available"}, 24 * time.Hour, 6 * time.Hour},
+		{domain.IPPureResult{HumanPercent: &p, BotPercent: &dirty, TrafficRatioStatus: "available"}, 6 * time.Hour, 2 * time.Hour},
+		{domain.IPPureResult{HumanPercent: &p, BotPercent: &dirty, TrafficRatioStatus: "available"}, 0, 6 * time.Hour},
 	} {
-		if got := riskRefreshInterval(tc.v); got != tc.want {
-			t.Fatalf("%+v: %s != %s", tc.v, got, tc.want)
+		if got := riskRefreshInterval(tc.v, tc.base); got != tc.want {
+			t.Fatalf("%+v base=%s: %s != %s", tc.v, tc.base, got, tc.want)
 		}
 	}
 }

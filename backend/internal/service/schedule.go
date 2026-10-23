@@ -297,13 +297,28 @@ func scheduleCompletedIP(ctx context.Context, tx pgx.Tx, kind, ip string, p Payl
 	return err
 }
 
+// volatileBotShare marks an ASN whose traffic is dirty enough that one IP's
+// score can swing within hours. A shared residential range measured at 2% was
+// already 70% two hours later, so those ranges are not worth a full day of
+// cache.
+const volatileBotShare = 25.0
+
 // Risk refreshes distinguish optional statistics outages from absent data.
-func riskRefreshInterval(v domain.IPPureResult) time.Duration {
+// Base is the steady-state interval; ranges with a high bot share refresh at
+// least four times faster so the panel cannot keep showing a clean score for a
+// whole day after the IP went bad.
+func riskRefreshInterval(v domain.IPPureResult, base time.Duration) time.Duration {
 	if v.TrafficRatioStatus == "query-failed" {
 		return trafficRatioErrorRetryInterval
 	}
 	if v.HumanPercent == nil || v.BotPercent == nil {
 		return trafficRatioRetryInterval
 	}
-	return 24 * time.Hour
+	if base <= 0 {
+		base = 24 * time.Hour
+	}
+	if *v.BotPercent >= volatileBotShare {
+		return min(base, max(2*time.Hour, base/4))
+	}
+	return base
 }

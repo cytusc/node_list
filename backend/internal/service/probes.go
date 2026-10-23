@@ -549,7 +549,7 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 				delay = r.Config.ResidentialInterval
 			}
 		} else {
-			delay = riskRefreshInterval(*v)
+			delay = riskRefreshInterval(*v, r.Config.RiskRefreshInterval)
 		}
 		return recur(ctx, tx, j, delay)
 	})

@@ -95,7 +95,10 @@ type Config struct {
 	Timeout, RetryDelay                 time.Duration
 	// ExitProbeTimeout bounds one echo batch. Slow exits routinely need more
 	// than the old fixed five seconds, so it stays tunable per deployment.
-	ExitProbeTimeout                   time.Duration
+	ExitProbeTimeout time.Duration
+	// RiskRefreshInterval is the steady-state IPPure re-query window. Ranges
+	// with a high bot share refresh faster; see riskRefreshInterval.
+	RiskRefreshInterval                time.Duration
 	ScheduleInterval                   time.Duration
 	HighConcurrency, NormalConcurrency int
 	ExitConcurrency                    int
@@ -133,10 +136,11 @@ func laneConcurrency(role string) map[string]int {
 func ConfigFromEnv(role string) (Config, error) {
 	c := Config{Role: role, NormalRecoveryInterval: Seconds("NORMAL_RECOVERY_INTERVAL_SECONDS", 1200), ResidentialInterval: Seconds("RESIDENTIAL_INTERVAL_SECONDS", 300), NormalInterval: Seconds("NORMAL_INTERVAL_SECONDS", 1800),
 		Timeout: Seconds("PROBE_TIMEOUT_SECONDS", 12), RetryDelay: Seconds("PROBE_RETRY_SECONDS", 10),
-		ExitProbeTimeout: BoundedSeconds("EXIT_PROBE_TIMEOUT_SECONDS", defaultExitProbeTimeout, exitProbeTimeoutMin, exitProbeTimeoutMax),
-		ScheduleInterval: Seconds("SCHEDULE_INTERVAL_SECONDS", 5),
-		FastInterval:     Seconds("FAST_INTERVAL_SECONDS", 1200),
-		HighConcurrency:  Number("RESIDENTIAL_CONCURRENCY", 2), NormalConcurrency: Number("NORMAL_CONCURRENCY", 2),
+		ExitProbeTimeout:    BoundedSeconds("EXIT_PROBE_TIMEOUT_SECONDS", defaultExitProbeTimeout, exitProbeTimeoutMin, exitProbeTimeoutMax),
+		RiskRefreshInterval: Seconds("RISK_REFRESH_INTERVAL_SECONDS", 21600),
+		ScheduleInterval:    Seconds("SCHEDULE_INTERVAL_SECONDS", 5),
+		FastInterval:        Seconds("FAST_INTERVAL_SECONDS", 1200),
+		HighConcurrency:     Number("RESIDENTIAL_CONCURRENCY", 2), NormalConcurrency: Number("NORMAL_CONCURRENCY", 2),
 		LaneConcurrency: laneConcurrency(role),
 		APIOrigin:       Env("IPPURE_API_ORIGIN", "https://api.123169.xyz"), DryRun: Env("LIFECYCLE_DRY_RUN", "false") == "true"}
 	if address := os.Getenv("MIHOMO_MANAGER_URL"); address != "" {
