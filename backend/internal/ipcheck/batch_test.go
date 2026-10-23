@@ -53,12 +53,14 @@ func TestBatchPrimingsSkipsFreshCache(t *testing.T) {
 	}
 }
 
-// The batch path shares the cross-replica ip-api quota with the single-IP
-// lookup path through the injected provider hooks.
+// The batch path shares the cross-replica quota bookkeeping with the single-IP
+// lookup path through the injected provider hooks, but under its own key: the
+// two endpoints are counted separately upstream.
 func TestBatchPrimingSharesProviderQuota(t *testing.T) {
 	c := NewClient("", "")
 	var before, after int
-	c.BeforeProvider = func(context.Context, string) error { before++; return nil }
+	var key string
+	c.BeforeProvider = func(_ context.Context, provider string) error { before++; key = provider; return nil }
 	c.AfterProvider = func(context.Context, string, time.Time) error { after++; return nil }
 	c.HTTP = &http.Client{Transport: fixtureTransport(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"X-Rl": []string{"0"}, "X-Ttl": []string{"59"}},
@@ -70,7 +72,10 @@ func TestBatchPrimingSharesProviderQuota(t *testing.T) {
 	if before != 1 || after != 1 {
 		t.Fatalf("quota hooks not shared: before=%d after=%d", before, after)
 	}
-	if wait := time.Until(c.providerNext("ip-api")); wait < 30*time.Second {
+	if key != batchKey {
+		t.Fatalf("batch reserved slot on %q", key)
+	}
+	if wait := time.Until(c.providerNext(batchKey)); wait < 30*time.Second {
 		t.Fatalf("X-Rl=0 cooldown not honored: %s", wait)
 	}
 }

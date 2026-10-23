@@ -307,19 +307,30 @@ const volatileBotShare = 25.0
 // attributesRetryDelay decides when one IP's evidence set is re-queried. A
 // source that only cooled down has not disagreed: it never answered, so a thin
 // consensus must not wait the full day.
+//
+// The reverse also holds. When every source answered and none of them could
+// name the network type, the answer is stable — re-asking five minutes later
+// only spends the provider quota that the rest of the queue is waiting for.
+// Treating that case as "retry soon" kept roughly a third of the attribute
+// queue cycling through a quota of forty lookups a minute, which is what made
+// the backlog grow while the lane looked busy.
 func attributesRetryDelay(evidence []ipcheck.Evidence, priority int, residential time.Duration) time.Duration {
-	typed, cooledDown := 0, false
+	typed, cooledDown, unanswered := 0, false, false
 	for _, e := range evidence {
-		if e.QueryStatus == "quota-cooldown" {
+		switch {
+		case e.QueryStatus == "quota-cooldown":
 			cooledDown = true
-			continue
-		}
-		if e.QueryStatus == "success" && (e.UsageType != "" || e.ASNType != "" || e.CompanyType != "") {
+		case e.QueryStatus != "success":
+			unanswered = true
+		case e.UsageType != "" || e.ASNType != "" || e.CompanyType != "":
 			typed++
 		}
 	}
 	switch {
 	case typed == 0:
+		if !cooledDown && !unanswered {
+			return 6 * time.Hour
+		}
 		if priority > 0 {
 			return residential
 		}

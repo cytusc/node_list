@@ -150,24 +150,33 @@ func (r *Repository) IPUsed(ctx context.Context, ip string) (bool, error) {
 	return used, err
 }
 
-// PendingAttributeIPs lists up to limit distinct exit IPs that still have a
-// queued attributes task due now. One IP-API batch request then covers the
-// whole wave instead of one single-IP request per job.
-func (r *Repository) PendingAttributeIPs(ctx context.Context, limit int) ([]string, error) {
-	rows, err := r.Pool.Query(ctx, `SELECT DISTINCT key FROM node_explorer_work
-		WHERE kind=$1 AND state='queued' AND due_at<=now() LIMIT $2`, KindAttributes, limit)
+// PendingAttributeIPs lists up to limit exit IPs that still have a queued
+// attributes task due now, oldest first, always including include so the job
+// being classified is covered by its own priming wave. One IP-API batch
+// request then covers the whole wave instead of one single-IP request per job.
+// Ordering matters: without it concurrent consumers each drew an arbitrary
+// slice of the queue, so the same address was primed repeatedly while its
+// neighbours were never covered.
+func (r *Repository) PendingAttributeIPs(ctx context.Context, limit int, include string) ([]string, error) {
+	rows, err := r.Pool.Query(ctx, `SELECT key FROM node_explorer_work
+		WHERE kind=$1 AND state='queued' AND due_at<=now()
+		ORDER BY due_at,id LIMIT $2`, KindAttributes, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ips []string
+	ips := make([]string, 0, limit)
+	seen := map[string]bool{}
+	if include != "" {
+		ips, seen[include] = append(ips, include), true
+	}
 	for rows.Next() {
 		var ip string
 		if err := rows.Scan(&ip); err != nil {
 			return nil, err
 		}
-		if ip != "" {
-			ips = append(ips, ip)
+		if ip != "" && !seen[ip] && len(ips) < limit {
+			ips, seen[ip] = append(ips, ip), true
 		}
 	}
 	return ips, rows.Err()

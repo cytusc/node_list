@@ -95,9 +95,12 @@ services:
     command: [node-worker, -role, exit-attributes]
     environment:
       <<: *environment
-      # Extra consumers were measured to make things worse: they multiply
-      # quota contention and the provider clock, not throughput.
-      IP_SERVICE_ATTRIBUTES_CONCURRENCY: ${ATTRIBUTES_CONCURRENCY:-1}
+      # More consumers used to make this lane worse, because every job spent its
+      # own single-IP quota slot. Classification is now batch-first: one priming
+      # wave covers 100 addresses, duplicate waves are collapsed, and a cached
+      # address costs no quota at all — so consumers add throughput instead of
+      # contention. Keep the product of this and PGPOOL_MAX in mind.
+      IP_SERVICE_ATTRIBUTES_CONCURRENCY: ${ATTRIBUTES_CONCURRENCY:-3}
       IPPURE_API_ORIGIN: ${IPPURE_API_ORIGIN:-https://api.123169.xyz}
       # Comma separated subset of ipinfo,ip-api,ipregistry,abuseipdb,ipapi,
       # ip2location. Empty keeps every source; deployments without credentials

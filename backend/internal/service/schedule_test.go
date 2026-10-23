@@ -238,6 +238,13 @@ func TestAttributesRetryDelayWaitsForUnansweredSources(t *testing.T) {
 		{"one typed source plus cooldown", []ipcheck.Evidence{ok("ip-api", "数据"), cool}, 0, 6 * time.Hour},
 		{"two typed sources settle", []ipcheck.Evidence{ok("ip-api", "x"), ok("ippure", "y"), cool}, 0, 24 * time.Hour},
 		{"single answer without cooldown keeps the day window", []ipcheck.Evidence{ok("ip-api", "x")}, 0, 24 * time.Hour},
+		// Every source answered, none named a type: the answer is stable, so a
+		// five-minute retry would only spend quota the queue needs.
+		{"answered but untyped is not retried soon", []ipcheck.Evidence{ok("ip-api", ""), ok("ippure", "")}, 0, 6 * time.Hour},
+		{"answered but untyped on priority lane", []ipcheck.Evidence{ok("ip-api", "")}, 5, 6 * time.Hour},
+		// A request that failed did not answer: retry while the quota recovers.
+		{"failed request retries soon", []ipcheck.Evidence{{Provider: "ip-api", QueryStatus: "request-failed"}}, 0, 30 * time.Minute},
+		{"failed request on priority lane", []ipcheck.Evidence{{Provider: "ip-api", QueryStatus: "http-error"}}, 5, 5 * time.Minute},
 	} {
 		if got := attributesRetryDelay(tc.evidence, tc.priority, 5*time.Minute); got != tc.want {
 			t.Fatalf("%s: %s != %s", tc.name, got, tc.want)

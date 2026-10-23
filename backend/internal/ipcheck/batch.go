@@ -14,25 +14,35 @@ import (
 	"time"
 )
 
-// batchInterval is the pacing between IP-API batch requests. The public quota
-// (45 requests/minute) is shared with the single-IP endpoint, and one batch
-// covers up to 100 addresses. A 1.6 s interval keeps ~37 requests/minute —
-// under the ceiling while still 100x-ing the per-request throughput of the
-// single-IP path. Override with IP_API_BATCH_INTERVAL_MS; 429 and X-Rl=0
-// responses fall back to the provider cooldown instead of a fixed interval.
-func batchInterval() time.Duration {
+// batchKey is the rate-limit identity of IP-API's batch endpoint. The free
+// batch path and the single-IP path are counted separately upstream, so
+// publishing both to one key made a batch burst look like single-IP pressure
+// and vice versa. Keeping them apart lets each endpoint run at its own
+// permitted rate while still sharing the cooldown across replicas.
+const batchKey = "ip-api-batch"
+
+// batchFloor is the slowest pace the batch endpoint may be asked for. The free
+// tier permits far fewer batch requests per minute than single-IP lookups, so
+// the previous 1.6 s pacing — chosen for the single-IP path — was over the
+// ceiling and produced a 429 on most waves. IP_API_BATCH_INTERVAL_MS raises
+// the floor; X-Rl/X-Ttl normally decide the pace on their own.
+func batchFloor() time.Duration {
 	if v := strings.TrimSpace(os.Getenv("IP_API_BATCH_INTERVAL_MS")); v != "" {
 		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
 			return time.Duration(ms) * time.Millisecond
 		}
 	}
-	return 1600 * time.Millisecond
+	return 4 * time.Second
 }
 
 // PrimeIPAPIBatch fills the normal lookup cache using IP-API's batch endpoint:
 // 100 IPs per request. Addresses that already hold fresh cached evidence are
 // skipped, so repeated priming during one classification wave costs nothing.
 // Lookup still queries the other independent sources for each requested IP.
+//
+// Priming is shared between concurrent consumers: every attributes worker
+// would otherwise ask for its own wave of 100 addresses, and those duplicate
+// waves are what exhausted the batch quota in the first place.
 func (c *Client) PrimeIPAPIBatch(ctx context.Context, ips []string) error {
 	pending := make([]string, 0, len(ips))
 	seen := map[string]bool{}
@@ -48,12 +58,22 @@ func (c *Client) PrimeIPAPIBatch(ctx context.Context, ips []string) error {
 	if len(pending) == 0 {
 		return nil
 	}
-	for offset := 0; offset < len(pending); offset += 100 {
-		if offset > 0 {
-			if err := sleepContext(ctx, batchInterval()); err != nil {
-				return err
+	_, err, _ := c.prime.Do("ip-api-batch", func() (any, error) {
+		// Re-check under the single-flight lock: the wave that won the race may
+		// already have covered most of this one.
+		missing := make([]string, 0, len(pending))
+		for _, ip := range pending {
+			if _, ok := c.cached("ip-api:" + ip); !ok {
+				missing = append(missing, ip)
 			}
 		}
+		return nil, c.primeChunks(ctx, missing)
+	})
+	return err
+}
+
+func (c *Client) primeChunks(ctx context.Context, pending []string) error {
+	for offset := 0; offset < len(pending); offset += 100 {
 		if err := c.primeBatchChunk(ctx, pending[offset:min(offset+100, len(pending))]); err != nil {
 			return err
 		}
@@ -62,12 +82,18 @@ func (c *Client) PrimeIPAPIBatch(ctx context.Context, ips []string) error {
 }
 
 func (c *Client) primeBatchChunk(ctx context.Context, chunk []string) error {
-	// Share the cross-replica ip-api quota with the single-IP lookup path.
+	// Wait out the pace the previous wave earned before asking for a new slot.
+	if wait := time.Until(c.providerNext(batchKey)); wait > 0 {
+		if err := sleepContext(ctx, wait); err != nil {
+			return err
+		}
+	}
+	// Share the cross-replica batch quota with other priming waves.
 	for attempt := 0; attempt < 3; attempt++ {
 		if c.BeforeProvider == nil {
 			break
 		}
-		err := c.BeforeProvider(ctx, "ip-api")
+		err := c.BeforeProvider(ctx, batchKey)
 		if err == nil {
 			break
 		}
@@ -88,7 +114,7 @@ func (c *Client) primeBatchChunk(ctx context.Context, chunk []string) error {
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
-		_ = c.AfterProvider(cleanup, "ip-api", c.providerNext("ip-api"))
+		_ = c.AfterProvider(cleanup, batchKey, c.providerNext(batchKey))
 	}()
 
 	body, err := json.Marshal(chunk)
@@ -105,22 +131,21 @@ func (c *Client) primeBatchChunk(ctx context.Context, chunk []string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTP.Do(req)
-	c.deferProvider("ip-api", time.Now().Add(batchInterval()))
+	// Publish the pace this wave earned before anything else can read it.
+	pace := batchFloor()
+	if err == nil {
+		if d, ok := quotaHeaders(resp.Header, pace); ok {
+			pace = d
+		}
+	}
+	c.deferProvider(batchKey, time.Now().Add(pace))
 	if err != nil {
-		c.deferProvider("ip-api", time.Now().Add(30*time.Second))
+		c.deferProvider(batchKey, time.Now().Add(30*time.Second))
 		return fmt.Errorf("IP-API batch request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {
-		c.deferProvider("ip-api", retryTime(resp.Header))
 		return fmt.Errorf("IP-API batch HTTP 429")
-	}
-	if resp.Header.Get("X-Rl") == "0" {
-		if ttl, err := strconv.Atoi(resp.Header.Get("X-Ttl")); err == nil && ttl > 0 {
-			c.deferProvider("ip-api", time.Now().Add(time.Duration(ttl)*time.Second))
-		} else {
-			c.deferProvider("ip-api", time.Now().Add(time.Minute))
-		}
 	}
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("IP-API batch HTTP %d", resp.StatusCode)

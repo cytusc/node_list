@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // Client shares rate limits and metadata caches across nodes with the same IP.
@@ -38,6 +40,8 @@ type Client struct {
 	AfterProvider     func(context.Context, string, time.Time) error
 	FreshSweep        bool
 	mu                sync.Mutex
+	// prime collapses concurrent batch priming waves into one upstream call.
+	prime             singleflight.Group
 	providers         map[string]chan struct{}
 	denied            map[string]time.Time
 	cache             map[string]cachedEvidence
@@ -273,7 +277,16 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 		req.Header.Set("Accept", "application/json")
 	}
 	resp, err := c.HTTP.Do(req)
-	c.deferProvider(quota, time.Now().Add(1500*time.Millisecond))
+	// IP-API reports its remaining budget on every answer, so the pace follows
+	// the upstream instead of a fixed interval. Without this the last request
+	// of a window and the first of the next land together and one of them 429s.
+	pace := 1500 * time.Millisecond
+	if err == nil {
+		if d, ok := quotaHeaders(resp.Header, pace); ok {
+			pace = d
+		}
+	}
+	c.deferProvider(quota, time.Now().Add(pace))
 	if err != nil {
 		c.deferProvider(quota, time.Now().Add(30*time.Second))
 		return e
@@ -284,13 +297,6 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 	if resp.StatusCode == 429 {
 		c.deferProvider(quota, retryTime(resp.Header))
 		return e
-	}
-	if provider == "ip-api" && resp.Header.Get("X-Rl") == "0" {
-		if ttl, err := strconv.Atoi(resp.Header.Get("X-Ttl")); err == nil && ttl > 0 {
-			c.deferProvider(quota, time.Now().Add(time.Duration(ttl)*time.Second))
-		} else {
-			c.deferProvider(quota, time.Now().Add(time.Minute))
-		}
 	}
 	if resp.StatusCode != 200 {
 		// Public demo endpoints may reject an entire egress address. Avoid

@@ -115,6 +115,12 @@ type Config struct {
 // laneConcurrency reads per-kind consumer counts. The role prefix wins over
 // the generic name, mirroring the lane concurrency convention; both default
 // to one consumer so probe-heavy lanes are unaffected unless configured.
+//
+// Attributes are the exception: one consumer per lane caps the whole
+// classification lane at roughly the latency of a single lookup, which cannot
+// work through a backlog that a quota outage produced. Three still leaves the
+// database pool room, because a consumer holds a connection only while it
+// queries, not while it waits on an upstream.
 func laneConcurrency(role string) map[string]int {
 	prefix := "CONNECTIVITY"
 	switch role {
@@ -126,7 +132,11 @@ func laneConcurrency(role string) map[string]int {
 	out := map[string]int{}
 	for _, kind := range []string{KindRisk, KindAttributes, KindLifecycle, KindRecovery} {
 		name := strings.ToUpper(strings.ReplaceAll(kind, "-", "_"))
-		out[kind] = Number(prefix+"_"+name+"_CONCURRENCY", Number(name+"_CONCURRENCY", 1))
+		fallback := 1
+		if kind == KindAttributes {
+			fallback = 3
+		}
+		out[kind] = Number(prefix+"_"+name+"_CONCURRENCY", Number(name+"_CONCURRENCY", fallback))
 	}
 	out[KindNormalRecovery] = Number("NORMAL_RECOVERY_CONCURRENCY", 2)
 	out[KindCleanup] = 1
