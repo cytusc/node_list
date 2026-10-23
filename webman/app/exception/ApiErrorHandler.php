@@ -33,7 +33,7 @@ final class ApiErrorHandler extends Handler
     ];
 
     /** 这些端点的所有响应（含失败）都必须 no-store。 */
-    private const NO_STORE_PATHS = ['/api/results'];
+    private const NO_STORE_PATHS = ['/api/results', '/api/services'];
 
     public function render(Request $request, Throwable $exception): Response
     {

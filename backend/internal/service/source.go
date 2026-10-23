@@ -43,6 +43,10 @@ func (r *Repository) RunSource(ctx context.Context, st *store.Store) error {
 }
 
 func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
+	monitorCtx, stopMonitor := context.WithCancel(ctx)
+	monitorDone := make(chan struct{})
+	go func() { defer close(monitorDone); r.runMonitor(monitorCtx) }()
+	defer func() { stopMonitor(); <-monitorDone }()
 	ingestor := store.NewPersistentIngestor(st)
 	dir := Env("SUBS_CHECK_DIR", filepath.Join(Root(), "data", "sub"))
 	results := Env("RESULTS_FILE", filepath.Join(dir, "config", "cache", "config", "results.json"))

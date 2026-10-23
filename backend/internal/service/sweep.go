@@ -58,7 +58,7 @@ type sweepKernel interface {
 
 // sweepAll uses a fixed worker pool. Only explicit controller observations
 // are evidence; busy, cancellation and transport errors leave an empty slot.
-func (r *Repository) sweepAll(ctx context.Context, m sweepKernel, entries []transport.RegistryEntry, concurrency int) []sweepObservation {
+func (r *Repository) sweepAll(ctx context.Context, m sweepKernel, entries []transport.RegistryEntry, concurrency int, onProcessed ...func()) []sweepObservation {
 	if concurrency < 1 {
 		concurrency = 32
 	}
@@ -96,6 +96,10 @@ func (r *Repository) sweepAll(ctx context.Context, m sweepKernel, entries []tran
 						reason = "cancelled"
 					}
 					results[i].skip = reason
+				}
+				// Callback must be concurrency-safe; it reports attempts, not commits.
+				if len(onProcessed) > 0 && onProcessed[0] != nil {
+					onProcessed[0]()
 				}
 			}
 		}()

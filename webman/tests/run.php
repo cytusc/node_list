@@ -512,6 +512,8 @@ same(0, JsonResponse::number(null), 'null → 0');
 // 结果
 // ---------------------------------------------------------------------------
 
+require __DIR__ . '/monitor.php';
+
 $total = $passed + count($failed);
 if ($failed !== []) {
     fwrite(STDERR, "FAILED " . count($failed) . "/{$total}\n");

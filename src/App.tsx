@@ -665,6 +665,12 @@ export default function App() {
             </span>
           </a>
           <div className="header-right">
+            <Button variant="ghost" size="sm" asChild>
+              <a href="/services">
+                <Radio className="size-4" />
+                服务监控
+              </a>
+            </Button>
             <span className="local-label">
               <span />
               本地节点库

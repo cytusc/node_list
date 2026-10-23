@@ -33,6 +33,7 @@ type sweepStatus struct {
 	Kind           string         `json:"kind,omitempty"`
 	Phase          string         `json:"phase,omitempty"`
 	Candidates     int            `json:"candidates"`
+	Processed      int            `json:"processed"`
 	Observations   int            `json:"observations"`
 	Skipped        int            `json:"skipped"`
 	Rejected       int            `json:"rejected"`

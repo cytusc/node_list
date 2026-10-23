@@ -97,7 +97,7 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 				if !s.Healthy {
 					message = "内核未就绪或正在重载"
 				}
-				payload, _ := json.Marshal(map[string]any{"error": message, "running": true, "kernel": s, "sweep": sweeps.status()})
+				payload, _ := json.Marshal(map[string]any{"error": message, "running": true, "kernel": s, "sweep": sweeps.status(), "exitCapacity": m.ExitConcurrency})
 				_, _ = r.Pool.Exec(ctx, `INSERT INTO node_explorer_service_status(service,updated_at,payload) VALUES('mihomo-manager',now(),$1) ON CONFLICT(service) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload`, payload)
 			}
 		}
@@ -160,7 +160,9 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 				live = sweeps.selectEntries(live)
 				sweeps.progress(func(s *sweepStatus) { s.Phase = "probing"; s.Candidates = len(live) })
 				started := time.Now()
-				results := r.sweepAll(round, m, live, sweepConcurrency)
+				results := r.sweepAll(round, m, live, sweepConcurrency, func() {
+					sweeps.progress(func(s *sweepStatus) { s.Processed++ })
+				})
 				probeMillis := time.Since(started).Milliseconds()
 				pending := sweeps.observations(live, results)
 				sweeps.progress(func(s *sweepStatus) {

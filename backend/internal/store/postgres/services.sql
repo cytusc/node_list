@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS node_explorer_service_status (
   service text PRIMARY KEY, updated_at timestamptz NOT NULL,
   payload jsonb NOT NULL DEFAULT '{}'
 );
+-- Bounded, credential-free monitoring history. Written once per minute by
+-- source-ingest, independently of browser visits; no per-probe write hotspot.
+CREATE TABLE IF NOT EXISTS node_explorer_monitor_samples (
+  sampled_at timestamptz PRIMARY KEY,
+  payload jsonb NOT NULL
+);
 CREATE TABLE IF NOT EXISTS node_explorer_provider_limits (
   provider text PRIMARY KEY, next_at timestamptz NOT NULL
 );

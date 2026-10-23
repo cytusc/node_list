@@ -275,6 +275,8 @@ same(null, $status->sourceWarning(), '无 sourceWarning 时为 null');
 // 结果
 // ---------------------------------------------------------------------------
 
+require __DIR__ . '/monitor-integration.php';
+
 $total = $passed + count($failed);
 if ($failed !== []) {
     fwrite(STDERR, "FAILED " . count($failed) . "/{$total}\n");

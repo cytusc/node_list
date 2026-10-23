@@ -3,6 +3,8 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  --chart-2: #0d9488;
+  --chart-3: #a855f7;
   --background: #f8fafc;
   --foreground: #172b46;
   --card: #ffffff;
@@ -24,6 +26,8 @@
   --radius: 0.5rem;
 }
 .dark {
+  --chart-2: #2dd4bf;
+  --chart-3: #c084fc;
   --background: #101a2a;
   --foreground: #e4ecf7;
   --card: #172338;
