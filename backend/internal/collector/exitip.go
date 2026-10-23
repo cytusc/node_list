@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
+	"github.com/hashicorp/go-retryablehttp"
 )
 
 // exitProbe describes one echo service used to discover the node's exit IP.
@@ -349,6 +350,10 @@ type IPPureClient struct {
 	origin  string
 	client  *http.Client
 	timeout time.Duration
+	// retry decides whether a response is worth repeating. It owns the 429/5xx
+	// backoff (honouring Retry-After) so the challenge loop stays a protocol
+	// state machine instead of a retry loop.
+	retry *retryablehttp.Client
 
 	mu         sync.Mutex
 	key        string
@@ -427,13 +432,42 @@ func NewIPPureClient(client *http.Client, origin string, timeout time.Duration) 
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	return &IPPureClient{origin: origin, client: client, timeout: timeout}
+	return &IPPureClient{origin: origin, client: client, timeout: timeout, retry: retryClient(client)}
+}
+
+// retryClient wraps the caller's transport so 429 and 5xx answers are retried
+// with backoff that honours Retry-After (capped at five seconds, matching the
+// budget the upstream grants). Connection failures are deliberately not
+// retried: a dead tunnel must stay visible as a transport error instead of
+// looking like a slow upstream.
+func retryClient(client *http.Client) *retryablehttp.Client {
+	rc := retryablehttp.NewClient()
+	rc.HTTPClient = client
+	rc.Logger = nil
+	rc.RetryMax = 2
+	rc.RetryWaitMin = time.Second
+	rc.RetryWaitMax = 5 * time.Second
+	rc.Backoff = retryablehttp.DefaultBackoff
+	rc.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if err != nil {
+			return false, nil
+		}
+		return resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500, nil
+	}
+	// 403 (missing signature) and 200 {"ok":false} are answers, not transport
+	// failures; they must reach the caller unchanged.
+	rc.ErrorHandler = retryablehttp.PassthroughErrorHandler
+	return rc
 }
 
 // get performs one signed request, following the server's key challenge.
+// Transient 429/5xx responses are retried inside fetch by go-retryablehttp;
+// the challenge loop only ever sees the final answer.
 func (c *IPPureClient) get(ctx context.Context, path string) (map[string]any, error) {
 	target := strings.TrimSuffix(c.origin, "/") + path
-	var retries int
 	for challenge := 0; ; {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -474,24 +508,6 @@ func (c *IPPureClient) get(ctx context.Context, path string) (map[string]any, er
 			continue
 		}
 		status := response.StatusCode
-		if (status == 429 || status >= 500) && retries < 2 {
-			retryAfter := parseRetryAfter(response.Header.Get("retry-after"))
-			drainAndClose(response)
-			delay := time.Duration(1000*pow2(retries)) * time.Millisecond
-			if retryAfter > delay {
-				delay = retryAfter
-			}
-			if delay > 5*time.Second {
-				delay = 5 * time.Second
-			}
-			retries++
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
-			}
-			continue
-		}
 		if status < 200 || status >= 300 {
 			drainAndClose(response)
 			return nil, &ippureHTTPError{status: status}
@@ -529,7 +545,12 @@ func (c *IPPureClient) get(ctx context.Context, path string) (map[string]any, er
 
 func (c *IPPureClient) fetch(ctx context.Context, req *http.Request) (*http.Response, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	response, err := c.client.Do(req.WithContext(reqCtx))
+	wrapped, err := retryablehttp.FromRequest(req.WithContext(reqCtx))
+	if err != nil {
+		cancel()
+		return nil, sanitizeError(err)
+	}
+	response, err := c.retry.Do(wrapped)
 	if err != nil {
 		cancel()
 		return nil, sanitizeError(err)
@@ -555,24 +576,6 @@ func (b *cancelOnCloseBody) Close() error {
 func drainAndClose(r *http.Response) {
 	io.Copy(io.Discard, io.LimitReader(r.Body, 8192))
 	r.Body.Close()
-}
-
-func parseRetryAfter(v string) time.Duration {
-	if v == "" {
-		return 0
-	}
-	if seconds, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && seconds > 0 {
-		return time.Duration(seconds) * time.Second
-	}
-	return 0
-}
-
-func pow2(n int) int {
-	result := 1
-	for i := 0; i < n; i++ {
-		result *= 2
-	}
-	return result
 }
 
 // IPPureResult is the normalised risk verdict.

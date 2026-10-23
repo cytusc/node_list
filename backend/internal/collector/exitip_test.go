@@ -292,3 +292,61 @@ func TestResolveExitIPDoesNotWaitForHungEndpoint(t *testing.T) {
 		t.Fatalf("waited %s for a hung endpoint", elapsed)
 	}
 }
+
+// A 429 with Retry-After must be repeated rather than surfaced: the upstream
+// grants a retry, and dropping it costs the node its risk evidence for hours.
+func TestIPPureRetriesRateLimit(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"data":{"asn":{"number":15169}}}`)
+	}))
+	defer server.Close()
+	c := NewIPPureClient(server.Client(), server.URL, 5*time.Second)
+	c.retry.RetryWaitMin = 10 * time.Millisecond
+	if _, err := c.get(context.Background(), "/api/info/ip-basic/1.1.1.1"); err != nil {
+		t.Fatalf("retry after 429 failed: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream saw %d calls, want 2", got)
+	}
+}
+
+// A missing signature (403) is an answer, not a transport problem. Retrying it
+// would triple the cost of every rejected query.
+func TestIPPureDoesNotRetryClientErrors(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	c := NewIPPureClient(server.Client(), server.URL, 5*time.Second)
+	if _, err := c.get(context.Background(), "/api/info/ip-basic/1.1.1.1"); err == nil {
+		t.Fatal("403 must fail the query")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream saw %d calls, want 1", got)
+	}
+}
+
+// A dead tunnel must stay a transport error. Retrying it hides which carrier
+// failed and multiplies the time a broken node costs the lane.
+func TestIPPureDoesNotRetryTransportErrors(t *testing.T) {
+	var calls atomic.Int32
+	client := &http.Client{Transport: echoTransport(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("dial refused")
+	})}
+	c := NewIPPureClient(client, "http://example.invalid", 2*time.Second)
+	if _, err := c.get(context.Background(), "/api/info/ip-basic/1.1.1.1"); err == nil {
+		t.Fatal("transport failure must surface")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("transport attempted %d times, want 1", got)
+	}
+}
