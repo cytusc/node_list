@@ -36,10 +36,10 @@ type Client struct {
 	// of burning quota slots on requests that always cool down.
 	Providers []string
 	// FreshSweep waits for quotas instead of skipping IPs during maintenance.
-	BeforeProvider    func(context.Context, string) error
-	AfterProvider     func(context.Context, string, time.Time) error
-	FreshSweep        bool
-	mu                sync.Mutex
+	BeforeProvider func(context.Context, string) error
+	AfterProvider  func(context.Context, string, time.Time) error
+	FreshSweep     bool
+	mu             sync.Mutex
 	// prime collapses concurrent batch priming waves into one upstream call.
 	prime             singleflight.Group
 	providers         map[string]chan struct{}
