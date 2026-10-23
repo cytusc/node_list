@@ -50,3 +50,45 @@ func TestRiskWithoutCarrierFailsOverInsteadOfPanicking(t *testing.T) {
 		t.Fatalf("risk status=%q error=%q", status, message)
 	}
 }
+
+// A mirror that answers 200 {"ok":false} has lost its own upstream. Re-asking
+// from a residential address five minutes later cannot fix that, and the old
+// residential retry window made every refusal cost a slot in the fastest lane.
+func TestRiskUpstreamRefusalBacksOffOnResidentialLane(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.evidence(t, "risk")
+	f.exec(t, `DELETE FROM node_explorer_connectivity`)
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false}`))
+	}))
+	defer api.Close()
+	f.runner.Config.APIOrigin = api.URL
+	f.runner.Config.ResidentialInterval = 5 * time.Minute
+
+	payload := Payload{IP: "8.8.4.4", Identity: "residential:203.0.113.9:443"}
+	if err := f.repo.Schedule(ctx, KindRisk, payload.IP, payload, 1, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	j := f.claim(t, KindRisk)
+	if err := f.runner.risk(ctx, j, true); err != nil {
+		t.Fatalf("risk()=%v", err)
+	}
+
+	var status, code string
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT payload->>'riskQueryStatus', COALESCE(payload->>'riskQueryError','') FROM node_explorer_ip_attributes WHERE ip=$1`, payload.IP).Scan(&status, &code); err != nil {
+		t.Fatal(err)
+	}
+	if status != "query-failed" || code != "upstream-refused" {
+		t.Fatalf("status=%q code=%q", status, code)
+	}
+	var wait time.Duration
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at-now() FROM node_explorer_work WHERE kind=$1 AND key=$2`, KindRisk, payload.IP).Scan(&wait); err != nil {
+		t.Fatal(err)
+	}
+	if wait < 29*time.Minute {
+		t.Fatalf("refused mirror retried in %v; residential lane must not churn against a dead upstream", wait)
+	}
+}

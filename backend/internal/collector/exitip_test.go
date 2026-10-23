@@ -198,6 +198,30 @@ func TestIPPureFailureKeepsSafeStageAndCode(t *testing.T) {
 	}
 }
 
+// Only failures that another egress address could fix justify leasing another
+// carrier. The risk lane retried three carriers plus a direct call for every
+// failure, so a refused mirror cost each task up to forty seconds while the
+// queue behind it waited.
+func TestIPPureCarrierIndependence(t *testing.T) {
+	wrap := func(err error) error { return &IPPureQueryError{Stage: "ippure-basic", Err: err} }
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"mirror lost its upstream", wrap(errors.New("IPPure 接口返回失败")), true},
+		{"signature rejected", wrap(errors.New("IPPure 接口签名验证失败")), true},
+		{"edge forbids us", wrap(&ippureHTTPError{status: 403}), true},
+		{"timeout may be the carrier", wrap(context.DeadlineExceeded), false},
+		{"rate limited may be the carrier", wrap(&ippureHTTPError{status: 429}), false},
+		{"bad payload is not a carrier problem", wrap(errors.New("IPPure 接口未返回有效 JSON")), false},
+	} {
+		if got := IPPureCarrierIndependent(tc.err); got != tc.want {
+			t.Fatalf("%s: carrier independent = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestNullDataIsOnlyValidForOptionalASNStatistics(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"ok":true,"data":null}`) }))
 	defer server.Close()

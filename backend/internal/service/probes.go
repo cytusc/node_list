@@ -563,14 +563,25 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		if queryErr == nil {
 			break
 		}
+		// The mirror refused on its own side. Leasing another carrier would
+		// only spend the same forty seconds to reach the same answer, and the
+		// queue behind this task pays for it.
+		if collector.IPPureCarrierIndependent(queryErr) {
+			break
+		}
 	}
-	if queryErr != nil {
+	if queryErr != nil && !collector.IPPureCarrierIndependent(queryErr) {
 		// The tunnel exists to spread request source addresses, not because the
 		// API requires one. A dead node must not cost this IP its risk evidence
 		// for hours, so fall back to a direct call before giving up.
 		direct := &http.Client{Timeout: 12 * time.Second}
 		if retried, e := collector.QueryIPPure(ctx, collector.NewIPPureClient(direct, r.Config.APIOrigin, 10*time.Second), j.Payload.IP, r.asnCache); e == nil {
 			verdict, queryErr, queryMode = retried, nil, "direct"
+		} else {
+			// Keep the direct answer's reason. Discarding it left every failure
+			// recorded as "no carrier", which hid an upstream outage behind a
+			// transport-looking code and made the retry policy blind to it.
+			queryErr = e
 		}
 		direct.CloseIdleConnections()
 	}
@@ -616,8 +627,12 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		}
 		delay := 24 * time.Hour
 		if queryErr != nil {
+			// A mirror that refused on its own side cannot recover because a
+			// residential address asked again five minutes later. Backing off
+			// keeps the failure visible without spending the lane's whole
+			// capacity re-confirming an outage.
 			delay = 30 * time.Minute
-			if j.Priority > 0 {
+			if j.Priority > 0 && !collector.IPPureCarrierIndependent(queryErr) {
 				delay = r.Config.ResidentialInterval
 			}
 		} else {

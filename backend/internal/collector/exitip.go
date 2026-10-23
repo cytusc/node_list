@@ -384,6 +384,25 @@ func IPPureFailure(err error) (string, string) {
 	}
 	return stage, IPPureErrorCode(err)
 }
+
+// IPPureCarrierIndependent reports whether another egress address could change
+// the answer. A mirror that answers 200 {"ok":false} has lost its own upstream,
+// a missing signature is our credential problem, and a 403 comes from the
+// mirror's edge — none of them depend on which node carried the request.
+// Timeouts, resets and 429/5xx stay carrier-dependent, because a different
+// source address really can succeed there.
+//
+// The risk lane used to try three carriers and then a direct call for every
+// failure, so one refused mirror cost each task up to forty seconds of tunnel
+// setup and timeouts while the queue behind it waited.
+func IPPureCarrierIndependent(err error) bool {
+	switch IPPureErrorCode(err) {
+	case "upstream-refused", "signature-failed", "http-403":
+		return true
+	}
+	return false
+}
+
 func IPPureErrorCode(err error) string {
 	var query *IPPureQueryError
 	if errors.As(err, &query) {
