@@ -80,6 +80,11 @@ func (r *Runner) reference(ctx context.Context, exclude string) (*domain.Node, e
 // defeats the point. Freshness is a ranking signal instead of a filter: nodes
 // verified in the last two hours come first, older reachable ones fill the rest,
 // and random() keeps concurrent jobs off the same exit.
+// errNoCarrier reports that no node could be leased to carry a risk query. It
+// is an ordinary failure, not a programming error: it sends the job down the
+// direct-call fallback instead of the success branch.
+var errNoCarrier = errors.New("no carrier available")
+
 func (r *Runner) carriers(ctx context.Context, exclude string, limit int) ([]domain.Node, error) {
 	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.node FROM node_explorer_node_registry n JOIN node_explorer_connectivity c USING(identity)
 	WHERE n.available AND n.identity<>$1 AND c.payload->>'reachable'='true' AND c.checked_at>now()-interval '24 hours'
@@ -539,6 +544,12 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 	var verdict *collector.IPPureResult
 	var queryErr error
 	queryMode := "carrier"
+	if len(carriers) == 0 {
+		// Without an explicit error the loop below never runs, queryErr stays
+		// nil and the success branch dereferences a nil verdict. An IP-only job
+		// whose identity has no registry row lands here on every pass.
+		queryErr = errNoCarrier
+	}
 	for _, carrier := range carriers {
 		path, release, e := r.reserveOne(ctx, carrier, high)
 		if e != nil {
@@ -562,6 +573,11 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 			verdict, queryErr, queryMode = retried, nil, "direct"
 		}
 		direct.CloseIdleConnections()
+	}
+	if queryErr == nil && verdict == nil {
+		// Belt and braces: a client that reports success without a verdict
+		// must not take the process down with it.
+		queryErr = errNoCarrier
 	}
 	v := &domain.IPPureResult{IP: j.Payload.IP, Status: "error", FailureStage: "ippure-query", Error: "风险查询失败"}
 	e := ipcheck.Evidence{Provider: "ippure", IP: j.Payload.IP, CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Outcome: "unknown", QueryStatus: "request-failed"}
