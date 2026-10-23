@@ -94,9 +94,9 @@ services:
     command: [node-worker, -role, exit-attributes]
     environment:
       <<: *environment
-      # One lookup now waits out short provider quotas, so extra consumers
-      # pipeline those waits instead of multiplying upstream requests.
-      IP_SERVICE_ATTRIBUTES_CONCURRENCY: ${ATTRIBUTES_CONCURRENCY:-4}
+      # Extra consumers were measured to make things worse: they multiply
+      # quota contention and the provider clock, not throughput.
+      IP_SERVICE_ATTRIBUTES_CONCURRENCY: ${ATTRIBUTES_CONCURRENCY:-1}
       IPPURE_API_ORIGIN: ${IPPURE_API_ORIGIN:-https://api.123169.xyz}
       IPINFO_TOKEN: ${IPINFO_TOKEN:-}
       IP_API_PRO_KEY: ${IP_API_PRO_KEY:-}
