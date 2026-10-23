@@ -143,7 +143,7 @@ func (a *Adapter) initSchema(ctx context.Context) error {
 	// Bump schemaVersion whenever base tables, service SQL or live views change.
 	// All services share one transactional migration lock and skip DDL once this
 	// version has committed. A failed migration leaves no applied-version marker.
-	const schemaVersion = 9
+	const schemaVersion = 10
 	var migrationTable *string
 	if err = tx.QueryRow(ctx, `SELECT to_regclass('node_explorer_service_migrations')::text`).Scan(&migrationTable); err != nil {
 		return err

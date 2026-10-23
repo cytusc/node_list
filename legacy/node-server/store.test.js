@@ -260,12 +260,15 @@ test("unchanged files skip repeated import work and failed imports retry after r
   await store.sync(file);
   await store.sync(file);
   assert.equal(inserts, 1);
-  await writeFile(file, JSON.stringify({ nodes: [{ name: "Other" }] }));
+  // Keep the size different so the signature changes even on filesystems with
+  // coarse mtime/ctime precision.
+  const repaired = JSON.stringify({ nodes: [{ name: "Second import" }] });
+  await writeFile(file, repaired);
   await store.sync(file);
   assert.equal(inserts, 2);
   await writeFile(file, "{broken");
   await assert.rejects(store.sync(file));
-  await writeFile(file, JSON.stringify({ nodes: [{ name: "Other" }] }));
+  await writeFile(file, repaired);
   await store.sync(file);
   assert.equal(inserts, 3);
   await rm(file);
