@@ -119,29 +119,36 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 	}
 	e := Evidence{Provider: provider, IP: ip, CheckedAt: now.UTC().Format(time.RFC3339Nano), Outcome: "unknown", QueryStatus: "request-failed"}
 	quota := c.quotaKey(provider)
-	release, err := c.acquireProvider(ctx, quota)
-	if err != nil {
-		return e
-	}
-	defer release()
-	// Another caller may have populated the cache while we waited.
-	if old, ok := c.cached(key); ok {
-		return old
-	}
-	if wait := time.Until(c.providerNext(quota)); wait > 0 {
-		// Quota blocks should not stall a recovery wave. Short pacing is bounded.
+	var release func()
+	for {
+		var err error
+		release, err = c.acquireProvider(ctx, quota)
+		if err != nil {
+			return e
+		}
+		// Another caller may have populated the cache while we waited.
+		if old, ok := c.cached(key); ok {
+			release()
+			return old
+		}
+		wait := time.Until(c.providerNext(quota))
+		if wait <= 0 {
+			break // hold the slot for the request below
+		}
+		// Quota pacing must not hold the upstream slot: the shared clock
+		// already spaces requests by the same interval, so sibling sources
+		// proceed while this one waits. Only the request itself serialises
+		// per upstream.
+		release()
 		if wait > 2*time.Second && (!c.FreshSweep || c.providerDenied(quota)) {
 			e.QueryStatus = "quota-cooldown"
 			return e
 		}
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
+		if err := sleepContext(ctx, wait); err != nil {
 			return e
-		case <-timer.C:
 		}
 	}
+	defer release()
 	if c.BeforeProvider != nil {
 		if err := c.BeforeProvider(ctx, quota); err != nil {
 			e.QueryStatus = "quota-cooldown"
@@ -295,6 +302,13 @@ func (c *Client) BatchEvidence(ips []string) []Evidence {
 		}
 	}
 	return out
+}
+
+// IPAPICached reports whether fresh batch evidence already covers the address,
+// so callers can skip another priming round.
+func (c *Client) IPAPICached(ip string) bool {
+	_, ok := c.cached("ip-api:" + ip)
+	return ok
 }
 
 // ParseIPRegistry interprets connection and security attributes. Business and

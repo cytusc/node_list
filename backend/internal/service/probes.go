@@ -416,6 +416,15 @@ func (r *Runner) attributes(ctx context.Context, j Job) error {
 	if !used {
 		return r.Repo.Finish(ctx, j, nil)
 	}
+	// The ip-api share of the evidence fan-out comes from the batch endpoint:
+	// when this exit IP is not cached yet, one request also covers the other
+	// addresses already queued for classification. Cache hits skip the priming
+	// and the database query entirely.
+	if !r.Classification.IPAPICached(j.Payload.IP) {
+		if pending, err := r.Repo.PendingAttributeIPs(ctx, 100); err == nil && len(pending) > 0 {
+			_ = r.Classification.PrimeIPAPIBatch(ctx, pending)
+		}
+	}
 	// Classification does not wait for optional risk metrics.
 	evidence := r.Classification.Lookup(ctx, j.Payload.IP)
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {

@@ -150,6 +150,29 @@ func (r *Repository) IPUsed(ctx context.Context, ip string) (bool, error) {
 	return used, err
 }
 
+// PendingAttributeIPs lists up to limit distinct exit IPs that still have a
+// queued attributes task due now. One IP-API batch request then covers the
+// whole wave instead of one single-IP request per job.
+func (r *Repository) PendingAttributeIPs(ctx context.Context, limit int) ([]string, error) {
+	rows, err := r.Pool.Query(ctx, `SELECT DISTINCT key FROM node_explorer_work
+		WHERE kind=$1 AND state='queued' AND due_at<=now() LIMIT $2`, KindAttributes, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ips []string
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			return nil, err
+		}
+		if ip != "" {
+			ips = append(ips, ip)
+		}
+	}
+	return ips, rows.Err()
+}
+
 func fresh(raw string, ttl time.Duration) bool {
 	t, e := time.Parse(time.RFC3339Nano, raw)
 	return e == nil && t.Before(time.Now().Add(time.Minute)) && time.Since(t) <= ttl
