@@ -249,6 +249,16 @@ func StrongExit(ctx context.Context, tunnel, host *http.Client) (string, error) 
 	return ip, nil
 }
 
+// exitProbeBudget derives the probe window from the batch count and leaves a
+// fixed margin for country lookup. The cap keeps it inside the task lease.
+func exitProbeBudget(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		timeout = time.Duration(defaultExitProbeTimeout) * time.Second
+	}
+	batches := (len(collector.ExitProbeServices) + collector.ExitProbeBatch - 1) / collector.ExitProbeBatch
+	return min(time.Duration(batches)*timeout+30*time.Second, 100*time.Second)
+}
+
 func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	t, err := r.Repo.Target(ctx, j.Payload.Identity)
 	if err != nil {
@@ -294,13 +304,14 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 			v.IP, v.Source, v.Verified, v.AddressFamily = ip, "ipify+aws", true, 4
 		}
 	} else {
-		probeCtx, cancel := context.WithTimeout(ctx, 75*time.Second)
+		timeout := r.Config.ExitProbeTimeout
+		probeCtx, cancel := context.WithTimeout(ctx, exitProbeBudget(timeout))
 		defer cancel()
 		var preferred []string
 		if previous != nil && previous.Incarnation == t.Incarnation && previous.Endpoint != "" {
 			preferred = []string{previous.Endpoint}
 		}
-		o, e := collector.ResolveExitIPInfo(probeCtx, path.Client, 5*time.Second, preferred, nil)
+		o, e := collector.ResolveExitIPInfo(probeCtx, path.Client, timeout, preferred, nil)
 		if e != nil || o == nil {
 			v.Error = "出口探测失败"
 		} else {

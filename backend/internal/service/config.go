@@ -33,6 +33,22 @@ func Number(key string, def int) int {
 	return v
 }
 
+// BoundedSeconds clamps an out-of-range value instead of failing, so a bad
+// deployment value degrades probe timing rather than stopping the role.
+func BoundedSeconds(key string, def, low, high int) time.Duration {
+	v, e := strconv.Atoi(os.Getenv(key))
+	if e != nil || v <= 0 {
+		v = def
+	}
+	return time.Duration(min(max(v, low), high)) * time.Second
+}
+
+const (
+	defaultExitProbeTimeout = 8
+	exitProbeTimeoutMin     = 2
+	exitProbeTimeoutMax     = 30
+)
+
 // LoadEnv only fills missing environment variables; Compose always wins.
 func LoadEnv(root string) {
 	f, err := os.Open(filepath.Join(root, ".env"))
@@ -77,9 +93,12 @@ type Config struct {
 	ResidentialInterval, NormalInterval time.Duration
 	FastInterval                        time.Duration
 	Timeout, RetryDelay                 time.Duration
-	ScheduleInterval                    time.Duration
-	HighConcurrency, NormalConcurrency  int
-	ExitConcurrency                     int
+	// ExitProbeTimeout bounds one echo batch. Slow exits routinely need more
+	// than the old fixed five seconds, so it stays tunable per deployment.
+	ExitProbeTimeout                   time.Duration
+	ScheduleInterval                   time.Duration
+	HighConcurrency, NormalConcurrency int
+	ExitConcurrency                    int
 	// LaneConcurrency overrides the consumer count per work kind. Slow lanes
 	// (risk, attributes, lifecycle, recovery) default to one so raising a
 	// count stays an explicit operational choice.
@@ -114,6 +133,7 @@ func laneConcurrency(role string) map[string]int {
 func ConfigFromEnv(role string) (Config, error) {
 	c := Config{Role: role, NormalRecoveryInterval: Seconds("NORMAL_RECOVERY_INTERVAL_SECONDS", 1200), ResidentialInterval: Seconds("RESIDENTIAL_INTERVAL_SECONDS", 300), NormalInterval: Seconds("NORMAL_INTERVAL_SECONDS", 1800),
 		Timeout: Seconds("PROBE_TIMEOUT_SECONDS", 12), RetryDelay: Seconds("PROBE_RETRY_SECONDS", 10),
+		ExitProbeTimeout: BoundedSeconds("EXIT_PROBE_TIMEOUT_SECONDS", defaultExitProbeTimeout, exitProbeTimeoutMin, exitProbeTimeoutMax),
 		ScheduleInterval: Seconds("SCHEDULE_INTERVAL_SECONDS", 5),
 		FastInterval:     Seconds("FAST_INTERVAL_SECONDS", 1200),
 		HighConcurrency:  Number("RESIDENTIAL_CONCURRENCY", 2), NormalConcurrency: Number("NORMAL_CONCURRENCY", 2),

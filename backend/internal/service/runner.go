@@ -258,6 +258,24 @@ func (r *Runner) consume(ctx context.Context, kind string, high bool) {
 	}
 }
 
+// retryDelay picks the retry window for one failed task. Repeated deadline
+// failures stay queued but back off for 30 minutes so they stop holding exit
+// concurrency while the node keeps timing out.
+func retryDelay(j Job, err error) time.Duration {
+	var pending waiting
+	switch {
+	case errors.Is(err, transport.ErrConfigRejected):
+		return 6 * time.Hour
+	case errors.Is(err, transport.ErrManagerBusy):
+		return 5*time.Second + time.Duration(rand.Int64N(int64(5*time.Second)))
+	case errors.As(err, &pending):
+		return pending.delay
+	case errors.Is(err, context.DeadlineExceeded) && j.Attempts >= 3:
+		return 30 * time.Minute
+	}
+	return time.Duration(min(j.Attempts, 30)) * 10 * time.Second
+}
+
 func (r *Runner) executeJob(ctx context.Context, j Job, high bool, release func()) {
 	defer release()
 	taskCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -266,19 +284,19 @@ func (r *Runner) executeJob(ctx context.Context, j Job, high bool, release func(
 	if err == nil || errors.Is(err, ErrLeaseLost) {
 		return
 	}
-	delay := time.Duration(min(j.Attempts, 30)) * 10 * time.Second
+	delay := retryDelay(j, err)
 	message := "检测暂时失败，等待重试"
 	var pending waiting
 	if errors.Is(err, transport.ErrConfigRejected) {
-		delay = 6 * time.Hour
 		message = configRejectedMessage() + ": " + transport.ConfigRejectionCode(err)
 		log.Printf("%s: task %s: %s; retry in %s", j.Kind, j.Ref(), taskFailureReason(err), delay)
 	} else if errors.Is(err, transport.ErrManagerBusy) {
-		delay = 5*time.Second + time.Duration(rand.Int64N(int64(5*time.Second)))
 		message = "等待内核执行容量"
 	} else if errors.As(err, &pending) {
-		delay = pending.delay
 		message = "等待前置检测结果"
+	} else if errors.Is(err, context.DeadlineExceeded) && j.Attempts >= 3 {
+		message = "连续超时降级：任务多次超时，延长重试间隔"
+		log.Printf("%s: task %s: %s; retry in %s", j.Kind, j.Ref(), taskFailureReason(err), delay)
 	} else {
 		message += ": " + taskFailureReason(err)
 		log.Printf("%s: task %s failed: %s; retry in %s", j.Kind, j.Ref(), taskFailureReason(err), delay)

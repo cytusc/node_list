@@ -67,6 +67,28 @@ func TestNormalRecoveryConcurrencyOverride(t *testing.T) {
 	}
 }
 
+func TestExitProbeTimeoutConfig(t *testing.T) {
+	cases := []struct {
+		name, value string
+		want        time.Duration
+	}{
+		{"default", "", 8 * time.Second},
+		{"below range", "1", 2 * time.Second},
+		{"above range", "60", 30 * time.Second},
+		{"override", "12", 12 * time.Second},
+		{"invalid", "abc", 8 * time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("EXIT_PROBE_TIMEOUT_SECONDS", c.value)
+			cfg, err := ConfigFromEnv("recovery")
+			if err != nil || cfg.ExitProbeTimeout != c.want {
+				t.Fatalf("exit probe timeout: %s %v", cfg.ExitProbeTimeout, err)
+			}
+		})
+	}
+}
+
 func TestManagedConcurrencyHonorsConfiguration(t *testing.T) {
 	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
 	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
