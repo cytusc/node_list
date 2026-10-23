@@ -609,11 +609,11 @@ func parsePlugin(v string) (pluginResult, error) {
 			values["mode"] = "websocket"
 		}
 		if values["mode"] != "websocket" {
-			return pluginResult{}, ErrShareLink
+			return pluginResult{}, shareLinkError("unsupported-plugin-option")
 		}
 		return pluginResult{"v2ray-plugin", values}, nil
 	}
-	return pluginResult{}, ErrShareLink
+	return pluginResult{}, shareLinkError("unsupported-plugin")
 }
 
 // applyTransport converts the link's transport parameters into the Mihomo

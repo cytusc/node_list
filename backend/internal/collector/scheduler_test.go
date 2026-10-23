@@ -180,7 +180,7 @@ func TestQueueDeduplicatesConfigNodesAcrossHistory(t *testing.T) {
 	defer adapter.Close()
 	st := store.New(adapter, nil)
 	importer := store.NewIngestor(st)
-	node := domain.Node{Name: "same", Type: "ss", Server: "192.0.2.1", Port: "443", RawConfig: domain.ProxyConfig{"type": "ss", "server": "192.0.2.1", "port": 443}}
+	node := domain.Node{Name: "same", Type: "ss", Server: "192.0.2.1", Port: "443", RawConfig: domain.ProxyConfig{"type": "ss", "server": "192.0.2.1", "port": 443, "cipher": "aes-128-gcm", "password": "secret"}}
 	for _, checked := range []string{"2026-10-14T10:00:00Z", "2026-10-14T11:00:00Z"} {
 		if err := importer.Import(ctx, domain.Snapshot{CheckedAt: checked, Nodes: []domain.Node{node}}, nil); err != nil {
 			t.Fatal(err)
@@ -205,7 +205,7 @@ func TestQueueBackfillsMissingTrafficRatioAndThrottlesRetries(t *testing.T) {
 	defer adapter.Close()
 	st := store.New(adapter, nil)
 	importer := store.NewIngestor(st)
-	node := domain.Node{Name: "ratio", Type: "ss", Server: "192.0.2.1", Port: "443", RawConfig: domain.ProxyConfig{"type": "ss", "server": "192.0.2.1", "port": 443}}
+	node := domain.Node{Name: "ratio", Type: "ss", Server: "192.0.2.1", Port: "443", RawConfig: domain.ProxyConfig{"type": "ss", "server": "192.0.2.1", "port": 443, "cipher": "aes-128-gcm", "password": "secret"}}
 	if err := importer.Import(ctx, domain.Snapshot{CheckedAt: "2026-10-14T10:00:00Z", Nodes: []domain.Node{node}}, nil); err != nil {
 		t.Fatal(err)
 	}
