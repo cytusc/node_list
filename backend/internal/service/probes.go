@@ -321,6 +321,14 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	v.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	v.ProbeMillis = time.Since(started).Milliseconds()
 	checkExpectedExit(&v, j.Payload.ExpectedIP)
+	// The residential quick verdict talks to ip-api and needs a second pool
+	// connection for the provider quota, so it must never run inside Finish's
+	// transaction: holding one connection while asking for another deadlocks the
+	// pool (PGPOOL_MAX=8) and every waiting task burns its two-minute lease.
+	quickResidential := false
+	if v.Error == "" && v.AddressFamily == 4 && !strings.HasPrefix(j.Payload.Session, "recovery:") {
+		quickResidential = r.residentialQuickVerdict(ctx, v.IP)
+	}
 	if j.Payload.Session == "" && v.Error != "" {
 		v.FailureStreak = 1
 		if previous != nil && previous.Error != "" && (previous.Incarnation == "" || previous.Incarnation == t.Incarnation) {
@@ -358,9 +366,8 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 		if v.Error == "" && v.AddressFamily == 4 && !strings.HasPrefix(j.Payload.Session, "recovery:") {
 			// 住宅快判：ip-api 批量端点加权结果确认住宅时跳过完整属性加权，
 			// 直接投 IPPure 风险查询；误判由 attributes() 的属性新鲜度门回补。
-			strong := r.residentialQuickVerdict(ctx, v.IP)
 			kinds := []string{KindAttributes, KindRisk}
-			if strong {
+			if quickResidential {
 				kinds = kinds[1:]
 			}
 			payload := Payload{IP: v.IP, Identity: t.Identity}
