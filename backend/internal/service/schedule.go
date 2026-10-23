@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
+	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"github.com/cytusc/node_list/backend/internal/store"
 	"github.com/jackc/pgx/v5"
 )
@@ -302,6 +303,32 @@ func scheduleCompletedIP(ctx context.Context, tx pgx.Tx, kind, ip string, p Payl
 // already 70% two hours later, so those ranges are not worth a full day of
 // cache.
 const volatileBotShare = 25.0
+
+// attributesRetryDelay decides when one IP's evidence set is re-queried. A
+// source that only cooled down has not disagreed: it never answered, so a thin
+// consensus must not wait the full day.
+func attributesRetryDelay(evidence []ipcheck.Evidence, priority int, residential time.Duration) time.Duration {
+	typed, cooledDown := 0, false
+	for _, e := range evidence {
+		if e.QueryStatus == "quota-cooldown" {
+			cooledDown = true
+			continue
+		}
+		if e.QueryStatus == "success" && (e.UsageType != "" || e.ASNType != "" || e.CompanyType != "") {
+			typed++
+		}
+	}
+	switch {
+	case typed == 0:
+		if priority > 0 {
+			return residential
+		}
+		return 30 * time.Minute
+	case cooledDown && typed < 2:
+		return 6 * time.Hour
+	}
+	return 24 * time.Hour
+}
 
 // Risk refreshes distinguish optional statistics outages from absent data.
 // Base is the steady-state interval; ranges with a high bot share refresh at

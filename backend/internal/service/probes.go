@@ -449,20 +449,7 @@ func (r *Runner) attributes(ctx context.Context, j Job) error {
 		if err := mergeAttributes(ctx, tx, j.Payload.IP, evidence, nil); err != nil {
 			return err
 		}
-		delay := 24 * time.Hour
-		valid := false
-		for _, e := range evidence {
-			if e.QueryStatus == "success" && (e.UsageType != "" || e.ASNType != "" || e.CompanyType != "") {
-				valid = true
-			}
-		}
-		if !valid {
-			delay = 30 * time.Minute
-			if j.Priority > 0 {
-				delay = r.Config.ResidentialInterval
-			}
-		}
-		return recur(ctx, tx, j, delay)
+		return recur(ctx, tx, j, attributesRetryDelay(evidence, j.Priority, r.Config.ResidentialInterval))
 	})
 }
 

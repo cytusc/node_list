@@ -22,6 +22,11 @@ type Client struct {
 	IPAPIKey      string
 	IPRegistryKey string
 	AbuseIPDBKey  string
+	// ProviderWait bounds how long one lookup waits for its provider slot
+	// before recording a cooldown. Sources pace themselves by a few seconds, so
+	// a two-second tolerance used to abandon nearly every multi-source lookup
+	// and the missing type evidence then stayed missing for a whole day.
+	ProviderWait time.Duration
 	// FreshSweep waits for quotas instead of skipping IPs during maintenance.
 	BeforeProvider    func(context.Context, string) error
 	AfterProvider     func(context.Context, string, time.Time) error
@@ -48,6 +53,17 @@ func NewClient(token, proKey string, extraKeys ...string) *Client {
 		c.AbuseIPDBKey = extraKeys[1]
 	}
 	return c
+}
+
+// defaultProviderWait keeps one lookup inside a few seconds per source while
+// still waiting out ordinary quota spacing.
+const defaultProviderWait = 10 * time.Second
+
+func (c *Client) providerWait() time.Duration {
+	if c.ProviderWait > 0 {
+		return c.ProviderWait
+	}
+	return defaultProviderWait
 }
 
 func (c *Client) Lookup(ctx context.Context, ip string) []Evidence {
@@ -140,7 +156,7 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 		// proceed while this one waits. Only the request itself serialises
 		// per upstream.
 		release()
-		if wait > 2*time.Second && (!c.FreshSweep || c.providerDenied(quota)) {
+		if c.providerDenied(quota) || (!c.FreshSweep && wait > c.providerWait()) {
 			e.QueryStatus = "quota-cooldown"
 			return e
 		}
