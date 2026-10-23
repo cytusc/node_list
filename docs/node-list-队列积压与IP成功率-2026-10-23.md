@@ -116,3 +116,90 @@ case typed == 0:
 `ipinfo.io/<ip>/json`，响应里的 `asn.type` 会被 `ParseIPinfo` 解析成
 `ASNType`，`typed` 立刻从 0 变 1，属性刷新窗口也从 6 小时回到 24 小时。
 这是目前唯一不需要改代码、又能恢复住宅判定的做法。
+
+## 追加：失败查询覆盖正确信息导致的数据丢失（v1.5.60）
+
+### 现象
+
+香港/台湾住宅节点成批消失。抽样 `1.36.11.143`（AS4760 HKT Limited，
+香港电讯盈科住宅宽带）当前证据为：
+
+```
+ip-api    hosting=false   outcome=non-hosting   0 分（弃权）
+ipinfo    quota-cooldown                       0 分（弃权）
+ippure    request-failed                       0 分（弃权）
+```
+
+三源全弃权 → `state=unknown`。`LiveResults::isPreferred()` 只放行
+`state==='residential'`，节点被直接过滤掉。
+
+### 根因：失败行顶掉了成功行
+
+`ipcheck.Score()` 按 provider 取**窗口内最新的一行**投票，不区分这行是
+答案还是失败。于是同 provider 一次 `request-failed`/`quota-cooldown` 会
+顶掉上一次成功答案：
+
+- 该 provider 的 `Types` 票消失 → 汇总类型从「住宅IP」回落；
+- `Result.Evidence` 只剩失败行，而 `mergeAttributes` 的 `all` 正是由
+  `v.Classification.Evidence` 拼出来的 → **成功证据被永久丢弃**，
+  后续每次合并都带着这份残缺历史，损失不可逆；
+- `recoveryASN` 要求 `queryStatus=='success'`，也随之失去 ASN 证据。
+
+`mergeAttributes` 另有两处同类问题：
+
+- `v = *verdict`：风险查询成功时整体替换记录，把行里其它写入方的字段
+  一并抹掉；
+- `RiskQueryCheckedAt` 在失败时被刷成当前时间，让一份旧的成功结论看起来
+  像刚刚查过，同时把 `RiskQueryStatus` 从 `success` 改成 `query-failed`。
+
+在 IPPure 成功率只有 24%–35% 的环境里，任何一次刷新都可能命中失败，
+住宅判定因此逐步被"洗白"成 unknown。
+
+### 处置
+
+- `Score`：每个 provider 分别跟踪「窗口内最新已答复行」与「最新一次尝试」。
+  投票只用已答复行，失败行随结果一起保存用于诊断，**不能顶掉答案**；
+  已答复行仍受 24h 新鲜度约束，过期照常不投票。
+- `mergeAttributes`：新增 `applyRisk`，成功结论只覆盖风险字段
+  （状态/ASN/组织/属性/分数/流量占比），不再整体替换；证据改为累加，
+  每个 provider 至多保留「一条答案 + 一次尝试」，负载有界。
+- `RiskQueryCheckedAt` 只随成功前进，新增 `RiskQueryAttemptAt` 记录尝试
+  时间；`missingTrafficRatio` 的退避改看尝试时间。
+
+### 已经丢掉的数据：`attributes-repair`
+
+预防只能止损。状态回落到 unknown 的记录不会自己想起来，但
+`node_explorer_node_registry.historical_residential` 还在。新增命令：
+
+```bash
+# 默认只读，只统计
+PGHOST=... go run ./cmd/attributes-repair
+# 入队，默认单次 200 条，priority=0 走普通通道
+PGHOST=... go run ./cmd/attributes-repair -apply -limit 200
+```
+
+筛选条件：`available` 且 `historical_residential` 且当前非 residential，
+且证据里**没有**任何一条明确的机房答复（`outcome` 为
+`datacenter`/`provider-conflict`，或 `hosting=true`）。已被正确改判为
+机房的节点因此不会被反复重查。
+
+服务器上没有 Go，静态编译后拷进容器运行：
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/attributes-repair ./cmd/attributes-repair
+scp /tmp/attributes-repair root@<host>:/tmp/
+docker cp /tmp/attributes-repair node_list-node-explorer-1:/tmp/
+docker exec node_list-node-explorer-1 /tmp/attributes-repair          # 只读
+docker exec node_list-node-explorer-1 /tmp/attributes-repair -apply   # 入队
+```
+
+### 回归用例
+
+- `ipcheck.TestFailedLookupCannotEvictAnAnswer`：`request-failed` /
+  `quota-cooldown` / `http-error` 三种失败都不能顶掉同 provider 的答案，
+  且答案要能经 `Result.Evidence` 往返后继续生效。
+- `ipcheck.TestNewerAnswerReplacesOlderAnswer`：更新的答案仍可改判。
+- `service.TestFailedRefreshKeepsResidentialEvidence`：住宅结论与
+  「住宅IP」标签在失败刷新后保持不变，成功证据仍在数组里。
+- `service.TestFailedRiskRefreshPreservesScoreAndRecordsFailure`：失败
+  只移动尝试时间，不动状态/分数/结论时间。
