@@ -627,12 +627,14 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		}
 		delay := 24 * time.Hour
 		if queryErr != nil {
-			// A mirror that refused on its own side cannot recover because a
-			// residential address asked again five minutes later. Backing off
-			// keeps the failure visible without spending the lane's whole
-			// capacity re-confirming an outage.
+			// A mirror that refused on its own side cannot recover because an
+			// address asked again sooner. Every task retrying within the
+			// half-hour window put more work into the lane than it can retire,
+			// so an outage kept the backlog growing instead of draining.
 			delay = 30 * time.Minute
-			if j.Priority > 0 && !collector.IPPureCarrierIndependent(queryErr) {
+			if collector.IPPureCarrierIndependent(queryErr) {
+				delay = 2 * time.Hour
+			} else if j.Priority > 0 {
 				delay = r.Config.ResidentialInterval
 			}
 		} else {

@@ -88,7 +88,39 @@ func TestRiskUpstreamRefusalBacksOffOnResidentialLane(t *testing.T) {
 	if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at-now() FROM node_explorer_work WHERE kind=$1 AND key=$2`, KindRisk, payload.IP).Scan(&wait); err != nil {
 		t.Fatal(err)
 	}
-	if wait < 29*time.Minute {
-		t.Fatalf("refused mirror retried in %v; residential lane must not churn against a dead upstream", wait)
+	if wait < 119*time.Minute {
+		t.Fatalf("refused mirror retried in %v; the lane cannot retire work faster than an outage re-queues it", wait)
+	}
+}
+
+// A timeout may well be the carrier's fault, so it keeps the short retry that
+// lets a different node succeed.
+func TestRiskCarrierFailureKeepsShortRetry(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.evidence(t, "risk")
+	f.exec(t, `DELETE FROM node_explorer_connectivity`)
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusTooManyRequests)
+	}))
+	defer api.Close()
+	f.runner.Config.APIOrigin = api.URL
+	f.runner.Config.ResidentialInterval = 5 * time.Minute
+
+	payload := Payload{IP: "8.8.4.4", Identity: "residential:203.0.113.9:443"}
+	if err := f.repo.Schedule(ctx, KindRisk, payload.IP, payload, 1, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	j := f.claim(t, KindRisk)
+	if err := f.runner.risk(ctx, j, true); err != nil {
+		t.Fatalf("risk()=%v", err)
+	}
+	var wait time.Duration
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT due_at-now() FROM node_explorer_work WHERE kind=$1 AND key=$2`, KindRisk, payload.IP).Scan(&wait); err != nil {
+		t.Fatal(err)
+	}
+	if wait > 6*time.Minute {
+		t.Fatalf("rate limit retried in %v; a different carrier may still succeed", wait)
 	}
 }
