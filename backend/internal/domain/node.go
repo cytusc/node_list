@@ -70,23 +70,28 @@ type IPPureResult struct {
 	CheckedAt string `json:"checkedAt"`
 	Attempts  int    `json:"attempts"`
 
-	Status                string   `json:"status,omitempty"`
-	IP                    string   `json:"ip,omitempty"`
-	ASN                   string   `json:"asn,omitempty"`
-	Organization          string   `json:"asnOrganization,omitempty"`
-	Source                string   `json:"source,omitempty"`
-	Attributes            []string `json:"attributes,omitempty"`
-	HumanPercent          *float64 `json:"humanPercent,omitempty"`
-	BotPercent            *float64 `json:"botPercent,omitempty"`
-	TrafficRatioStatus    string   `json:"trafficRatioStatus,omitempty"`
-	TrafficRatioError     string   `json:"trafficRatioError,omitempty"`
-	RiskQueryStatus       string   `json:"riskQueryStatus,omitempty"`
-	RiskQueryError        string   `json:"riskQueryError,omitempty"`
-	RiskQueryCheckedAt    string   `json:"riskQueryCheckedAt,omitempty"`
-	RiskQueryAttemptAt    string   `json:"riskQueryAttemptAt,omitempty"`
-	TrafficRatioCheckedAt string   `json:"trafficRatioCheckedAt,omitempty"`
-	Score                 float64  `json:"score,omitempty"`
-	Label                 string   `json:"label,omitempty"`
+	Status             string   `json:"status,omitempty"`
+	IP                 string   `json:"ip,omitempty"`
+	ASN                string   `json:"asn,omitempty"`
+	Organization       string   `json:"asnOrganization,omitempty"`
+	Source             string   `json:"source,omitempty"`
+	Attributes         []string `json:"attributes,omitempty"`
+	HumanPercent       *float64 `json:"humanPercent,omitempty"`
+	BotPercent         *float64 `json:"botPercent,omitempty"`
+	TrafficRatioStatus string   `json:"trafficRatioStatus,omitempty"`
+	TrafficRatioError  string   `json:"trafficRatioError,omitempty"`
+	// RiskQueryStatus is the outcome of the last attempt; RiskQueryError is its
+	// reason. The verdict below keeps its own timestamps, so a refusal never
+	// makes an older answer look freshly checked: RiskQueryCheckedAt is when a
+	// risk answer was actually obtained, RiskQueryAttemptAt is when the last
+	// attempt — successful or not — finished.
+	RiskQueryStatus       string  `json:"riskQueryStatus,omitempty"`
+	RiskQueryError        string  `json:"riskQueryError,omitempty"`
+	RiskQueryCheckedAt    string  `json:"riskQueryCheckedAt,omitempty"`
+	RiskQueryAttemptAt    string  `json:"riskQueryAttemptAt,omitempty"`
+	TrafficRatioCheckedAt string  `json:"trafficRatioCheckedAt,omitempty"`
+	Score                 float64 `json:"score,omitempty"`
+	Label                 string  `json:"label,omitempty"`
 
 	Country       string `json:"country,omitempty"`
 	AddressFamily int    `json:"addressFamily,omitempty"`

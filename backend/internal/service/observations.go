@@ -144,9 +144,11 @@ func mergeAttributes(ctx context.Context, tx pgx.Tx, ip string, evidence []ipche
 			v.Error, v.FailureStage = verdict.Error, verdict.FailureStage
 			v.CheckedAt, v.RiskQueryStatus, v.RiskQueryError = stamp, verdict.RiskQueryStatus, verdict.RiskQueryError
 		default:
-			// A verdict is already stored. Keep its status, values and
-			// timestamp; record only that another attempt just failed.
-			v.RiskQueryError = verdict.RiskQueryError
+			// A verdict is already stored. Its values and its timestamp stay
+			// exactly as the successful query left them; only the attempt
+			// markers move, so "this source is failing" stays visible without
+			// pretending the old answer is fresh.
+			v.RiskQueryStatus, v.RiskQueryError = verdict.RiskQueryStatus, verdict.RiskQueryError
 		}
 		v.RiskQueryAttemptAt = stamp
 	}

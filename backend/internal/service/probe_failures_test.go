@@ -77,15 +77,20 @@ func TestFailedRiskRefreshPreservesScoreAndRecordsFailure(t *testing.T) {
 	var got domain.IPPureResult
 	json.Unmarshal(raw, &got)
 	// The verdict survives the refusal untouched: same status, same score, same
-	// check time. Only the attempt marker and the error move.
+	// check time, and the ratio keeps the moment it was actually measured.
 	if got.Status != "success" || got.Score != 3 || got.CheckedAt != before || got.HumanPercent == nil {
 		t.Fatalf("refresh overwrote the verdict: %+v", got)
 	}
-	if got.RiskQueryStatus != "success" || got.RiskQueryCheckedAt != answered {
-		t.Fatalf("failed attempt downgraded a stored success: %+v", got)
+	if got.RiskQueryCheckedAt != answered {
+		t.Fatalf("failed attempt made the stored verdict look fresh: %q, want %q", got.RiskQueryCheckedAt, answered)
 	}
-	if got.RiskQueryError != "http-403" || got.RiskQueryAttemptAt == "" {
+	// The attempt itself is still visible, so an operator can see the source is
+	// failing while the last answer keeps its own timestamp.
+	if got.RiskQueryStatus != "query-failed" || got.RiskQueryError != "http-403" || got.RiskQueryAttemptAt == "" {
 		t.Fatalf("failed attempt was not recorded: %+v", got)
+	}
+	if got.RiskQueryAttemptAt == answered {
+		t.Fatalf("attempt marker did not move: %+v", got)
 	}
 }
 
