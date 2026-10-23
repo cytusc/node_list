@@ -45,13 +45,13 @@ func TestCarriersOnlyReturnsVerifiedLiveNodes(t *testing.T) {
 	}
 }
 
-// Stale reachability must drop out of the pool so a carrier that died an hour
-// ago is not leased again.
+// Reachability older than a day must drop out of the pool: a carrier last seen
+// working yesterday is not worth leasing again.
 func TestCarriersDropsStaleReachability(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	f.evidence(t, "stale")
-	f.exec(t, `UPDATE node_explorer_connectivity SET checked_at = now() - interval '31 minutes'`)
+	f.exec(t, `UPDATE node_explorer_connectivity SET checked_at = now() - interval '25 hours'`)
 	got, err := f.runner.carriers(ctx, "", 3)
 	if err != nil {
 		t.Fatal(err)

@@ -75,12 +75,17 @@ func (r *Runner) reference(ctx context.Context, exclude string) (*domain.Node, e
 // the path. Leasing whichever healthy node answers first spreads the request
 // source across many addresses instead of funnelling every query through the
 // single most recently seen node, which is what the upstream throttles.
+//
+// A 30-minute window left only four candidates on a 45k-node registry, which
+// defeats the point. Freshness is a ranking signal instead of a filter: nodes
+// verified in the last two hours come first, older reachable ones fill the rest,
+// and random() keeps concurrent jobs off the same exit.
 func (r *Runner) carriers(ctx context.Context, exclude string, limit int) ([]domain.Node, error) {
 	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.node FROM node_explorer_node_registry n JOIN node_explorer_connectivity c USING(identity)
-	WHERE n.available AND n.identity<>$1 AND c.payload->>'reachable'='true' AND c.checked_at>now()-interval '30 minutes'
+	WHERE n.available AND n.identity<>$1 AND c.payload->>'reachable'='true' AND c.checked_at>now()-interval '24 hours'
 	AND NOT EXISTS(SELECT 1 FROM node_explorer_retired_nodes t WHERE t.identity=n.identity)
 	AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
-	ORDER BY random() LIMIT $2`, exclude, limit)
+	ORDER BY (c.checked_at>now()-interval '2 hours') DESC, random() LIMIT $2`, exclude, limit)
 	if err != nil {
 		return nil, err
 	}
