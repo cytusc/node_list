@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -81,10 +82,12 @@ func TestBatchPrimingSharesProviderQuota(t *testing.T) {
 // classification verdict cannot change.
 func TestAttributesWaveEquivalence(t *testing.T) {
 	ips := []string{"198.51.100.10", "198.51.100.11", "198.51.100.12"}
-	client := func(counter *int) *Client {
+	client := func(counter *atomic.Int32) *Client {
 		c := NewClient("", "", "registry", "")
 		c.HTTP = &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
-			*counter++
+			// Lookup fans out over six sources concurrently, so the counter the
+			// mock increments must be atomic under -race.
+			counter.Add(1)
 			time.Sleep(20 * time.Millisecond)
 			if r.Method == http.MethodPost {
 				var requested []string
@@ -119,14 +122,14 @@ func TestAttributesWaveEquivalence(t *testing.T) {
 		return c
 	}
 
-	oldCalls := 0
+	var oldCalls atomic.Int32
 	oldClient := client(&oldCalls)
 	oldEvidence := map[string][]Evidence{}
 	for _, ip := range ips {
 		oldEvidence[ip] = oldClient.Lookup(context.Background(), ip)
 	}
 
-	newCalls := 0
+	var newCalls atomic.Int32
 	newClient := client(&newCalls)
 	ctx := context.Background()
 	if err := newClient.PrimeIPAPIBatch(ctx, ips); err != nil {
@@ -138,11 +141,11 @@ func TestAttributesWaveEquivalence(t *testing.T) {
 	}
 
 	// Old: 6 providers x 3 IPs. New: 1 batch + 5 providers x 3 IPs.
-	if oldCalls != len(ips)*6 {
-		t.Fatalf("unexpected old request count: %d", oldCalls)
+	if got := oldCalls.Load(); got != int32(len(ips)*6) {
+		t.Fatalf("unexpected old request count: %d", got)
 	}
-	if newCalls != 1+len(ips)*5 {
-		t.Fatalf("unexpected new request count: %d", newCalls)
+	if got := newCalls.Load(); got != int32(1+len(ips)*5) {
+		t.Fatalf("unexpected new request count: %d", got)
 	}
 	for _, ip := range ips {
 		for i := range oldEvidence[ip] {
