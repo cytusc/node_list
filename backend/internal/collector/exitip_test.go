@@ -189,6 +189,13 @@ func TestIPPureFailureKeepsSafeStageAndCode(t *testing.T) {
 	if code != "invalid-json" {
 		t.Fatal(code)
 	}
+	// The mirror answers 200 with {"ok":false} when its upstream is down. That
+	// is not our network failing and must not be reported as a generic request
+	// failure, which is what made the last outage hard to diagnose.
+	_, code = IPPureFailure(&IPPureQueryError{Stage: "ippure-basic", Err: errors.New("IPPure 接口返回失败")})
+	if code != "upstream-refused" {
+		t.Fatal(code)
+	}
 }
 
 func TestNullDataIsOnlyValidForOptionalASNStatistics(t *testing.T) {

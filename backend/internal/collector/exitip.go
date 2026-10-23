@@ -402,6 +402,8 @@ func IPPureErrorCode(err error) string {
 		return probe.code
 	}
 	switch {
+	case strings.Contains(err.Error(), "接口返回失败"):
+		return "upstream-refused"
 	case strings.Contains(err.Error(), "签名"):
 		return "signature-failed"
 	case strings.Contains(err.Error(), "JSON"):
@@ -515,6 +517,10 @@ func (c *IPPureClient) get(ctx context.Context, path string) (map[string]any, er
 			}
 		}
 		if !payload.OK || payload.Data == nil {
+			// The mirror answers 200 with {"ok":false} when its own upstream is
+			// unavailable, which is indistinguishable from a bad request unless
+			// the code says so. Keeping it separate stops an upstream outage
+			// from being read as our network failing.
 			return nil, errors.New("IPPure 接口返回失败")
 		}
 		return payload.Data, nil
