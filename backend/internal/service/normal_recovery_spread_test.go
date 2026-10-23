@@ -41,8 +41,15 @@ func TestSpreadDueIsStableAndBounded(t *testing.T) {
 func TestNormalRecoverySpreadsRetirementWave(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
+	// The re-arm computes retiredAt + interval * offset. With the fixture's
+	// 20-minute default the whole expression is already in the past, greatest()
+	// pins everything to now() and there is nothing left to spread — so this
+	// case has to run with the real daily ceiling.
+	f.runner.Config.NormalRecoveryInterval = 24 * time.Hour
 	retiredAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
-	for _, key := range []string{"wave-a", "wave-b", "wave-c", "wave-d", "wave-e", "wave-f"} {
+	keys := []string{"wave-a", "wave-b", "wave-c", "wave-d", "wave-e", "wave-f",
+		"wave-g", "wave-h", "wave-i", "wave-j", "wave-k", "wave-l"}
+	for _, key := range keys {
 		f.exec(t, `INSERT INTO node_explorer_work(kind,key,payload,due_at)
 			VALUES('normal-recovery',$1,$2::jsonb,now()+interval '30 hours')`,
 			key, `{"retiredAt":"`+retiredAt+`","recoveryAttempts":0}`)
@@ -51,11 +58,15 @@ func TestNormalRecoverySpreadsRetirementWave(t *testing.T) {
 		t.Fatal(err)
 	}
 	var distinct int
-	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(DISTINCT due_at) FROM node_explorer_work WHERE kind='normal-recovery'`).Scan(&distinct); err != nil {
+	var earliest time.Time
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(DISTINCT due_at), min(due_at) FROM node_explorer_work WHERE kind='normal-recovery'`).Scan(&distinct, &earliest); err != nil {
 		t.Fatal(err)
 	}
-	if distinct < 2 {
-		t.Fatalf("retirement wave kept a single due_at: %d", distinct)
+	if distinct < len(keys)/2 {
+		t.Fatalf("retirement wave kept only %d distinct due_at for %d keys", distinct, len(keys))
+	}
+	if !earliest.After(time.Now()) {
+		t.Fatalf("re-arm collapsed the wave into the past: earliest %s", earliest)
 	}
 
 	// Re-running the scheduler must not reshuffle: the offset is a key hash.
