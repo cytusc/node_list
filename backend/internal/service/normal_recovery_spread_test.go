@@ -29,8 +29,14 @@ func TestSpreadDueIsStableAndBounded(t *testing.T) {
 	if len(seen) < 20 {
 		t.Fatalf("only %d distinct offsets across 200 keys", len(seen))
 	}
-	if got := spreadDue(base, "short", time.Second); !got.Equal(base) {
-		t.Fatalf("sub-second interval must not be spread: %s", got)
+	for _, short := range []time.Duration{time.Second, 5 * time.Minute, 59 * time.Minute} {
+		if got := spreadDue(base, "short", short); !got.Equal(base) {
+			t.Fatalf("sub-hour interval %s must not be spread: %s", short, got)
+		}
+	}
+	// One hour is the first tier worth spreading: the offset must stay bounded.
+	if got := spreadDue(base, "hour", time.Hour); got.Sub(base) < 0 || got.Sub(base) >= 15*time.Minute {
+		t.Fatalf("hour interval offset %s outside [0,15m)", got.Sub(base))
 	}
 }
 

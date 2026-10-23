@@ -36,7 +36,11 @@ func normalRecoveryFirstDue(identity, retiredAt string, now time.Time, interval 
 // lands on the same second: 38k retired nodes produced an 11.9k/hour spike
 // against a 3.6k/hour exit lane. Spreading keeps the queue a stream.
 func spreadDue(due time.Time, key string, interval time.Duration) time.Time {
-	if interval <= time.Second {
+	// Short waits are not a wave: a capacity retry measured in minutes must keep
+	// its exact deadline so the scheduler stays predictable, and spreading it by
+	// seconds buys nothing. The spike this guards against lives at the daily
+	// ceiling.
+	if interval < time.Hour {
 		return due
 	}
 	hash := fnv.New64a()

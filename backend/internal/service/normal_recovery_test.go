@@ -462,7 +462,9 @@ func TestNormalRecoveryBacksOffRepeatedFailures(t *testing.T) {
 	if attempts != 2 {
 		t.Fatalf("attempts not accumulated: %d", attempts)
 	}
-	if due.Before(time.Now().Add(1*time.Hour+59*time.Minute)) || due.After(time.Now().Add(2*time.Hour+time.Minute)) {
+	// The wait is two hours plus a keyed offset of at most a quarter of it, so a
+	// wave of second failures spreads instead of landing on one second.
+	if due.Before(time.Now().Add(1*time.Hour+59*time.Minute)) || due.After(time.Now().Add(2*time.Hour+31*time.Minute)) {
 		t.Fatalf("second failure did not back off to two hours: %v", due)
 	}
 	// The prefetch advance must leave tiered deadlines alone.
