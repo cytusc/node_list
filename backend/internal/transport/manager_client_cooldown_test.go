@@ -158,3 +158,30 @@ func TestManagerExitCapacityOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Risk queries ride a tunnel and lose the whole slot when the node is dead, so
+// the ceiling must be tunable without a rebuild: the refresh queue backs up
+// behind a hardcoded two.
+func TestManagerRiskCapacityOverride(t *testing.T) {
+	m, _, _ := fakeManager(t)
+	m.RiskConcurrency = 4
+	targets := []RegistryEntry{entry("a")}
+	if err := m.Sync(context.Background(), targets); err != nil {
+		t.Fatal(err)
+	}
+	var leases []Lease
+	for i := 0; i < 4; i++ {
+		l, err := m.Acquire(LeaseRequest{Kind: "risk", Targets: targets})
+		if err != nil {
+			t.Fatalf("risk slot %d: %v", i, err)
+		}
+		leases = append(leases, l)
+	}
+	if _, err := m.Acquire(LeaseRequest{Kind: "risk", Targets: targets}); !errors.Is(err, ErrManagerBusy) {
+		t.Fatalf("risk capacity exceeded: %v", err)
+	}
+	m.Release(leases[0].ID)
+	if _, err := m.Acquire(LeaseRequest{Kind: "risk", Targets: targets}); err != nil {
+		t.Fatal(err)
+	}
+}

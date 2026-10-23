@@ -50,6 +50,7 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 	}
 	m := transport.NewManager(instance)
 	m.ExitConcurrency = Number("MIHOMO_EXIT_CONCURRENCY", 8)
+	m.RiskConcurrency = Number("MIHOMO_RISK_CONCURRENCY", 2)
 	sweeps := newSweepRunner(Seconds("SWEEP_INTERVAL_SECONDS", 1800))
 	defer sweeps.stop()
 	server := &http.Server{Addr: Env("MIHOMO_MANAGER_LISTEN", ":9080"), Handler: m.Handler(apiToken), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}

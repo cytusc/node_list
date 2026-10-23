@@ -10,6 +10,7 @@ x-environment: &environment
   REDIS_NAMESPACE: ${REDIS_NAMESPACE:-node-explorer}
   NORMAL_INTERVAL_SECONDS: ${NORMAL_INTERVAL_SECONDS:-1800}
   MIHOMO_EXIT_CONCURRENCY: ${MIHOMO_EXIT_CONCURRENCY:-8}
+  MIHOMO_RISK_CONCURRENCY: ${MIHOMO_RISK_CONCURRENCY:-2}
   MIHOMO_MANAGER_URL: http://mihomo-manager:9080
   MIHOMO_MANAGER_TOKEN: ${MIHOMO_MANAGER_TOKEN:?Set MIHOMO_MANAGER_TOKEN in .env}
   # Validation mode suppresses automatic retirement, restore and physical deletion.
@@ -99,10 +100,10 @@ services:
       IP_SERVICE_ATTRIBUTES_CONCURRENCY: ${ATTRIBUTES_CONCURRENCY:-1}
       IPPURE_API_ORIGIN: ${IPPURE_API_ORIGIN:-https://api.123169.xyz}
       # Comma separated subset of ipinfo,ip-api,ipregistry,abuseipdb,ipapi,
-  # ip2location. Empty keeps every source; deployments without credentials for
-  # some of them should narrow the list instead of querying blind.
-  IP_PROVIDERS: ${IP_PROVIDERS:-}
-  IPINFO_TOKEN: ${IPINFO_TOKEN:-}
+      # ip2location. Empty keeps every source; deployments without credentials
+      # for some of them should narrow the list instead of querying blind.
+      IP_PROVIDERS: ${IP_PROVIDERS:-}
+      IPINFO_TOKEN: ${IPINFO_TOKEN:-}
       IP_API_PRO_KEY: ${IP_API_PRO_KEY:-}
       IPREGISTRY_API_KEY: ${IPREGISTRY_API_KEY:-}
       ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}

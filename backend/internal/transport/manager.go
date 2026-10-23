@@ -127,8 +127,12 @@ type ManagerStats struct {
 type Manager struct {
 	healthMu sync.Mutex
 	Instance MihomoConfig
-	// ExitConcurrency is configured before serving requests.
+	// ExitConcurrency and RiskConcurrency are configured before serving
+	// requests. Risk queries are IPPure lookups that ride a tunnel; a dead
+	// tunnel burns the whole slot for the query timeout, so the ceiling has to
+	// be high enough to keep the refresh queue moving.
 	ExitConcurrency                      int
+	RiskConcurrency                      int
 	mu                                   sync.Mutex
 	entries                              map[string]RegistryEntry
 	rejected                             map[string]string
@@ -149,7 +153,7 @@ type Manager struct {
 }
 
 func NewManager(instance MihomoConfig) *Manager {
-	return &Manager{Instance: instance, ExitConcurrency: 8, epoch: token(), entries: map[string]RegistryEntry{}, rejected: map[string]string{}, credentials: map[string]string{}, leases: map[string]Lease{}, delaying: map[string]bool{}}
+	return &Manager{Instance: instance, ExitConcurrency: 8, RiskConcurrency: 2, epoch: token(), entries: map[string]RegistryEntry{}, rejected: map[string]string{}, credentials: map[string]string{}, leases: map[string]Lease{}, delaying: map[string]bool{}}
 }
 func (m *Manager) prune() {
 	for id, l := range m.leases {
@@ -459,6 +463,9 @@ func (m *Manager) Acquire(req LeaseRequest) (Lease, error) {
 	limit := map[string]int{"strict": 8, "exit": 8, "risk": 2, "delay": 32, "proof": 128}[req.Kind]
 	if req.Kind == "exit" && m.ExitConcurrency > 0 {
 		limit = m.ExitConcurrency
+	}
+	if req.Kind == "risk" && m.RiskConcurrency > 0 {
+		limit = m.RiskConcurrency
 	}
 	if limit == 0 || len(req.Targets) == 0 || len(req.Targets) > 2 {
 		return Lease{}, errors.New("invalid lease request")
