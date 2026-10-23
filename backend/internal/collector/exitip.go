@@ -156,9 +156,42 @@ func ResolveExitIPInfo(ctx context.Context, client *http.Client, timeout time.Du
 			}(service)
 		}
 		var winner *ExitOutcome
-		// Drain cancelled losers before releasing the node's execution lease.
-		for range batch {
-			r := <-results
+		// Drain completed attempts, but never wait for one that ignores its
+		// context: a hung dial used to block the batch until the task lease
+		// expired two minutes later. The cancel below unblocks it.
+		drained := 0
+		for drained < len(batch) {
+			var r result
+			select {
+			case r = <-results:
+			case <-batchCtx.Done():
+				// Cancelled after a winner, or the probe budget ran out. Give the
+				// remaining attempts one short shared window to report, then leave
+				// them behind: a transport that ignores its context must not keep
+				// the task lease busy.
+				drainDeadline := time.After(500 * time.Millisecond)
+			graceful:
+				for drained < len(batch) {
+					select {
+					case <-results:
+						drained++
+					case <-drainDeadline:
+						break graceful
+					}
+				}
+				cancel()
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				if winner != nil {
+					if winner.Country == "" {
+						winner.Country, _ = ResolveExitCountry(ctx, client, min(timeout, time.Second))
+					}
+					return winner, nil
+				}
+				return nil, &exitError{code: "EXIT_IP", err: fmt.Errorf("出口 IP 探测超时：%d 个查询入口未返回", failures)}
+			}
+			drained++
 			if r.err != nil {
 				if winner == nil {
 					failures++

@@ -217,6 +217,14 @@ func (m *Manager) push(ctx context.Context, payload []byte) (int, error) {
 	return -1, errors.New("Mihomo configuration load failed")
 }
 
+// validateBatchSize bounds how many changed connections one validation load
+// carries. Every load restarts the kernel, so small batches multiply the
+// outage: a 44k-node registry whose digests all changed needed 179 reloads at
+// 256 per batch, roughly six minutes of kernel churn during which every probe
+// stalled and hit its task deadline. Larger batches keep the isolation
+// property (the failing index is still removed and retried) at 1/8 the churn.
+const validateBatchSize = 2048
+
 // Sync drains before updating and restores the last valid document on failure.
 // Call serially, after the registry has been stable for the coalescing interval.
 func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
@@ -327,9 +335,9 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 	// configs were already installed successfully, including known rejections.
 	// A small update needs only the final install; large imports validate in batches.
 	// No lease is admitted during these loads.
-	if len(changed) > 256 {
-		for offset := 0; offset < len(changed); offset += 256 {
-			end := offset + 256
+	if len(changed) > validateBatchSize {
+		for offset := 0; offset < len(changed); offset += validateBatchSize {
+			end := offset + validateBatchSize
 			if end > len(changed) {
 				end = len(changed)
 			}

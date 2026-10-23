@@ -264,3 +264,24 @@ func TestExitIPv6DoesNotCancelIPv4Fallback(t *testing.T) {
 		t.Fatalf("IPv4 fallback skipped: %+v %v", o, err)
 	}
 }
+
+// A dial that ignores its request context must not hold the batch: before this
+// bound, one hung endpoint blocked the whole probe until the task lease expired
+// two minutes later, and every worker slot eventually stalled the same way.
+func TestResolveExitIPDoesNotWaitForHungEndpoint(t *testing.T) {
+	block := make(chan struct{})
+	defer close(block)
+	client := &http.Client{Transport: echoTransport(func(*http.Request) (*http.Response, error) {
+		<-block
+		return nil, errors.New("unblocked")
+	})}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := ResolveExitIPInfo(ctx, client, 200*time.Millisecond, nil, nil); err == nil {
+		t.Fatal("hung endpoints must not report a successful probe")
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("waited %s for a hung endpoint", elapsed)
+	}
+}
