@@ -502,6 +502,17 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		return waiting{30 * time.Second}
 	}
 	verdict, queryErr := collector.QueryIPPure(ctx, collector.NewIPPureClient(path.Client, r.Config.APIOrigin, 10*time.Second), j.Payload.IP, r.asnCache)
+	queryMode := "tunnel"
+	if queryErr != nil {
+		// The tunnel exists to spread request source addresses, not because the
+		// API requires one. A dead node must not cost this IP its risk evidence
+		// for hours, so fall back to a direct call before giving up.
+		direct := &http.Client{Timeout: 12 * time.Second}
+		if retried, e := collector.QueryIPPure(ctx, collector.NewIPPureClient(direct, r.Config.APIOrigin, 10*time.Second), j.Payload.IP, r.asnCache); e == nil {
+			verdict, queryErr, queryMode = retried, nil, "direct"
+		}
+		direct.CloseIdleConnections()
+	}
 	v := &domain.IPPureResult{IP: j.Payload.IP, Status: "error", FailureStage: "ippure-query", Error: "风险查询失败"}
 	e := ipcheck.Evidence{Provider: "ippure", IP: j.Payload.IP, CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Outcome: "unknown", QueryStatus: "request-failed"}
 	v.RiskQueryStatus = "query-failed"
@@ -518,6 +529,7 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		v.Attributes, v.Score, v.Label = verdict.Attributes, verdict.Score, verdict.Label
 		v.HumanPercent, v.BotPercent = verdict.HumanPercent, verdict.BotPercent
 		v.TrafficRatioStatus = verdict.TrafficRatioStatus
+		v.QueryMode = queryMode
 		v.TrafficRatioError = verdict.TrafficRatioError
 		e = ipcheck.IPPureEvidence(j.Payload.IP, verdict.Attributes, e.CheckedAt)
 		e.QueryStatus = "success"
