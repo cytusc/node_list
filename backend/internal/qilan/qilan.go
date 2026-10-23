@@ -53,6 +53,13 @@ type qilanNode struct {
 	Network      string `json:"network"`
 	LastCheck    string `json:"last_check"`
 	FeaturesList []any  `json:"features_list"`
+	City         string `json:"city"`
+	Org          string `json:"org"`
+	IPScore      any    `json:"ip_score"`
+	Native       bool   `json:"is_native"`
+	Black        bool   `json:"is_black"`
+	TrafficRate  any    `json:"traffic_rate"`
+	FailCount    any    `json:"fail_count"`
 }
 
 func linkSettings(link string) (tls bool, sni string) {
@@ -116,16 +123,80 @@ func scalar(v any) string {
 }
 
 // normalizeNode converts one panel row into the stored node shape.
-func normalizeNode(node qilanNode) *domain.Node {
-	if node.ID == nil || node.Protocol == "" || node.Server == "" ||
-		node.Port == nil || node.Link == "" {
-		return nil
+// normalizeNetwork accepts the panel's network value, which is unreliable:
+// hysteria2 rows report "tcp", ssr rows report the SSR protocol name
+// (auth_chain_a), and some links append the display tag (tcp#tag). Protocol
+// facts win; the panel value is only a fallback for unknown transports.
+func normalizeNetwork(raw, protocol string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if prefix, _, found := strings.Cut(value, "#"); found {
+		value = strings.TrimSpace(prefix)
 	}
-	name := node.Name
-	if name == "" {
-		name = fmt.Sprintf("Qilan %v", node.ID)
+	switch value {
+	case "raw":
+		value = "tcp"
+	case "":
+		value = "tcp"
 	}
-	tls, sni := linkSettings(node.Link)
+	switch protocol {
+	case "hysteria", "hysteria2", "hy2", "tuic":
+		return "quic"
+	case "ssr", "ss", "socks", "socks5", "http", "https":
+		// These transports have no HTTP-style network; the panel field holds
+		// SSR's protocol or an unrelated value there.
+		if value == "tcp" || value == "" || value == "auth_chain_a" || value == "auth_aes128_md5" ||
+			value == "auth_aes128_sha1" || value == "origin" || value == "plain" {
+			return "tcp"
+		}
+	}
+	switch value {
+	case "tcp", "ws", "grpc", "http", "h2", "httpupgrade", "xhttp", "quic", "kcp":
+		return value
+	}
+	return "tcp"
+}
+
+// protocolDetails surfaces the parsed options SummarizeProxy's fixed summary
+// list does not carry. Qilan nodes are keyed by their share link, so adding
+// detail rows cannot change their stored identity.
+func protocolDetails(proxy domain.ProxyConfig) []domain.Detail {
+	var out []domain.Detail
+	if reality, ok := proxy["reality-opts"].(map[string]any); ok {
+		if v, _ := reality["public-key"].(string); v != "" {
+			out = append(out, domain.Detail{K: "reality-public-key", V: v})
+		}
+		if v, _ := reality["short-id"].(string); v != "" {
+			out = append(out, domain.Detail{K: "reality-short-id", V: v})
+		}
+	}
+	if ech, ok := proxy["ech-opts"].(map[string]any); ok {
+		if query, _ := ech["query-server-name"].(string); query != "" {
+			out = append(out, domain.Detail{K: "ech", V: query})
+		} else if enabled, _ := ech["enable"].(bool); enabled {
+			out = append(out, domain.Detail{K: "ech", V: "enabled"})
+		}
+	}
+	if v, _ := proxy["packet-encoding"].(string); v != "" {
+		out = append(out, domain.Detail{K: "packet-encoding", V: v})
+	}
+	if v, _ := proxy["obfs-password"].(string); v != "" {
+		out = append(out, domain.Detail{K: "obfs-password", V: v})
+	}
+	if v, ok := proxy["alterId"].(int); ok && v > 0 {
+		out = append(out, domain.Detail{K: "alter-id", V: strconv.Itoa(v)})
+	}
+	if xhttp, ok := proxy["xhttp-opts"].(map[string]any); ok {
+		if v, _ := xhttp["mode"].(string); v != "" {
+			out = append(out, domain.Detail{K: "xhttp-mode", V: v})
+		}
+	}
+	return out
+}
+
+// panelDetails renders the panel columns that only Qilan knows. Fields whose
+// unit is unstated upstream (speed/speed_limit) are deliberately omitted
+// instead of being displayed with a guessed unit.
+func panelDetails(node qilanNode) []domain.Detail {
 	details := []domain.Detail{{K: "source-id", V: scalar(node.ID)}}
 	if ping, ok := toFloat(node.Ping); ok && ping > 0 {
 		details = append(details, domain.Detail{K: "latency", V: fmt.Sprintf("%d ms", int64(ping))})
@@ -142,6 +213,32 @@ func normalizeNode(node qilanNode) *domain.Node {
 	if asn := scalar(node.ASN); asn != "" {
 		details = append(details, domain.Detail{K: "asn", V: asn})
 	}
+	// The panel returns org separately; it is the network owner when it differs
+	// from the access provider.
+	if org := strings.TrimSpace(node.Org); org != "" && org != node.ISP {
+		details = append(details, domain.Detail{K: "org", V: org})
+	}
+	if city := strings.TrimSpace(node.City); city != "" {
+		details = append(details, domain.Detail{K: "city", V: city})
+	}
+	if score, ok := toFloat(node.IPScore); ok && score > 0 {
+		details = append(details, domain.Detail{K: "ip-score", V: strconv.Itoa(int(score))})
+	}
+	if node.Native {
+		details = append(details, domain.Detail{K: "native", V: "true"})
+	}
+	if node.Black {
+		details = append(details, domain.Detail{K: "blacklisted", V: "true"})
+	}
+	if rate, ok := toFloat(node.TrafficRate); ok && rate != 1 && rate > 0 {
+		details = append(details, domain.Detail{K: "traffic-rate", V: strconv.FormatFloat(rate, 'f', -1, 64) + "x"})
+	}
+	if fails, ok := toFloat(node.FailCount); ok && fails > 0 {
+		details = append(details, domain.Detail{K: "fail-count", V: strconv.Itoa(int(fails))})
+	}
+	if check := strings.TrimSpace(node.LastCheck); check != "" {
+		details = append(details, domain.Detail{K: "last-check", V: check})
+	}
 	if len(node.FeaturesList) > 0 {
 		parts := make([]string, 0, len(node.FeaturesList))
 		for _, item := range node.FeaturesList {
@@ -153,29 +250,58 @@ func normalizeNode(node qilanNode) *domain.Node {
 			details = append(details, domain.Detail{K: "features", V: strings.Join(parts, ", ")})
 		}
 	}
-	network := strings.ToLower(node.Network)
-	if network == "" {
-		network = "tcp"
+	return details
+}
+
+// normalizeNode converts one panel row into the stored node shape. The share
+// link is authoritative: the panel's own columns drop reality, transports and
+// transport options, and its network column is frequently wrong. The panel is
+// kept for metadata that only it knows (id, latency, status, ISP, country).
+func normalizeNode(node qilanNode) *domain.Node {
+	if node.ID == nil || node.Protocol == "" || node.Server == "" ||
+		node.Port == nil || node.Link == "" {
+		return nil
 	}
-	out := &domain.Node{
-		Name:     name + " [Qilan]",
-		BaseName: name,
-		Type:     strings.ToLower(node.Protocol),
-		Server:   node.Server,
-		Port:     scalar(node.Port),
-		TLS:      tls,
-		Network:  network,
-		SubTag:   "Qilan",
-		Details:  details,
-		RawLink:  node.Link,
+	name := node.Name
+	if name == "" {
+		name = fmt.Sprintf("Qilan %v", node.ID)
 	}
-	if sni != "" {
-		out.SNI = sni
+	meta := panelDetails(node)
+	var out domain.Node
+	proxy, err := domain.ShareLinkProxy(node.Link, name)
+	if err == nil {
+		out = domain.SummarizeProxy(proxy)
+		// SummarizeProxy already reports the protocol-derived network; only fall
+		// back to the panel column when it produced nothing.
+		if strings.TrimSpace(out.Network) == "" {
+			out.Network = normalizeNetwork(node.Network, strings.ToLower(node.Protocol))
+		}
+		out.Details = append(append([]domain.Detail{}, meta...), out.Details...)
+		out.Details = append(out.Details, protocolDetails(proxy)...)
+	} else {
+		// Unparseable link: keep the panel-derived summary so the row still
+		// exists, with the network column normalised.
+		tls, sni := linkSettings(node.Link)
+		out = domain.Node{
+			Type:    strings.ToLower(node.Protocol),
+			Server:  node.Server,
+			Port:    scalar(node.Port),
+			TLS:     tls,
+			Network: normalizeNetwork(node.Network, strings.ToLower(node.Protocol)),
+			Details: meta,
+		}
+		if sni != "" {
+			out.SNI = sni
+		}
 	}
+	out.Name = name + " [Qilan]"
+	out.BaseName = name
+	out.SubTag = "Qilan"
+	out.RawLink = node.Link
 	if node.Region != "" {
 		out.Country = node.Region
 	}
-	return out
+	return &out
 }
 
 func toFloat(v any) (float64, bool) {
