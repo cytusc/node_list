@@ -146,3 +146,28 @@ func TestBatchRateLimitDoesNotPublishSingleIPCooldown(t *testing.T) {
 		t.Fatalf("batch 429 leaked into the single-IP cooldown: %v", wait)
 	}
 }
+
+// A widened window must not stall a task: the caller leaves the address to the
+// single-IP path instead of waiting out an hour-long penalty.
+func TestBatchUnavailableSkipsPrimingImmediately(t *testing.T) {
+	c := NewClient("", "")
+	c.HTTP = &http.Client{Transport: fixtureTransport(func(*http.Request) (*http.Response, error) {
+		resp := response(429, "")
+		resp.Header.Set("X-Rl", "0")
+		resp.Header.Set("X-Ttl", "3600")
+		return resp, nil
+	})}
+	_ = c.PrimeIPAPIBatch(context.Background(), []string{"8.8.8.8"})
+	if c.BatchAvailable() {
+		t.Fatal("an hour-long penalty must not look available")
+	}
+	start := time.Now()
+	err := c.PrimeIPAPIBatch(context.Background(), []string{"1.1.1.1"})
+	if err == nil || time.Since(start) > time.Second {
+		t.Fatalf("priming during a long penalty took %v (err=%v)", time.Since(start), err)
+	}
+	// The single-IP path stays usable, which is what makes skipping safe.
+	if wait := time.Until(c.providerNext("ip-api")); wait > time.Second {
+		t.Fatalf("single-IP path blocked by the batch penalty: %v", wait)
+	}
+}

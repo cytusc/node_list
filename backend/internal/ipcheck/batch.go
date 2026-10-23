@@ -35,6 +35,19 @@ func batchFloor() time.Duration {
 	return 4 * time.Second
 }
 
+// batchCooldownBudget is how long a priming wave is willing to wait for the
+// batch endpoint before leaving the address to the single-IP path. IP-API
+// answers a sustained overrun by widening the window to an hour, and waiting
+// that out inside a task would stall the lane for no benefit.
+const batchCooldownBudget = 20 * time.Second
+
+// BatchAvailable reports whether priming is worth attempting right now. The
+// caller falls back to the single-IP lookup, which shares nothing with this
+// cooldown since the two endpoints are counted separately upstream.
+func (c *Client) BatchAvailable() bool {
+	return time.Until(c.providerNext(batchKey)) <= batchCooldownBudget
+}
+
 // PrimeIPAPIBatch fills the normal lookup cache using IP-API's batch endpoint:
 // 100 IPs per request. Addresses that already hold fresh cached evidence are
 // skipped, so repeated priming during one classification wave costs nothing.
@@ -84,6 +97,9 @@ func (c *Client) primeChunks(ctx context.Context, pending []string) error {
 func (c *Client) primeBatchChunk(ctx context.Context, chunk []string) error {
 	// Wait out the pace the previous wave earned before asking for a new slot.
 	if wait := time.Until(c.providerNext(batchKey)); wait > 0 {
+		if wait > batchCooldownBudget {
+			return fmt.Errorf("IP-API batch cooling down")
+		}
 		if err := sleepContext(ctx, wait); err != nil {
 			return err
 		}

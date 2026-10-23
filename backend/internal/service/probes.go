@@ -501,7 +501,7 @@ func (r *Runner) attributes(ctx context.Context, j Job) error {
 	// when this exit IP is not cached yet, one request also covers the other
 	// addresses already queued for classification. Cache hits skip the priming
 	// and the database query entirely.
-	if !r.Classification.IPAPICached(j.Payload.IP) {
+	if !r.Classification.IPAPICached(j.Payload.IP) && r.Classification.BatchAvailable() {
 		if pending, err := r.Repo.PendingAttributeIPs(ctx, 100, j.Payload.IP); err == nil && len(pending) > 0 {
 			_ = r.Classification.PrimeIPAPIBatch(ctx, pending)
 		}
