@@ -98,7 +98,11 @@ services:
       # quota contention and the provider clock, not throughput.
       IP_SERVICE_ATTRIBUTES_CONCURRENCY: ${ATTRIBUTES_CONCURRENCY:-1}
       IPPURE_API_ORIGIN: ${IPPURE_API_ORIGIN:-https://api.123169.xyz}
-      IPINFO_TOKEN: ${IPINFO_TOKEN:-}
+      # Comma separated subset of ipinfo,ip-api,ipregistry,abuseipdb,ipapi,
+  # ip2location. Empty keeps every source; deployments without credentials for
+  # some of them should narrow the list instead of querying blind.
+  IP_PROVIDERS: ${IP_PROVIDERS:-}
+  IPINFO_TOKEN: ${IPINFO_TOKEN:-}
       IP_API_PRO_KEY: ${IP_API_PRO_KEY:-}
       IPREGISTRY_API_KEY: ${IPREGISTRY_API_KEY:-}
       ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}

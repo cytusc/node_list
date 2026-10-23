@@ -143,6 +143,7 @@ func run() error {
 	runID := time.Now().UTC().Format("20060102T150405.000000000Z")
 	fmt.Printf("run=%s apply=%t records=%d uniqueIPs=%d invalidIPs=%d\n", runID, *apply, records, len(ips), invalid)
 	client := ipcheck.NewClient(os.Getenv("IPINFO_TOKEN"), os.Getenv("IP_API_PRO_KEY"), os.Getenv("IPREGISTRY_API_KEY"), os.Getenv("ABUSEIPDB_API_KEY"))
+	client.Providers = ipcheck.ProvidersFromEnv()
 	client.FreshSweep = true
 	if *refresh {
 		client.HTTP = queryHTTP

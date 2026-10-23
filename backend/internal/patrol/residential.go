@@ -59,6 +59,7 @@ func newResidentialAssessment(token, origin string, host *http.Client, proKey ..
 	}
 	sources := ipcheck.NewClient(token, key, extraKeys...)
 	sources.HTTP = host
+	sources.Providers = ipcheck.ProvidersFromEnv()
 	return func(ctx context.Context, tunnel *http.Client) (string, ipcheck.Result, error) {
 		empty := ipcheck.Result{State: "unknown"}
 		ip, err := recoveryExitIP(ctx, tunnel)

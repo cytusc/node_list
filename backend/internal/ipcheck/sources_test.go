@@ -143,3 +143,28 @@ func TestNetworkTypeSourcesUseConfiguredCredentialsAndPublicDefaults(t *testing.
 		t.Fatalf("public source types were not decoded: %s", got)
 	}
 }
+
+// A deployment without credentials narrows the fan-out instead of burning
+// quota slots on sources that can only cool down.
+func TestProvidersFromEnvNarrowsAndKeepsOrder(t *testing.T) {
+	t.Setenv("IP_PROVIDERS", " ip-api , ipinfo ,bogus ")
+	got := ProvidersFromEnv()
+	want := []string{"ipinfo", "ip-api"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+	t.Setenv("IP_PROVIDERS", "")
+	c := NewClient("", "")
+	if len(c.providerList()) != len(DefaultProviders) {
+		t.Fatalf("empty list must keep every source, got %v", c.providerList())
+	}
+	t.Setenv("IP_PROVIDERS", "bogus")
+	if got := ProvidersFromEnv(); got != nil {
+		t.Fatalf("unknown names must not disable everything, got %v", got)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,6 +28,11 @@ type Client struct {
 	// a two-second tolerance used to abandon nearly every multi-source lookup
 	// and the missing type evidence then stayed missing for a whole day.
 	ProviderWait time.Duration
+	// Providers restricts the fan-out to the given sources, in the order they
+	// are queried. Empty means every known source. Sources without credentials
+	// can never answer, so a deployment is expected to narrow this list instead
+	// of burning quota slots on requests that always cool down.
+	Providers []string
 	// FreshSweep waits for quotas instead of skipping IPs during maintenance.
 	BeforeProvider    func(context.Context, string) error
 	AfterProvider     func(context.Context, string, time.Time) error
@@ -66,8 +72,45 @@ func (c *Client) providerWait() time.Duration {
 	return defaultProviderWait
 }
 
+// DefaultProviders is the full fan-out, in query order.
+var DefaultProviders = []string{"ipinfo", "ip-api", "ipregistry", "abuseipdb", "ipapi", "ip2location"}
+
+// ProvidersFromEnv reads IP_PROVIDERS (comma separated). Unknown names are
+// dropped and the order always follows DefaultProviders so identities and
+// vote weighting stay stable across deployments.
+func ProvidersFromEnv() []string {
+	raw := strings.TrimSpace(os.Getenv("IP_PROVIDERS"))
+	if raw == "" {
+		return nil
+	}
+	enabled := map[string]bool{}
+	for _, name := range strings.Split(raw, ",") {
+		if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
+			enabled[name] = true
+		}
+	}
+	out := make([]string, 0, len(enabled))
+	for _, name := range DefaultProviders {
+		if enabled[name] {
+			out = append(out, name)
+			delete(enabled, name)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (c *Client) providerList() []string {
+	if len(c.Providers) > 0 {
+		return c.Providers
+	}
+	return DefaultProviders
+}
+
 func (c *Client) Lookup(ctx context.Context, ip string) []Evidence {
-	providers := []string{"ipinfo", "ip-api", "ipregistry", "abuseipdb", "ipapi", "ip2location"}
+	providers := c.providerList()
 	out := make([]Evidence, len(providers))
 	var wg sync.WaitGroup
 	for i, provider := range providers {

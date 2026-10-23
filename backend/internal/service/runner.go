@@ -87,6 +87,7 @@ func (r *Runner) run(ctx context.Context) error {
 	}
 	if r.Classification == nil {
 		r.Classification = ipcheck.NewClient(os.Getenv("IPINFO_TOKEN"), os.Getenv("IP_API_PRO_KEY"), os.Getenv("IPREGISTRY_API_KEY"), os.Getenv("ABUSEIPDB_API_KEY"))
+		r.Classification.Providers = ipcheck.ProvidersFromEnv()
 	}
 	if r.asnCache == nil {
 		r.asnCache = collector.NewASNCacheWithTTL(6 * time.Hour)
