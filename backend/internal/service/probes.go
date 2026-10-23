@@ -69,6 +69,59 @@ func (r *Runner) reference(ctx context.Context, exclude string) (*domain.Node, e
 	return n, err
 }
 
+// carriers returns up to limit recently verified nodes, in random order.
+//
+// Risk queries do not need this node's exit address: the API scores the IP in
+// the path. Leasing whichever healthy node answers first spreads the request
+// source across many addresses instead of funnelling every query through the
+// single most recently seen node, which is what the upstream throttles.
+func (r *Runner) carriers(ctx context.Context, exclude string, limit int) ([]domain.Node, error) {
+	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.node FROM node_explorer_node_registry n JOIN node_explorer_connectivity c USING(identity)
+	WHERE n.available AND n.identity<>$1 AND c.payload->>'reachable'='true' AND c.checked_at>now()-interval '30 minutes'
+	AND NOT EXISTS(SELECT 1 FROM node_explorer_retired_nodes t WHERE t.identity=n.identity)
+	AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
+	ORDER BY random() LIMIT $2`, exclude, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]domain.Node, 0, limit)
+	for rows.Next() {
+		var raw []byte
+		if err = rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		n := domain.Node{}
+		if err = json.Unmarshal(raw, &n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// reserveOne leases the tunnel for a single carrier node.
+func (r *Runner) reserveOne(ctx context.Context, n domain.Node, high bool) (*transport.Outbound, func(), error) {
+	if r.Config.Manager != nil {
+		engine := &transport.ManagedEngine{Manager: r.Config.Manager, Kind: "risk", High: high}
+		paths, done, err := engine.Reserve(ctx, []domain.Node{n})
+		if err != nil {
+			return nil, nil, err
+		}
+		return paths[0], done, nil
+	}
+	paths, release, err := r.reserve(ctx, []domain.Node{n}, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	path := paths[domain.AggregateIdentity(n)]
+	if path == nil || path.Error != nil {
+		release()
+		return nil, nil, errors.New("carrier path unavailable")
+	}
+	return path, release, nil
+}
+
 func reachable(ctx context.Context, client *http.Client, timeout time.Duration) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -462,47 +515,39 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		return r.Repo.Finish(ctx, j, nil)
 	}
 	// Risk traffic uses the normal IP lane so slow remote APIs cannot occupy
-	// the reserved residential exit-probe instance.
-	reference, err := r.reference(ctx, "")
+	// the reserved residential exit-probe instance. Any healthy node can carry
+	// the request — the target IP travels in the path, so the carrier only
+	// decides which source address the API sees. Leasing several carriers in
+	// turn spreads concurrent queries instead of funnelling all of them
+	// through one exit, which is what the upstream rate-limits.
+	const riskCarriers = 3
+	carriers, err := r.carriers(ctx, "", riskCarriers)
 	if err != nil {
 		return err
 	}
-	if reference == nil {
-		t, e := r.Repo.Target(ctx, j.Payload.Identity)
+	if len(carriers) == 0 {
+		// Nothing verified yet: this node is still the best guess.
+		if t, e := r.Repo.Target(ctx, j.Payload.Identity); e == nil && t != nil {
+			carriers = []domain.Node{t.Node}
+		}
+	}
+	var verdict *collector.IPPureResult
+	var queryErr error
+	queryMode := "carrier"
+	for _, carrier := range carriers {
+		path, release, e := r.reserveOne(ctx, carrier, high)
 		if e != nil {
-			return e
+			queryErr = e
+			continue
 		}
-		if t == nil {
-			return waiting{30 * time.Second}
+		pathCtx, cancelLease := pathContext(ctx, map[string]*transport.Outbound{domain.AggregateIdentity(carrier): path})
+		verdict, queryErr = collector.QueryIPPure(pathCtx, collector.NewIPPureClient(path.Client, r.Config.APIOrigin, 10*time.Second), j.Payload.IP, r.asnCache)
+		cancelLease()
+		release()
+		if queryErr == nil {
+			break
 		}
-		reference = &t.Node
 	}
-	var paths map[string]*transport.Outbound
-	var release func()
-	if r.Config.Manager != nil {
-		engine := &transport.ManagedEngine{Manager: r.Config.Manager, Kind: "risk", High: high}
-		reserved, done, e := engine.Reserve(ctx, []domain.Node{*reference})
-		err = e
-		release = done
-		if e != nil {
-			return e
-		}
-		paths = map[string]*transport.Outbound{domain.AggregateIdentity(*reference): reserved[0]}
-	} else {
-		paths, release, err = r.reserve(ctx, []domain.Node{*reference}, false)
-	}
-	if err != nil {
-		return err
-	}
-	defer release()
-	ctx, cancelLease := pathContext(ctx, paths)
-	defer cancelLease()
-	path := paths[domain.AggregateIdentity(*reference)]
-	if path == nil || path.Error != nil {
-		return waiting{30 * time.Second}
-	}
-	verdict, queryErr := collector.QueryIPPure(ctx, collector.NewIPPureClient(path.Client, r.Config.APIOrigin, 10*time.Second), j.Payload.IP, r.asnCache)
-	queryMode := "tunnel"
 	if queryErr != nil {
 		// The tunnel exists to spread request source addresses, not because the
 		// API requires one. A dead node must not cost this IP its risk evidence
@@ -535,9 +580,9 @@ func (r *Runner) risk(ctx context.Context, j Job, high bool) error {
 		e.QueryStatus = "success"
 	}
 	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
-		if err := validatePaths(ctx, tx, paths); err != nil {
-			return err
-		}
+		// The carrier lease is released as soon as the answer arrives and the
+		// carrier is not the subject of this job, so there is no path to fence
+		// against the registry row being scored here.
 		if err := mergeAttributes(ctx, tx, j.Payload.IP, []ipcheck.Evidence{e}, v); err != nil {
 			return err
 		}
