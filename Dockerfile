@@ -20,7 +20,17 @@ COPY backend ./
 ARG TARGETOS=linux
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-      go build -trimpath -ldflags "-s -w" -o /out/node-worker ./cmd/node-worker
+      go build -trimpath -ldflags "-s -w" -o /out/node-worker ./cmd/node-worker \
+ && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+      go build -trimpath -ldflags "-s -w" -o /out/dead-verify ./cmd/dead-verify
+
+# The batch verifier needs its own Mihomo to perform real handshakes: the shared
+# kernel's strict lane is a fixed eight leases and Cloudflare-fronted nodes only
+# fail a full handshake. Only the binary is taken; the verifier renders its own
+# minimal config (no geo database, no listeners).
+FROM metacubex/mihomo:v1.19.27 AS mihomo
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS probe-bin
+COPY --from=mihomo /mihomo /out/mihomo
 
 # PHP dependencies come from the lock file only, so editing a source file does
 # not invalidate this layer.
@@ -72,6 +82,8 @@ COPY --chown=node:node webman/docker-entrypoint.sh ./docker-entrypoint.sh
 # Frontend build output is the static root (config/static.php).
 COPY --from=frontend --chown=node:node /app/dist ./public
 COPY --from=backend --chown=node:node /out/node-worker /usr/local/bin/node-worker
+COPY --from=backend --chown=node:node /out/dead-verify /usr/local/bin/dead-verify
+COPY --from=probe-bin --chown=node:node /out/mihomo /usr/local/bin/mihomo
 USER node
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

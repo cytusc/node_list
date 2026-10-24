@@ -45,7 +45,7 @@ func tryDelete(t *testing.T, f *fixture, j Job, proof domain.ConnectivityState) 
 	deleted := false
 	e := f.repo.Finish(context.Background(), j, func(tx pgx.Tx) error {
 		var e error
-		deleted, e = deleteUnavailable(context.Background(), tx, j, proof)
+		deleted, e = deleteUnavailable(context.Background(), tx, j, proof, "cleanup:"+j.Ref())
 		return e
 	})
 	if e != nil {

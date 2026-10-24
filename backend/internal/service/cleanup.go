@@ -156,7 +156,7 @@ func (r *Runner) verifyByDial(ctx context.Context, j Job, t *Target) error {
 			}
 			return recur(ctx, tx, j, time.Hour)
 		}
-		deleted, e := deleteUnavailable(ctx, tx, j, proof)
+		deleted, e := deleteUnavailable(ctx, tx, j, proof, session)
 		if e != nil {
 			return e
 		}
@@ -315,7 +315,7 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 			}
 			return recur(ctx, tx, j, time.Hour)
 		}
-		deleted, e := deleteUnavailable(ctx, tx, j, proof)
+		deleted, e := deleteUnavailable(ctx, tx, j, proof, session)
 		if e != nil {
 			return e
 		}
@@ -327,7 +327,7 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 }
 
 // The registry lock fences successful commits. Active probes and config changes veto deletion.
-func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.ConnectivityState) (bool, error) {
+func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.ConnectivityState, session string) (bool, error) {
 	if proof.Reachable || !proof.ConfirmedDead || !fresh(proof.CheckedAt, time.Minute) {
 		return false, nil
 	}
@@ -354,7 +354,7 @@ func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.Conne
 		return false, e
 	}
 	var raw []byte
-	e = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_probe_results WHERE session=$1 AND kind=$2 AND identity=$3`, "cleanup:"+j.Ref(), KindLive, j.Payload.Identity).Scan(&raw)
+	e = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_probe_results WHERE session=$1 AND kind=$2 AND identity=$3`, session, KindLive, j.Payload.Identity).Scan(&raw)
 	if e == pgx.ErrNoRows {
 		return false, nil
 	}

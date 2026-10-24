@@ -349,3 +349,38 @@ UDP 那 1800 个仍走内核路径，慢但量小。
 回归用例：`TestTCPVerifiableProtocols`（协议白名单）、
 `TestCleanupDialVerificationDecidesByEndpoint`（活端点保留 / 死端点删除，走完整
 `cleanup` 处理器与删除门禁）。
+
+## 追加：死节点批量核验服务（v1.5.66）
+
+### 为什么还要一个独立 mihomo
+
+v1.5.65 的容器内直连解决了一半问题：TCP 端口不通的节点十几秒就能判死。但
+Cloudflare 前置的 vless 节点（`172.67.*`、`104.24.*`、`162.159.*`）**TCP 永远连得上**，
+后端早就死了也只能判「活」，于是每小时被延后一次。这类节点只能靠完整握手判死，
+而共享内核的 strict lane 是写死的 8 路、单节点约 60 秒 —— 换句话说，生产内核不是
+为「四万节点一次核验」设计的，也不该为它让路。
+
+### 结构
+
+新增服务 `dead-verify`（同一个镜像，自带 mihomo 二进制）：
+
+1. `VerifiedCandidates`：可用 + 当前不可达 + 超过年龄窗口 + 无在跑探针 +
+   最近 `recheck`（默认 6 小时）内没被核验过，按 `first_seen_at` 取一批（默认 400）。
+2. `LoadVerificationProxies`：把本批节点（外加 3 个**出口对照**）渲染成 mihomo 配置，
+   `PUT /configs?force=true` 灌进**自带的 mihomo**（独立控制器、独立端口，不碰生产内核）。
+3. `ProxyDelay`：对每个 proxy 名调 `GET /proxies/<name>/delay`，让 mihomo 真正握手到
+   `generate_204`；超时/非 200 就是「没答上」。默认 96 路并发、单节点 6 秒。
+4. 出口对照：整批里只要有一个对照节点握手成功，才承认这批判定；否则整批作废
+   （`egress control failed: wave discarded`）。这样容器出网故障不会变成批量误删。
+5. 判定为死的节点交给 `Repository.DeleteVerifiedDead` —— 写一条
+   `ProbeTarget=batch-verify` 的新鲜证据，然后调用**同一个** `deleteUnavailable`：
+   探针 1 分钟内、配置摘要与行内一致、年龄窗口、无在跑探针、无更高优先级的
+   新观察、注册表行锁 + 快照表 EXCLUSIVE 锁，一个都不少。`-dry-run` 只记录不删除。
+
+### 关键取舍
+
+- **判定与删除分离**：核验器只产证据，删除永远由门禁代码决定，和队列路径共用一份实现。
+- **按 `recheck` 去重**：证据写在 `dead-verify:<md5(identity)>` 会话下，同一节点 6 小时内
+  不会被反复核验，波次自然向前推进而不是反复测队头。
+- **删除并发单独限流**（默认 8）：删除事务要拿快照表排他锁，并发太高会拖住导入和 sweep。
+- 镜像里只有 mihomo 二进制（不做路由、不要 geo 库），配置由核验器自己渲染。
