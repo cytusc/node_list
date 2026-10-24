@@ -78,7 +78,11 @@ func (r *Repository) deleteVerifiedDeadOnce(ctx context.Context, identity, incar
 		return false, err
 	}
 	j := Job{Kind: KindCleanup, Payload: Payload{Identity: identity, Incarnation: incarnation, Reason: digest, Action: "cleanup"}}
-	deleted, reason, err := deleteUnavailable(ctx, tx, j, proof, session)
+	// Bulk deletions skip snapshot compaction: rewriting a snapshot per node
+	// costs O(snapshot) and holds the exclusive table lock for seconds. The
+	// tombstone already stops the node from coming back; CompactDeleted reclaims
+	// the payload space in batches.
+	deleted, reason, err := deleteUnavailable(ctx, tx, j, proof, session, false)
 	if err == nil && !deleted {
 		return false, &vetoError{reason: reason}
 	}
@@ -154,4 +158,67 @@ func (r *Repository) VerificationControls(ctx context.Context, limit int) ([]dom
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// CompactDeleted rewrites the snapshots that still carry tombstoned identities.
+// Bulk deletions skip that rewrite so each removal stays O(1); this pass pays
+// the O(snapshot) cost once for a whole batch instead of once per node. It is
+// idempotent — a compacted identity no longer joins — so repeated calls drain
+// the residue.
+func (r *Repository) CompactDeleted(ctx context.Context, limit int) (int, error) {
+	if limit < 1 {
+		limit = 200
+	}
+	var pending bool
+	if err := r.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_explorer_deleted_nodes d
+ JOIN node_explorer_snapshot_members m ON m.identity=d.identity)`).Scan(&pending); err != nil {
+		return 0, err
+	}
+	if !pending {
+		return 0, nil
+	}
+	tx, err := r.Pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	// Payload rewrites are rare here, so waiting for the fold to finish beats
+	// failing the batch.
+	if _, err = tx.Exec(ctx, `SET LOCAL lock_timeout='20s'`); err != nil {
+		return 0, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-registry'))`); err != nil {
+		return 0, err
+	}
+	rows, err := tx.Query(ctx, `SELECT d.identity FROM node_explorer_deleted_nodes d
+ JOIN node_explorer_snapshot_members m ON m.identity=d.identity LIMIT $1`, limit)
+	if err != nil {
+		return 0, err
+	}
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if _, err = tx.Exec(ctx, `LOCK TABLE node_explorer_snapshots,node_explorer_ippure_results IN EXCLUSIVE MODE`); err != nil {
+		return 0, err
+	}
+	if err = removeSnapshotIdentities(ctx, tx, ids); err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
 }

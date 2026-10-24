@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -54,5 +55,47 @@ func TestVerifiedCandidatesSkipsRecentlyVerified(t *testing.T) {
 	wave, e = f.repo.VerifiedCandidates(ctx, 24*time.Hour, 6*time.Hour, 10)
 	if e != nil || len(wave) != 0 {
 		t.Fatalf("recently verified resurfaced: %+v %v", wave, e)
+	}
+}
+
+func snapshotNodeCount(t *testing.T, f *fixture) int {
+	t.Helper()
+	var raw []byte
+	if e := f.repo.Pool.QueryRow(context.Background(), `SELECT payload FROM node_explorer_snapshots ORDER BY id LIMIT 1`).Scan(&raw); e != nil {
+		t.Fatal(e)
+	}
+	var snap domain.Snapshot
+	if e := json.Unmarshal(raw, &snap); e != nil {
+		t.Fatal(e)
+	}
+	return len(snap.Nodes)
+}
+
+func TestBulkDeletionDefersSnapshotCompaction(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.exec(t, `UPDATE node_explorer_node_registry SET first_seen_at=now()-interval '8 days'`)
+	var digest, incarnation string
+	if e := f.repo.Pool.QueryRow(ctx, `SELECT md5(node::text),incarnation FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&digest, &incarnation); e != nil {
+		t.Fatal(e)
+	}
+	proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), ConfirmedDead: true}
+	if ok, e := f.repo.DeleteVerifiedDead(ctx, f.id, incarnation, digest, proof); e != nil || !ok {
+		t.Fatalf("delete: ok=%v err=%v", ok, e)
+	}
+	// The bulk path must not rewrite the snapshot: that rewrite is what held the
+	// exclusive lock for seconds per node.
+	if n := snapshotNodeCount(t, f); n != 1 {
+		t.Fatalf("snapshot rewritten during bulk delete: %d nodes", n)
+	}
+	if n, e := f.repo.CompactDeleted(ctx, 10); e != nil || n != 1 {
+		t.Fatalf("compact: n=%d err=%v", n, e)
+	}
+	if n := snapshotNodeCount(t, f); n != 0 {
+		t.Fatalf("snapshot not compacted: %d nodes", n)
+	}
+	// Idempotent: nothing left to compact.
+	if n, e := f.repo.CompactDeleted(ctx, 10); e != nil || n != 0 {
+		t.Fatalf("second compact: n=%d err=%v", n, e)
 	}
 }

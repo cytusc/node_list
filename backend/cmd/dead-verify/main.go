@@ -57,6 +57,7 @@ type options struct {
 	minAge   time.Duration
 	recheck  time.Duration
 	interval time.Duration
+	compact  time.Duration
 	once     bool
 	dryRun   bool
 }
@@ -70,6 +71,7 @@ func run() error {
 	flag.DurationVar(&o.minAge, "min-age", time.Duration(envInt("DEAD_VERIFY_MIN_AGE_SECONDS", 86400))*time.Second, "候选年龄窗口")
 	flag.DurationVar(&o.recheck, "recheck", time.Duration(envInt("DEAD_VERIFY_RECHECK_SECONDS", 21600))*time.Second, "同一节点再次核验的间隔")
 	flag.DurationVar(&o.interval, "interval", time.Duration(envInt("DEAD_VERIFY_INTERVAL_SECONDS", 5))*time.Second, "无候选时的等待")
+	flag.DurationVar(&o.compact, "compact-every", time.Duration(envInt("DEAD_VERIFY_COMPACT_SECONDS", 120))*time.Second, "快照压缩间隔")
 	flag.BoolVar(&o.once, "once", false, "只跑一批")
 	flag.BoolVar(&o.dryRun, "dry-run", false, "只报告判定，不删除")
 	flag.Parse()
@@ -96,6 +98,20 @@ func run() error {
 	defer shutdown()
 	log.Printf("dead-verify: mihomo ready controller=%s limit=%d workers=%d", instance.Controller, o.limit, o.workers)
 
+	// Deletions skip snapshot compaction so each removal stays O(1); this pass
+	// pays the rewrite cost once per batch in the background.
+	lastCompact := time.Now()
+	maybeCompact := func() {
+		if o.compact <= 0 || time.Since(lastCompact) < o.compact {
+			return
+		}
+		lastCompact = time.Now()
+		if n, e := repo.CompactDeleted(ctx, 400); e != nil {
+			log.Printf("dead-verify: compact: %v", e)
+		} else if n > 0 {
+			log.Printf("dead-verify: compacted %d tombstoned snapshot entries", n)
+		}
+	}
 	for {
 		wave, err := repo.VerifiedCandidates(ctx, o.minAge, o.recheck, o.limit)
 		if err != nil {
@@ -107,6 +123,7 @@ func run() error {
 				return nil
 			}
 			heartbeat(ctx, repo, map[string]any{"running": true, "idle": true})
+			maybeCompact()
 			select {
 			case <-ctx.Done():
 				return nil
@@ -121,6 +138,7 @@ func run() error {
 			log.Printf("dead-verify: wave candidates=%d alive=%d dead=%d deleted=%d vetoed=%d", len(wave), stats.alive, stats.dead, stats.deleted, stats.vetoed)
 		}
 		heartbeat(ctx, repo, map[string]any{"running": true, "candidates": len(wave), "alive": stats.alive, "dead": stats.dead, "deleted": stats.deleted, "vetoed": stats.vetoed, "dryRun": o.dryRun})
+		maybeCompact()
 		if o.once {
 			return err
 		}

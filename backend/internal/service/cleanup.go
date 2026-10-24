@@ -156,7 +156,7 @@ func (r *Runner) verifyByDial(ctx context.Context, j Job, t *Target) error {
 			}
 			return recur(ctx, tx, j, time.Hour)
 		}
-		deleted, _, e := deleteUnavailable(ctx, tx, j, proof, session)
+		deleted, _, e := deleteUnavailable(ctx, tx, j, proof, session, true)
 		if e != nil {
 			return e
 		}
@@ -315,7 +315,7 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 			}
 			return recur(ctx, tx, j, time.Hour)
 		}
-		deleted, _, e := deleteUnavailable(ctx, tx, j, proof, session)
+		deleted, _, e := deleteUnavailable(ctx, tx, j, proof, session, true)
 		if e != nil {
 			return e
 		}
@@ -327,15 +327,23 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 }
 
 // The registry lock fences successful commits. Active probes and config changes veto deletion.
-func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.ConnectivityState, session string) (bool, string, error) {
+// deleteUnavailable applies every gate and removes the node. compact=true also
+// rewrites the snapshot that carries the identity, which costs O(snapshot) and
+// needs the exclusive snapshot locks; bulk paths pass false and let
+// CompactDeleted pay that cost once per batch instead of once per node.
+func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.ConnectivityState, session string, compact bool) (bool, string, error) {
 	if proof.Reachable || !proof.ConfirmedDead || !fresh(proof.CheckedAt, time.Minute) {
 		return false, "stale-or-live-proof", nil
 	}
 	if _, e := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-registry'))`); e != nil {
 		return false, "", e
 	}
-	if _, e := tx.Exec(ctx, `LOCK TABLE node_explorer_snapshots,node_explorer_ippure_results IN EXCLUSIVE MODE`); e != nil {
-		return false, "", e
+	if compact {
+		// The registry advisory lock already serializes this deletion with source
+		// folding; the exclusive snapshot locks only guard the payload rewrite.
+		if _, e := tx.Exec(ctx, `LOCK TABLE node_explorer_snapshots,node_explorer_ippure_results IN EXCLUSIVE MODE`); e != nil {
+			return false, "", e
+		}
 	}
 	ok, e := cleanupGuard(ctx, tx, j.Payload)
 	if e != nil || !ok {
@@ -368,8 +376,10 @@ func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.Conne
 	if stored.CheckedAt != proof.CheckedAt || stored.Reachable || !stored.ConfirmedDead {
 		return false, "proof-mismatch", nil
 	}
-	if e = removeSnapshotIdentity(ctx, tx, j.Payload.Identity); e != nil {
-		return false, "", e
+	if compact {
+		if e = removeSnapshotIdentity(ctx, tx, j.Payload.Identity); e != nil {
+			return false, "", e
+		}
 	}
 	for _, q := range []string{
 		`DELETE FROM node_explorer_connectivity WHERE identity=$1`,
@@ -460,7 +470,7 @@ func removeSnapshotIdentities(ctx context.Context, tx pgx.Tx, ids []string) erro
 		if len(kept) == len(nodes) {
 			continue
 		}
-		if _, e = tx.Exec(ctx, `DELETE FROM node_explorer_ippure_results WHERE snapshot_id=$1 AND NOT(node_index=ANY($2::int[]))`, s.id, oldIndices); e != nil {
+		if _, e = tx.Exec(ctx, `DELETE FROM node_explorer_ippure_results WHERE snapshot_id=$1 AND NOT(node_index=ANY(coalesce($2::int[],'{}')))`, s.id, oldIndices); e != nil {
 			return e
 		}
 		if _, e = tx.Exec(ctx, `UPDATE node_explorer_ippure_results SET node_index=-node_index-1 WHERE snapshot_id=$1`, s.id); e != nil {
@@ -473,7 +483,7 @@ func removeSnapshotIdentities(ctx context.Context, tx pgx.Tx, ids []string) erro
 			return e
 		}
 		// Membership is a source index, so it also covers nonwinning historical occurrences.
-		if _, e = tx.Exec(ctx, `DELETE FROM node_explorer_snapshot_members WHERE snapshot_id=$1 AND NOT(node_index=ANY($2::int[]))`, s.id, oldIndices); e != nil {
+		if _, e = tx.Exec(ctx, `DELETE FROM node_explorer_snapshot_members WHERE snapshot_id=$1 AND NOT(node_index=ANY(coalesce($2::int[],'{}')))`, s.id, oldIndices); e != nil {
 			return e
 		}
 		if _, e = tx.Exec(ctx, `UPDATE node_explorer_snapshot_members SET node_index=-node_index-1 WHERE snapshot_id=$1`, s.id); e != nil {
