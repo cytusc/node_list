@@ -3,10 +3,41 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+
 	"github.com/cytusc/node_list/backend/internal/domain"
 	"github.com/jackc/pgx/v5"
-	"time"
 )
+
+// How long a node must have gone without being new or last known available
+// before its death earns a second, controlled verification. The default keeps a
+// week of grace for flapping nodes; the fresh-proof rules in deleteUnavailable
+// are the real guard, so an operator can shorten the window (a registry whose
+// rows all postdate a column migration cannot satisfy a week) without weakening
+// them.
+const defaultCleanupMinAge = 7 * 24 * time.Hour
+
+func cleanupMinAge() time.Duration {
+	return Seconds("NODE_CLEANUP_MIN_AGE_SECONDS", int(defaultCleanupMinAge.Seconds()))
+}
+
+// cleanupBatch caps how many candidates one schedule tick admits. The lane
+// verifies far slower than the registry scan, so the cap only shapes the queue;
+// Number() would clamp it into the concurrency range, hence its own reader.
+func cleanupBatch() int {
+	v, e := strconv.Atoi(os.Getenv("NODE_CLEANUP_BATCH"))
+	if e != nil || v < 1 {
+		return 256
+	}
+	return min(v, 20000)
+}
+
+func intervalParam(d time.Duration) string {
+	return fmt.Sprintf("%f seconds", d.Seconds())
+}
 
 // Imports never refresh the monotonic successful observation clock.
 func recordAvailable(ctx context.Context, tx pgx.Tx, id, incarnation, stamp string) error {
@@ -50,16 +81,16 @@ func (r *Runner) scheduleCleanup(ctx context.Context) error {
  SELECT 'node-cleanup',n.identity||':'||n.incarnation,
  jsonb_build_object('identity',n.identity,'incarnation',n.incarnation,'reason',md5(n.node::text),'action','cleanup'),0,now()
  FROM node_explorer_node_registry n
- WHERE greatest(n.first_seen_at,coalesce(n.last_available_at,n.first_seen_at))<now()-interval '7 days'
+ WHERE greatest(n.first_seen_at,coalesce(n.last_available_at,n.first_seen_at))<now()-$1::interval
  AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='node-cleanup' AND w.key=n.identity||':'||n.incarnation)
- ORDER BY greatest(n.first_seen_at,coalesce(n.last_available_at,n.first_seen_at)),n.identity LIMIT 256
- ON CONFLICT(kind,key) DO NOTHING`)
+ ORDER BY greatest(n.first_seen_at,coalesce(n.last_available_at,n.first_seen_at)),n.identity LIMIT $2
+ ON CONFLICT(kind,key) DO NOTHING`, intervalParam(cleanupMinAge()), cleanupBatch())
 	return err
 }
 func (r *Runner) cleanup(ctx context.Context, j Job) error {
 	var eligible bool
 	err := r.Repo.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_explorer_node_registry n
- WHERE identity=$1 AND incarnation=$2 AND greatest(first_seen_at,coalesce(last_available_at,first_seen_at))<now()-interval '7 days')`, j.Payload.Identity, j.Payload.Incarnation).Scan(&eligible)
+ WHERE identity=$1 AND incarnation=$2 AND greatest(first_seen_at,coalesce(last_available_at,first_seen_at))<now()-$3::interval)`, j.Payload.Identity, j.Payload.Incarnation, intervalParam(cleanupMinAge())).Scan(&eligible)
 	if err != nil {
 		return err
 	}
@@ -169,10 +200,10 @@ func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.Conne
 		return false, e
 	}
 	var safe bool
-	e = tx.QueryRow(ctx, `SELECT greatest(first_seen_at,coalesce(last_available_at,first_seen_at))<now()-interval '7 days'
+	e = tx.QueryRow(ctx, `SELECT greatest(first_seen_at,coalesce(last_available_at,first_seen_at))<now()-$4::interval
  AND NOT EXISTS(SELECT 1 FROM node_explorer_work WHERE id<>$2 AND payload->>'identity'=$1 AND state='running' AND lease_until>now())
  AND NOT EXISTS(SELECT 1 FROM node_explorer_connectivity WHERE identity=$1 AND checked_at>$3::timestamptz)
- FROM node_explorer_node_registry WHERE identity=$1`, j.Payload.Identity, j.ID, proof.CheckedAt).Scan(&safe)
+ FROM node_explorer_node_registry WHERE identity=$1`, j.Payload.Identity, j.ID, proof.CheckedAt, intervalParam(cleanupMinAge())).Scan(&safe)
 	if e != nil || !safe {
 		return false, e
 	}
@@ -202,11 +233,15 @@ func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.Conne
 		`DELETE FROM node_explorer_work WHERE payload->>'identity'=$1 AND kind NOT IN ('attributes','risk')`,
 		`DELETE FROM node_explorer_node_registry WHERE identity=$1`,
 		`INSERT INTO node_explorer_deleted_nodes(identity,deleted_at) VALUES($1,clock_timestamp()) ON CONFLICT(identity) DO UPDATE SET deleted_at=EXCLUDED.deleted_at`,
-		`INSERT INTO node_explorer_lifecycle_events(identity,action,dry_run,reason) VALUES($1,'delete',false,'7 days without availability; fresh controlled probe failed')`,
 	} {
 		if _, e = tx.Exec(ctx, q, j.Payload.Identity); e != nil {
 			return false, e
 		}
+	}
+	_, e = tx.Exec(ctx, `INSERT INTO node_explorer_lifecycle_events(identity,action,dry_run,reason) VALUES($1,'delete',false,$2)`,
+		j.Payload.Identity, fmt.Sprintf("%s without availability; fresh controlled probe failed", cleanupMinAge()))
+	if e != nil {
+		return false, e
 	}
 	var legacy bool
 	if e = tx.QueryRow(ctx, `SELECT to_regclass('node_explorer_current_nodes') IS NOT NULL`).Scan(&legacy); e != nil {

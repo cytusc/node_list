@@ -79,6 +79,50 @@ func TestCleanupRequiresSevenDaysAndDeduplicates(t *testing.T) {
 		t.Fatal("cleanup must be admitted in ordinary lane")
 	}
 }
+func TestCleanupWindowIsConfigurable(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	// A registry whose rows all postdate a column migration cannot satisfy a
+	// week; the operator shortens the window instead of waiting it out.
+	t.Setenv("NODE_CLEANUP_MIN_AGE_SECONDS", "86400")
+	f.exec(t, `UPDATE node_explorer_node_registry SET first_seen_at=now()-interval '2 days'`)
+	if e := f.runner.scheduleCleanup(ctx); e != nil {
+		t.Fatal(e)
+	}
+	var n int
+	_ = f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE kind=$1`, KindCleanup).Scan(&n)
+	if n != 1 {
+		t.Fatalf("configured window not honoured: %d candidates", n)
+	}
+}
+func TestCleanupDefaultsKeepAWeekOfGrace(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.exec(t, `UPDATE node_explorer_node_registry SET first_seen_at=now()-interval '2 days'`)
+	if e := f.runner.scheduleCleanup(ctx); e != nil {
+		t.Fatal(e)
+	}
+	var n int
+	_ = f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_work WHERE kind=$1`, KindCleanup).Scan(&n)
+	if n != 0 {
+		t.Fatalf("default window shortened: %d candidates", n)
+	}
+}
+func TestCleanupBatchReader(t *testing.T) {
+	if cleanupBatch() != 256 {
+		t.Fatalf("default batch: %d", cleanupBatch())
+	}
+	t.Setenv("NODE_CLEANUP_BATCH", "2048")
+	if cleanupBatch() != 2048 {
+		t.Fatalf("configured batch: %d", cleanupBatch())
+	}
+	for _, bad := range []string{"0", "-5", "abc", "999999"} {
+		t.Setenv("NODE_CLEANUP_BATCH", bad)
+		if v := cleanupBatch(); v < 1 || v > 20000 {
+			t.Fatalf("batch %q clamped to %d", bad, v)
+		}
+	}
+}
 func TestCleanupDeletionVetoes(t *testing.T) {
 	for _, scenario := range []string{"reachable", "inconclusive", "stale", "missing-proof", "concurrent-success", "newer-observation", "changed-config", "recreated", "running-probe", "wrong-session", "admitting-probe"} {
 		t.Run(scenario, func(t *testing.T) {

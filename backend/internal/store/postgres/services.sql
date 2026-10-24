@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS node_explorer_work (
   error text NOT NULL DEFAULT '', UNIQUE(kind,key)
 );
 CREATE INDEX IF NOT EXISTS node_explorer_work_delivery ON node_explorer_work(kind,due_at) WHERE state <> 'done';
+-- The cleanup veto and the admission busy-check both filter live work by the
+-- job's identity; without this every verification task scans the whole ledger.
+CREATE INDEX IF NOT EXISTS node_explorer_work_identity ON node_explorer_work((payload->>'identity')) WHERE state <> 'done';
 CREATE TABLE IF NOT EXISTS node_explorer_probe_results (
   session text NOT NULL, kind text NOT NULL, identity text NOT NULL,
   checked_at timestamptz NOT NULL, payload jsonb NOT NULL,

@@ -139,7 +139,12 @@ func laneConcurrency(role string) map[string]int {
 		out[kind] = Number(prefix+"_"+name+"_CONCURRENCY", Number(name+"_CONCURRENCY", fallback))
 	}
 	out[KindNormalRecovery] = Number("NORMAL_RECOVERY_CONCURRENCY", 2)
-	out[KindCleanup] = 1
+	// The connectivity lane carries the sweeper's retirement evidence, the
+	// recovery assessments and the cleanup role's second-verification probe. It
+	// defaulted to the normal-lane count; naming it lets an operator raise the
+	// verification rate without touching assessment admission.
+	out[KindLive] = Number(prefix+"_LIVE_CONCURRENCY", Number("LIVE_CONCURRENCY", 2))
+	out[KindCleanup] = Number("NODE_CLEANUP_CONCURRENCY", 2)
 	return out
 }
 

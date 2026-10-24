@@ -128,6 +128,9 @@ services:
       NORMAL_RECOVERY_INTERVAL_SECONDS: ${NORMAL_RECOVERY_INTERVAL_SECONDS:-1200}
       RECOVERY_RECOVERY_CONCURRENCY: ${RECOVERY_RECOVERY_CONCURRENCY:-2}
       RECOVERY_LIFECYCLE_CONCURRENCY: ${RECOVERY_LIFECYCLE_CONCURRENCY:-1}
+      # 二验探针 lane：退役评估与 node-cleanup 的受控连通性探针都走这里，
+      # 删除吞吐 ≈ 该值 × 单价。积压万级时调到 8。
+      RECOVERY_LIVE_CONCURRENCY: ${RECOVERY_LIVE_CONCURRENCY:-2}
     depends_on:
       task-redis: { condition: service_healthy }
       mihomo-manager: { condition: service_healthy }
@@ -142,6 +145,11 @@ services:
     environment:
       <<: *environment
       SCHEDULE_INTERVAL_SECONDS: 30
+      # 超过该窗口「新近出现或最后可用」的节点才做二次验证；registry 的
+      # first_seen_at 若是加列迁移统一刷新的，默认 7 天会一直不满足。
+      NODE_CLEANUP_MIN_AGE_SECONDS: ${NODE_CLEANUP_MIN_AGE_SECONDS:-604800}
+      NODE_CLEANUP_BATCH: ${NODE_CLEANUP_BATCH:-256}
+      NODE_CLEANUP_CONCURRENCY: ${NODE_CLEANUP_CONCURRENCY:-2}
     healthcheck:
       test: [CMD, node-worker, -role, node-cleanup, -health]
       interval: 30s
