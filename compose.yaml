@@ -172,6 +172,9 @@ services:
       DEAD_VERIFY_TIMEOUT_SECONDS: ${DEAD_VERIFY_TIMEOUT_SECONDS:-6}
       DEAD_VERIFY_MIN_AGE_SECONDS: ${DEAD_VERIFY_MIN_AGE_SECONDS:-86400}
       DEAD_VERIFY_RECHECK_SECONDS: ${DEAD_VERIFY_RECHECK_SECONDS:-21600}
+      # 删除门禁自己也会复核年龄窗口；两条路径必须用同一个值，否则核验器按
+      # 24h 选出候选、门禁按默认 7 天一律否决。
+      NODE_CLEANUP_MIN_AGE_SECONDS: ${NODE_CLEANUP_MIN_AGE_SECONDS:-604800}
     cpus: ${DEAD_VERIFY_CPUS:-1}
     healthcheck:
       test: [CMD, node-worker, -health, -role, dead-verify]
