@@ -98,6 +98,27 @@ func (r *Repository) deleteVerifiedDeadOnce(ctx context.Context, identity, incar
 	return deleted, nil
 }
 
+// RecordVerification stores a liveness observation produced outside the queue.
+// Alive verdicts need it as much as dead ones: without an observation the next
+// wave would hand the same node to the prober again, and as the pool drains the
+// alive set would crowd out everything still untested.
+func (r *Repository) RecordVerification(ctx context.Context, identity, incarnation string, proof domain.ConnectivityState) error {
+	tx, err := r.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if proof.Reachable && proof.Error == "" {
+		if err = recordAvailable(ctx, tx, identity, incarnation, proof.CheckedAt); err != nil {
+			return err
+		}
+	}
+	if err = writeProbe(ctx, tx, VerificationSession(identity), KindLive, identity, proof); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // VerifiedCandidates lists the nodes a batch verifier may test: available,
 // currently unreachable, older than the window and without a running probe.
 // Nodes verified within recheck are skipped so successive waves cover the pool

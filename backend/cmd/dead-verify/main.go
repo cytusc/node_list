@@ -241,6 +241,18 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 				}
 				if ok {
 					alive.Add(1)
+					// Keep the observation: the candidate query skips anything
+					// verified within recheck, and a reachable node must leave the
+					// age window instead of being retested every wave.
+					if !o.dryRun {
+						c := wave[picked[i]-len(controls)]
+						proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Reachable: true, ProbeTarget: "batch-verify"}
+						if err := repo.RecordVerification(ctx, c.Identity, c.Incarnation, proof); err != nil {
+							mu.Lock()
+							reasons[err.Error()]++
+							mu.Unlock()
+						}
+					}
 					continue
 				}
 				dead.Add(1)

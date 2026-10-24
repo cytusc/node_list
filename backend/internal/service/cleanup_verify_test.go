@@ -99,3 +99,30 @@ func TestBulkDeletionDefersSnapshotCompaction(t *testing.T) {
 		t.Fatalf("second compact: n=%d err=%v", n, e)
 	}
 }
+
+func TestRecordVerificationKeepsAliveOutOfTheNextWave(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.exec(t, `UPDATE node_explorer_node_registry SET first_seen_at=now()-interval '8 days'`)
+	f.exec(t, `INSERT INTO node_explorer_connectivity(identity,checked_at,payload) VALUES($1,now(),'{"reachable":false,"checkedAt":"2026-10-24T00:00:00Z"}')`, f.id)
+	if wave, e := f.repo.VerifiedCandidates(ctx, 24*time.Hour, 6*time.Hour, 10); e != nil || len(wave) != 1 {
+		t.Fatalf("candidate before: %+v %v", wave, e)
+	}
+	var incarnation string
+	if e := f.repo.Pool.QueryRow(ctx, `SELECT incarnation FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&incarnation); e != nil {
+		t.Fatal(e)
+	}
+	// A reachable verdict must leave the age window and the recheck window, or the
+	// next wave would retest the same node forever.
+	proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Reachable: true, ProbeTarget: "batch-verify"}
+	if e := f.repo.RecordVerification(ctx, f.id, incarnation, proof); e != nil {
+		t.Fatal(e)
+	}
+	if wave, e := f.repo.VerifiedCandidates(ctx, 24*time.Hour, 6*time.Hour, 10); e != nil || len(wave) != 0 {
+		t.Fatalf("alive node resurfaced: %+v %v", wave, e)
+	}
+	var stamp time.Time
+	if e := f.repo.Pool.QueryRow(ctx, `SELECT last_available_at FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&stamp); e != nil || time.Since(stamp) > time.Minute {
+		t.Fatalf("availability not refreshed: %v %v", stamp, e)
+	}
+}
