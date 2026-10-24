@@ -37,24 +37,51 @@ func VerificationSession(identity string) string {
 // It never decides death by itself: the caller supplies a proof that already
 // says ConfirmedDead, and every gate re-checks that claim.
 func (r *Repository) DeleteVerifiedDead(ctx context.Context, identity, incarnation, digest string, proof domain.ConnectivityState) (bool, error) {
+	// The deletion transaction takes an exclusive lock on the snapshot tables,
+	// which ingestion and the queue's own deletions also hold. Queue behind it
+	// briefly instead of eating the 30-second session statement timeout, and let
+	// the caller's next wave retry a node that lost the race.
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		var deleted bool
+		deleted, err = r.deleteVerifiedDeadOnce(ctx, identity, incarnation, digest, proof)
+		if err == nil {
+			return deleted, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
+		}
+	}
+	return false, err
+}
+
+func (r *Repository) deleteVerifiedDeadOnce(ctx context.Context, identity, incarnation, digest string, proof domain.ConnectivityState) (bool, error) {
 	session := VerificationSession(identity)
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SET LOCAL lock_timeout='3s'`); err != nil {
+		return false, err
+	}
 	if err = writeProbe(ctx, tx, session, KindLive, identity, proof); err != nil {
 		return false, err
 	}
 	j := Job{Kind: KindCleanup, Payload: Payload{Identity: identity, Incarnation: incarnation, Reason: digest, Action: "cleanup"}}
 	deleted, err := deleteUnavailable(ctx, tx, j, proof, session)
-	if err != nil || !deleted {
+	if err != nil {
 		return false, err
 	}
+	// A refusal leaves the node for the queue path, but the observation still
+	// commits: without it every wave would retest the same head against the same
+	// gate and never reach the rest of the pool.
 	if err = tx.Commit(ctx); err != nil {
 		return false, err
 	}
-	return true, nil
+	return deleted, nil
 }
 
 // VerifiedCandidates lists the nodes a batch verifier may test: available,
