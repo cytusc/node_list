@@ -3,9 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
@@ -49,6 +52,119 @@ func cleanupInflight() int {
 
 func intervalParam(d time.Duration) string {
 	return fmt.Sprintf("%f seconds", d.Seconds())
+}
+
+var errNoEgressControl = errors.New("no reachable tcp reference")
+
+// tcpVerifiable reports whether a plain TCP dial is meaningful for this node.
+// QUIC-based transports never accept TCP, so they keep the kernel probe; every
+// other supported type is a TCP endpoint, where a direct dial from this
+// container bypasses the proxy stack and costs a fraction of a kernel lease.
+func tcpVerifiable(n domain.Node) bool {
+	switch strings.ToLower(n.Type) {
+	case "http", "https", "socks5", "socks", "ss", "ssr", "vmess", "vless", "trojan", "anytls":
+		return n.Server != "" && n.Port != ""
+	}
+	return false
+}
+
+// dialEndpoint is a direct TCP connect with no proxy stack in the path. A dial
+// that completes proves the endpoint accepts connections; it says nothing about
+// the protocol behind it, which is all a death verdict needs.
+func dialEndpoint(ctx context.Context, server, port string, timeout time.Duration) bool {
+	d := net.Dialer{Timeout: timeout}
+	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(server, port))
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
+// tcpReference picks a recently reachable TCP node as the egress control. A dead
+// verdict without one would mean "our container cannot dial anything", not
+// "the node is gone".
+func (r *Runner) tcpReference(ctx context.Context, exclude string) (*domain.Node, error) {
+	var raw []byte
+	err := r.Repo.Pool.QueryRow(ctx, `SELECT n.node FROM node_explorer_node_registry n
+ JOIN node_explorer_connectivity c USING(identity)
+ WHERE n.available AND n.identity<>$1 AND c.payload->>'reachable'='true' AND c.checked_at>now()-interval '30 minutes'
+ AND lower(n.node->>'type') IN ('http','https','socks5','socks','ss','ssr','vmess','vless','trojan','anytls')
+ ORDER BY c.checked_at DESC LIMIT 1`, exclude).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var n domain.Node
+	if err = json.Unmarshal(raw, &n); err != nil {
+		return nil, err
+	}
+	return &n, nil
+}
+
+// verifyByDial is the second verification for TCP endpoints: two direct dials
+// from this container, with a reference endpoint proving egress in the same
+// window, replace the kernel's two proxied attempts. The deletion gates in
+// deleteUnavailable are unchanged — the dial only produces the fresh proof.
+func (r *Runner) verifyByDial(ctx context.Context, j Job, t *Target) error {
+	const timeout = 6 * time.Second
+	ref, err := r.tcpReference(ctx, t.Identity)
+	if err != nil {
+		return err
+	}
+	if ref == nil || !dialEndpoint(ctx, ref.Server, ref.Port, timeout) {
+		// Egress unproven: every endpoint would look dead, so never conclude
+		// here. The kernel probe keeps its own control check and still yields a
+		// fenced proof, so fall back to it.
+		return errNoEgressControl
+	}
+	alive := dialEndpoint(ctx, t.Node.Server, t.Node.Port, timeout)
+	if !alive {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+		alive = dialEndpoint(ctx, t.Node.Server, t.Node.Port, timeout)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	proof := domain.ConnectivityState{CheckedAt: stamp, Reachable: alive, ConfirmedDead: !alive, ProbeTarget: "tcp-dial"}
+	session := "cleanup:" + j.Ref()
+	if alive {
+		// Still there: refresh availability so the age gate restarts, and let the
+		// recovery lane own the restore.
+		return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+			if e := recordAvailable(ctx, tx, t.Identity, t.Incarnation, stamp); e != nil {
+				return e
+			}
+			if e := writeProbe(ctx, tx, session, KindLive, t.Identity, proof); e != nil {
+				return e
+			}
+			return recur(ctx, tx, j, time.Hour)
+		})
+	}
+	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
+		if e := writeProbe(ctx, tx, session, KindLive, t.Identity, proof); e != nil {
+			return e
+		}
+		if r.Config.DryRun {
+			// Validation mode records the verdict but never removes data.
+			if _, e := tx.Exec(ctx, `INSERT INTO node_explorer_lifecycle_events(identity,action,dry_run,reason) VALUES($1,'delete',true,'validation mode: deletion suppressed')`, j.Payload.Identity); e != nil {
+				return e
+			}
+			return recur(ctx, tx, j, time.Hour)
+		}
+		deleted, e := deleteUnavailable(ctx, tx, j, proof)
+		if e != nil {
+			return e
+		}
+		if !deleted {
+			return recur(ctx, tx, j, time.Hour)
+		}
+		return nil
+	})
 }
 
 // Imports never refresh the monotonic successful observation clock.
@@ -135,6 +251,16 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 	}
 	if busy {
 		return waiting{30 * time.Second}
+	}
+	// A TCP endpoint is verified by dialing it from this container: no kernel
+	// lease, no proxy stack, so a forty-thousand-node backlog stays tractable.
+	// The same deletion gates still decide.
+	if agent, e := r.Repo.probeTarget(ctx, j.Payload); e != nil {
+		return e
+	} else if agent != nil && tcpVerifiable(agent.Node) {
+		if e := r.verifyByDial(ctx, j, agent); !errors.Is(e, errNoEgressControl) {
+			return e
+		}
 	}
 	if err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
 		kind := KindLive

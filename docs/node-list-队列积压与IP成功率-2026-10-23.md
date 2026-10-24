@@ -315,3 +315,37 @@ AND (SELECT count(*) FROM node_explorer_work active
 教训：`node-cleanup` 的并发在三层被写死过（Publish 深度、Claim 准入、消费者数），
 改并发时必须三层一起看；判断「队列是否在动」要看 `attempts`、`published_at` 与
 `due_at` 三者的关系，只看 `state` 会被「全部 queued」骗过去。
+
+### 第四个瓶颈：共享内核的 strict lane 与「本地直连」的正确做法（v1.5.65）
+
+前三个闸门拆掉后，队列真的会动了（在途 96、删除 ~7 个/分钟），但立刻撞上共享内核
+的硬上限：`manager.go` 里 `strict: 8` 是**代码常量**（exit/risk 都有环境变量，
+strict 没有），而单次 strict 探针是「两次 12 秒超时 + 10 秒间隔 + 对照节点」，
+黑洞地址要 ~60 秒。8 路 × 60 秒 = 480 个/小时，四万积压要 90 小时；把在途提到 96
+只会让 `connectivity` 队列堆到 61 个，不影响吞吐。
+
+**关于「本地用 mihomo 独立绕过系统代理测一下」**：方向是对的，但有个陷阱必须先说清。
+在本机直连测试是**无效**的——本机默认路由是 `utun4`，TUN 在本地代答所有 TCP，
+连保留地址 `192.0.2.1:443` 都能 1 毫秒「连上」。抽 24 个被判死的节点在本机直连，
+24/24 全部「成功」，延迟 1–2 毫秒，全是本地代答。所以探测必须在**容器侧**发起
+（容器没有 TUN，直连走真实路由），或者在本地严格绕开 TUN 的路由。
+
+因此 v1.5.65 把二次验证换成**容器内直连拨号**：
+
+- `tcpVerifiable`：只对 TCP 传输生效（http/https/socks5/ss/ssr/vmess/vless/trojan/anytls）；
+  hysteria2/tuic/hysteria 走 UDP，继续用内核探针。
+- `verifyByDial`：先用一条最近可达的 TCP 节点做**出口对照**（拨通它证明本容器
+  出网正常），再对目标做两次 6 秒直连，间隔 1 秒。两次都失败且对照成功 → 写入
+  `ConnectivityState{Reachable:false, ConfirmedDead:true, ProbeTarget:"tcp-dial"}`
+  作为新的受控证据，随后仍走**原来的 `deleteUnavailable` 全部门禁**（探针 1 分钟内、
+  会话匹配、注册表行锁 + 快照表 EXCLUSIVE 锁、年龄窗口、无在跑探针、无更新观察）。
+- 拨通（活着）→ `recordAvailable` 刷新可用时间并 `recur` 一小时，交回恢复通道。
+- 不经内核、不占租约，单节点从 ~60 秒降到 ~13 秒，且并发由
+  `NODE_CLEANUP_CONCURRENCY` 决定。
+
+线上：`NODE_CLEANUP_CONCURRENCY=16`，约 4400 个/小时，四万积压约 10 小时排空；
+UDP 那 1800 个仍走内核路径，慢但量小。
+
+回归用例：`TestTCPVerifiableProtocols`（协议白名单）、
+`TestCleanupDialVerificationDecidesByEndpoint`（活端点保留 / 死端点删除，走完整
+`cleanup` 处理器与删除门禁）。

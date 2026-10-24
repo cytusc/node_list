@@ -173,6 +173,8 @@ func TestManagedNormalAdmissionIncludesWaitingAssessments(t *testing.T) {
 }
 
 func TestManagedValidationSuppressesPhysicalDeletion(t *testing.T) {
+	// No reachable reference exists here, so the direct dial cannot conclude and
+	// the assessment falls back to the kernel path this test covers.
 	f := managedFixture(t, 503)
 	ctx := context.Background()
 	f.runner.Config.DryRun = true

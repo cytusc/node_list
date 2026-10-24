@@ -8,6 +8,7 @@ import (
 	"github.com/cytusc/node_list/backend/internal/transport"
 	"github.com/jackc/pgx/v5"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -173,6 +174,83 @@ func TestCleanupClaimsAreNotSingleFlight(t *testing.T) {
 	j, e := f.repo.Claim(ctx, KindCleanup, ref, false)
 	if e != nil || j == nil {
 		t.Fatalf("third verification blocked by single-flight admission: %v", e)
+	}
+}
+func TestTCPVerifiableProtocols(t *testing.T) {
+	for proto, want := range map[string]bool{
+		"http": true, "https": true, "socks5": true, "vless": true, "trojan": true,
+		"ss": true, "vmess": true, "anytls": true,
+		"hysteria2": false, "tuic": false, "hysteria": false,
+	} {
+		if got := tcpVerifiable(domain.Node{Type: proto, Server: "192.0.2.1", Port: "443"}); got != want {
+			t.Fatalf("%s: %v, want %v", proto, got, want)
+		}
+	}
+	if tcpVerifiable(domain.Node{Type: "http", Port: "443"}) || tcpVerifiable(domain.Node{Type: "http", Server: "192.0.2.1"}) {
+		t.Fatal("endpoint without server or port was accepted")
+	}
+}
+func TestCleanupDialVerificationDecidesByEndpoint(t *testing.T) {
+	for _, alive := range []bool{true, false} {
+		t.Run(fmt.Sprintf("alive=%v", alive), func(t *testing.T) {
+			f := setup(t)
+			ctx := context.Background()
+			var snapshot int
+			if e := f.repo.Pool.QueryRow(ctx, `SELECT id FROM node_explorer_snapshots LIMIT 1`).Scan(&snapshot); e != nil {
+				t.Fatal(e)
+			}
+			// A live loopback endpoint stands in for a reachable egress control.
+			ref, e := net.Listen("tcp", "127.0.0.1:0")
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer ref.Close()
+			f.exec(t, `INSERT INTO node_explorer_node_registry(identity,node,snapshot_id,node_index,first_seen_at) VALUES('ref',$1,$2,0,now())`,
+				fmt.Sprintf(`{"type":"http","server":"127.0.0.1","port":"%d"}`, ref.Addr().(*net.TCPAddr).Port), snapshot)
+			f.exec(t, `INSERT INTO node_explorer_connectivity(identity,checked_at,payload) VALUES('ref',now(),$1)`,
+				fmt.Sprintf(`{"reachable":true,"checkedAt":%q}`, time.Now().UTC().Format(time.RFC3339Nano)))
+			port := 1
+			if alive {
+				ln, e := net.Listen("tcp", "127.0.0.1:0")
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer ln.Close()
+				port = ln.Addr().(*net.TCPAddr).Port
+			} else {
+				// Bind then close: the address is free, so a dial is refused.
+				ln, e := net.Listen("tcp", "127.0.0.1:0")
+				if e != nil {
+					t.Fatal(e)
+				}
+				port = ln.Addr().(*net.TCPAddr).Port
+				ln.Close()
+			}
+			f.exec(t, `UPDATE node_explorer_node_registry SET node=$1, first_seen_at=now()-interval '8 days' WHERE identity=$2`,
+				fmt.Sprintf(`{"type":"http","server":"127.0.0.1","port":"%d"}`, port), f.id)
+			if e = f.runner.scheduleCleanup(ctx); e != nil {
+				t.Fatal(e)
+			}
+			var ref2 string
+			if e = f.repo.Pool.QueryRow(ctx, `SELECT id::text||':'||generation::text FROM node_explorer_work WHERE kind=$1 AND payload->>'identity'=$2`, KindCleanup, f.id).Scan(&ref2); e != nil {
+				t.Fatal(e)
+			}
+			j, e := f.repo.Claim(ctx, KindCleanup, ref2, false)
+			if e != nil || j == nil {
+				t.Fatalf("claim: %v", e)
+			}
+			if e = f.runner.handle(ctx, *j, false); e != nil {
+				t.Fatalf("handle: %v", e)
+			}
+			var n int
+			_ = f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&n)
+			if alive && n != 1 {
+				t.Fatal("live endpoint was deleted")
+			}
+			if !alive && n != 0 {
+				t.Fatal("dead endpoint kept")
+			}
+		})
 	}
 }
 func TestCleanupDeletionVetoes(t *testing.T) {
@@ -359,6 +437,9 @@ func TestCleanupCoordinatorUsesFreshNormalProbeAndDefersUncertainty(t *testing.T
 		t.Run(outcome, func(t *testing.T) {
 			f := setup(t)
 			ctx := context.Background()
+			// QUIC transports keep the kernel coordinator path this test covers;
+			// TCP endpoints are now verified by a direct dial instead.
+			f.exec(t, `UPDATE node_explorer_node_registry SET node=jsonb_set(node,'{type}','"hysteria2"') WHERE identity=$1`, f.id)
 			j := queueCleanup(t, f)
 			if e := f.runner.cleanup(ctx, j); !isWaiting(e) {
 				t.Fatalf("initial probe: %v", e)
