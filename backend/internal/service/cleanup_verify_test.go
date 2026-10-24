@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,15 +18,15 @@ func TestDeleteVerifiedDeadHonoursGates(t *testing.T) {
 	if e := f.repo.Pool.QueryRow(ctx, `SELECT md5(node::text),incarnation FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&digest, &incarnation); e != nil {
 		t.Fatal(e)
 	}
-	// Stale evidence must never remove anything.
+	// Stale evidence must never remove anything, and the refusal must say why.
 	stale := domain.ConnectivityState{CheckedAt: time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339Nano), ConfirmedDead: true}
-	if ok, e := f.repo.DeleteVerifiedDead(ctx, f.id, incarnation, digest, stale); e != nil || ok {
-		t.Fatalf("stale proof deleted: ok=%v err=%v", ok, e)
+	if ok, e := f.repo.DeleteVerifiedDead(ctx, f.id, incarnation, digest, stale); ok || !strings.Contains(fmt.Sprint(e), "stale-or-live-proof") {
+		t.Fatalf("stale proof not refused with a reason: ok=%v err=%v", ok, e)
 	}
 	// A digest that does not name the stored configuration is refused.
 	fresh := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), ConfirmedDead: true}
-	if ok, e := f.repo.DeleteVerifiedDead(ctx, f.id, incarnation, "deadbeef", fresh); e != nil || ok {
-		t.Fatalf("wrong digest deleted: ok=%v err=%v", ok, e)
+	if ok, e := f.repo.DeleteVerifiedDead(ctx, f.id, incarnation, "deadbeef", fresh); ok || !strings.Contains(fmt.Sprint(e), "guard") {
+		t.Fatalf("wrong digest not refused with a reason: ok=%v err=%v", ok, e)
 	}
 	ok, e := f.repo.DeleteVerifiedDead(ctx, f.id, incarnation, digest, fresh)
 	if e != nil || !ok {

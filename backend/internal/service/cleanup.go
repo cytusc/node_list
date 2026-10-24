@@ -156,7 +156,7 @@ func (r *Runner) verifyByDial(ctx context.Context, j Job, t *Target) error {
 			}
 			return recur(ctx, tx, j, time.Hour)
 		}
-		deleted, e := deleteUnavailable(ctx, tx, j, proof, session)
+		deleted, _, e := deleteUnavailable(ctx, tx, j, proof, session)
 		if e != nil {
 			return e
 		}
@@ -315,7 +315,7 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 			}
 			return recur(ctx, tx, j, time.Hour)
 		}
-		deleted, e := deleteUnavailable(ctx, tx, j, proof, session)
+		deleted, _, e := deleteUnavailable(ctx, tx, j, proof, session)
 		if e != nil {
 			return e
 		}
@@ -327,23 +327,23 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 }
 
 // The registry lock fences successful commits. Active probes and config changes veto deletion.
-func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.ConnectivityState, session string) (bool, error) {
+func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.ConnectivityState, session string) (bool, string, error) {
 	if proof.Reachable || !proof.ConfirmedDead || !fresh(proof.CheckedAt, time.Minute) {
-		return false, nil
+		return false, "stale-or-live-proof", nil
 	}
 	if _, e := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-registry'))`); e != nil {
-		return false, e
+		return false, "", e
 	}
 	if _, e := tx.Exec(ctx, `LOCK TABLE node_explorer_snapshots,node_explorer_ippure_results IN EXCLUSIVE MODE`); e != nil {
-		return false, e
+		return false, "", e
 	}
 	ok, e := cleanupGuard(ctx, tx, j.Payload)
 	if e != nil || !ok {
-		return false, e
+		return false, "guard", e
 	}
 	var admitted bool
 	if e = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtext(current_schema()),hashtext($1))`, "node-probe:"+j.Payload.Identity).Scan(&admitted); e != nil || !admitted {
-		return false, e
+		return false, "probe-in-flight", e
 	}
 	var safe bool
 	e = tx.QueryRow(ctx, `SELECT greatest(first_seen_at,coalesce(last_available_at,first_seen_at))<now()-$4::interval
@@ -351,25 +351,25 @@ func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.Conne
  AND NOT EXISTS(SELECT 1 FROM node_explorer_connectivity WHERE identity=$1 AND checked_at>$3::timestamptz)
  FROM node_explorer_node_registry WHERE identity=$1`, j.Payload.Identity, j.ID, proof.CheckedAt, intervalParam(cleanupMinAge())).Scan(&safe)
 	if e != nil || !safe {
-		return false, e
+		return false, "not-safe", e
 	}
 	var raw []byte
 	e = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_probe_results WHERE session=$1 AND kind=$2 AND identity=$3`, session, KindLive, j.Payload.Identity).Scan(&raw)
 	if e == pgx.ErrNoRows {
-		return false, nil
+		return false, "no-proof", nil
 	}
 	if e != nil {
-		return false, e
+		return false, "", e
 	}
 	var stored domain.ConnectivityState
 	if e = json.Unmarshal(raw, &stored); e != nil {
-		return false, e
+		return false, "", e
 	}
 	if stored.CheckedAt != proof.CheckedAt || stored.Reachable || !stored.ConfirmedDead {
-		return false, nil
+		return false, "proof-mismatch", nil
 	}
 	if e = removeSnapshotIdentity(ctx, tx, j.Payload.Identity); e != nil {
-		return false, e
+		return false, "", e
 	}
 	for _, q := range []string{
 		`DELETE FROM node_explorer_connectivity WHERE identity=$1`,
@@ -381,24 +381,24 @@ func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.Conne
 		`INSERT INTO node_explorer_deleted_nodes(identity,deleted_at) VALUES($1,clock_timestamp()) ON CONFLICT(identity) DO UPDATE SET deleted_at=EXCLUDED.deleted_at`,
 	} {
 		if _, e = tx.Exec(ctx, q, j.Payload.Identity); e != nil {
-			return false, e
+			return false, "", e
 		}
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO node_explorer_lifecycle_events(identity,action,dry_run,reason) VALUES($1,'delete',false,$2)`,
 		j.Payload.Identity, fmt.Sprintf("%s without availability; fresh controlled probe failed", cleanupMinAge()))
 	if e != nil {
-		return false, e
+		return false, "", e
 	}
 	var legacy bool
 	if e = tx.QueryRow(ctx, `SELECT to_regclass('node_explorer_current_nodes') IS NOT NULL`).Scan(&legacy); e != nil {
-		return false, e
+		return false, "", e
 	}
 	if legacy {
 		if _, e = tx.Exec(ctx, `DELETE FROM node_explorer_current_nodes WHERE identity=$1`, j.Payload.Identity); e != nil {
-			return false, e
+			return false, "", e
 		}
 	}
-	return true, nil
+	return true, "", nil
 }
 func removeSnapshotIdentity(ctx context.Context, tx pgx.Tx, id string) error {
 	return removeSnapshotIdentities(ctx, tx, []string{id})

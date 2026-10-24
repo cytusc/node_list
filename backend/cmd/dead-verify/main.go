@@ -156,8 +156,6 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 	if err != nil {
 		return stats, err
 	}
-	// Controls come first, but a control without a usable config is skipped, so
-	// the mapping must be read from picked instead of assumed.
 	candidates := 0
 	for _, index := range picked {
 		if index >= len(controls) {
@@ -168,41 +166,15 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 		return stats, fmt.Errorf("wave did not load: names=%d picked=%d controls=%d candidates=%d", len(names), len(picked), len(controls), candidates)
 	}
 
-	verdict := make([]int32, len(names)) // 0 unknown, 1 alive, 2 dead
-	jobs := make(chan int, len(names))
-	var wg sync.WaitGroup
-	for w := 0; w < o.workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range jobs {
-				alive, err := transport.ProxyDelay(ctx, instance, names[i], o.timeout)
-				switch {
-				case err != nil:
-					// Controller trouble says nothing about the node.
-					atomic.StoreInt32(&verdict[i], 0)
-				case alive:
-					atomic.StoreInt32(&verdict[i], 1)
-				default:
-					atomic.StoreInt32(&verdict[i], 2)
-				}
-			}
-		}()
-	}
-	for i := range names {
-		jobs <- i
-	}
-	close(jobs)
-	wg.Wait()
-
-	// The control must answer; otherwise the whole wave is untrustworthy.
-	controlAlive, controlSeen := false, 0
+	// The egress control decides whether this wave may judge anything at all, so
+	// it is checked before a single candidate is touched.
+	controlSeen, controlAlive := 0, false
 	for i := range names {
 		if picked[i] >= len(controls) {
 			continue
 		}
 		controlSeen++
-		if atomic.LoadInt32(&verdict[i]) == 1 {
+		if ok, e := transport.ProxyDelay(ctx, instance, names[i], o.timeout); e == nil && ok {
 			controlAlive = true
 		}
 	}
@@ -212,43 +184,63 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 
 	sem := make(chan struct{}, o.deleters)
 	var deleted, vetoed, dead, alive atomic.Int32
-	var delWG sync.WaitGroup
-	for i := range names {
-		if picked[i] < len(controls) {
-			continue
-		}
-		switch atomic.LoadInt32(&verdict[i]) {
-		case 1:
-			alive.Add(1)
-			continue
-		case 2:
-			dead.Add(1)
-		default:
-			continue
-		}
-		if o.dryRun {
-			continue
-		}
-		c := wave[picked[i]-len(controls)]
-		delWG.Add(1)
-		go func(c service.VerifiedCandidate) {
-			defer delWG.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Reachable: false, ConfirmedDead: true, ProbeTarget: "batch-verify"}
-			done, err := repo.DeleteVerifiedDead(ctx, c.Identity, c.Incarnation, c.Digest, proof)
-			if err != nil {
-				log.Printf("dead-verify: %s delete: %v", c.Identity, err)
-				return
+	var mu sync.Mutex
+	reasons := map[string]int{}
+	jobs := make(chan int, len(names))
+	var wg sync.WaitGroup
+	for w := 0; w < o.workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if picked[i] < len(controls) {
+					continue
+				}
+				ok, e := transport.ProxyDelay(ctx, instance, names[i], o.timeout)
+				if e != nil {
+					// Controller trouble says nothing about the node.
+					continue
+				}
+				if ok {
+					alive.Add(1)
+					continue
+				}
+				dead.Add(1)
+				if o.dryRun {
+					continue
+				}
+				c := wave[picked[i]-len(controls)]
+				// Delete while the proof is still seconds old: the gate only
+				// accepts evidence under a minute.
+				sem <- struct{}{}
+				proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Reachable: false, ConfirmedDead: true, ProbeTarget: "batch-verify"}
+				done, err := repo.DeleteVerifiedDead(ctx, c.Identity, c.Incarnation, c.Digest, proof)
+				<-sem
+				switch {
+				case err != nil:
+					mu.Lock()
+					reasons[err.Error()]++
+					mu.Unlock()
+				case done:
+					deleted.Add(1)
+				default:
+					vetoed.Add(1)
+				}
 			}
-			if done {
-				deleted.Add(1)
-			} else {
-				vetoed.Add(1)
-			}
-		}(c)
+		}()
 	}
-	delWG.Wait()
+	for i := range names {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	if len(reasons) > 0 {
+		mu.Lock()
+		for reason, n := range reasons {
+			log.Printf("dead-verify: deletion refused %dx: %s", n, reason)
+		}
+		mu.Unlock()
+	}
 	stats = waveStats{alive: int(alive.Load()), dead: int(dead.Load()), deleted: int(deleted.Load()), vetoed: int(vetoed.Load())}
 	return stats, nil
 }

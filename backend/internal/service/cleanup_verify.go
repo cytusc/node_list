@@ -5,11 +5,18 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
 )
+
+// vetoError reports which gate refused a deletion, so the batch verifier can
+// tell a transient refusal from a systematic one.
+type vetoError struct{ reason string }
+
+func (e *vetoError) Error() string { return "gate veto: " + e.reason }
 
 // VerifiedCandidate is one node a batch verifier may test.
 type VerifiedCandidate struct {
@@ -45,8 +52,8 @@ func (r *Repository) DeleteVerifiedDead(ctx context.Context, identity, incarnati
 	for attempt := 0; attempt < 3; attempt++ {
 		var deleted bool
 		deleted, err = r.deleteVerifiedDeadOnce(ctx, identity, incarnation, digest, proof)
-		if err == nil {
-			return deleted, nil
+		if err == nil || errors.As(err, new(*vetoError)) {
+			return deleted, err
 		}
 		select {
 		case <-ctx.Done():
@@ -71,7 +78,10 @@ func (r *Repository) deleteVerifiedDeadOnce(ctx context.Context, identity, incar
 		return false, err
 	}
 	j := Job{Kind: KindCleanup, Payload: Payload{Identity: identity, Incarnation: incarnation, Reason: digest, Action: "cleanup"}}
-	deleted, err := deleteUnavailable(ctx, tx, j, proof, session)
+	deleted, reason, err := deleteUnavailable(ctx, tx, j, proof, session)
+	if err == nil && !deleted {
+		return false, &vetoError{reason: reason}
+	}
 	if err != nil {
 		return false, err
 	}
