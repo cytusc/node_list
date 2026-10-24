@@ -98,6 +98,26 @@ func run() error {
 	defer shutdown()
 	log.Printf("dead-verify: mihomo ready controller=%s limit=%d workers=%d", instance.Controller, o.limit, o.workers)
 
+	// A wave of a few hundred handshakes can outlast the healthcheck window, so
+	// the pulse must not depend on wave completion. It refreshes only the
+	// timestamp and leaves the stats payload in place.
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_, err := repo.Pool.Exec(ctx, `INSERT INTO node_explorer_service_status(service,updated_at,payload)
+ VALUES('dead-verify',now(),'{"running":true}') ON CONFLICT(service) DO UPDATE SET updated_at=EXCLUDED.updated_at`)
+				if err != nil && ctx.Err() == nil {
+					log.Printf("dead-verify: pulse: %v", err)
+				}
+			}
+		}
+	}()
+
 	// Deletions skip snapshot compaction so each removal stays O(1); this pass
 	// pays the rewrite cost once per batch in the background.
 	lastCompact := time.Now()
