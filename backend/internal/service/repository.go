@@ -129,12 +129,12 @@ func (r *Repository) Publish(ctx context.Context, q taskqueue.Queue, kinds []str
 	WHERE kind=ANY($1) AND ((state='queued' AND due_at<=now()+interval '10 seconds')
 	OR (state='running' AND lease_until<now()))) pending
  LEFT JOIN occupied ON occupied.kind=pending.kind AND occupied.high=(pending.priority>0)
-	WHERE lane_position<=CASE WHEN pending.kind='normal-recovery' THEN $2 WHEN pending.kind='node-cleanup' THEN 1 WHEN pending.kind='recovery' THEN 2 ELSE 1000 END
+	WHERE lane_position<=CASE WHEN pending.kind='normal-recovery' THEN $2 WHEN pending.kind='node-cleanup' THEN $3 WHEN pending.kind='recovery' THEN 2 ELSE 1000 END
  - coalesce(occupied.running,0)
 	AND (published_at IS NULL OR published_at<now()-interval '30 seconds'
 	 OR published_generation IS DISTINCT FROM generation OR published_due_at IS DISTINCT FROM due_at
 	 OR published_priority IS DISTINCT FROM priority)
-	ORDER BY pending.priority DESC,pending.due_at,pending.id`, kinds, r.normalRecoveryLimit())
+	ORDER BY pending.priority DESC,pending.due_at,pending.id`, kinds, r.normalRecoveryLimit(), cleanupInflight())
 	if err != nil {
 		return err
 	}

@@ -203,3 +203,90 @@ docker exec node_list-node-explorer-1 /tmp/attributes-repair -apply   # 入队
   「住宅IP」标签在失败刷新后保持不变，成功证据仍在数组里。
 - `service.TestFailedRiskRefreshPreservesScoreAndRecordsFailure`：失败
   只移动尝试时间，不动状态/分数/结论时间。
+
+## 追加：死节点二验与删除（v1.5.62）
+
+### 现象
+
+注册表 47141 个 available 节点里 45614 个（96.8%）连通性不可达；它们每 30 分钟
+被全量 sweep 探一遍，同时被 normal-recovery 每 6 小时起评估一次，全都在做注定
+失败的探测。`node-cleanup` 服务心跳正常、队列却是空的，`delete` 事件停在
+10-23 03:16。
+
+### 根因：闸门写死，条件永远不成立
+
+`scheduleCleanup` 的入队条件是
+`greatest(first_seen_at, coalesce(last_available_at, first_seen_at)) < now() - interval '7 days'`。
+而 `first_seen_at` 是 10-18 加列迁移
+（`ALTER TABLE ... ADD COLUMN IF NOT EXISTS first_seen_at timestamptz NOT NULL DEFAULT now()`）
+统一刷新的：**最老的节点只有 6 天**，7 天窗口一天都不可能满足，所以队列永远为空，
+二验从未发生过。另有三处吞吐上限：单次调度 `LIMIT 256`（配合 30 秒周期 ≈ 512 个/小时）、
+`Publish` 给 `node-cleanup` 的 lane 深度写死为 **1**（同一时刻只放一个任务出队，
+其余任务永远排在窗口外）、以及 strict 探针 lane 在内核里只有 8 路容量。
+
+### 机制本身是完整的（未改动）
+
+`cleanup` 处理器已经是「二验 + 删除」：
+
+1. 年龄闸门通过后建 `cleanup:<id>:<generation>` 会话，投一次 `KindLive` 探针；
+2. `live()` 连续两次连通性失败，且**对照节点可达**（直连与控制节点各一次）才置
+   `ConfirmedDead`——只有「我们网络正常、这个节点真的连不上」才算确认死亡；
+3. `deleteUnavailable` 校验探针在 1 分钟内、会话结果与传参一致、注册表行锁 +
+   快照表 EXCLUSIVE 锁、`first_seen/last_available` 仍满足窗口、无在跑的探针、
+   没有比探针更新的连通性观察；
+4. 通过后删 connective/exits/retired/probe_results/work/registry，写
+   `deleted_nodes` 水印与 `delete` 生命周期事件，并把该 identity 从所在快照里摘除。
+
+`recur` 会升 generation，所以每次延后重试都会拿到全新会话与全新探针，不会复用
+过期证据。
+
+### 改动
+
+| 位置 | 改动 |
+|---|---|
+| `cleanupMinAge()` | `NODE_CLEANUP_MIN_AGE_SECONDS` 取代写死的 7 天（默认仍 604800），三处 SQL 全部参数化，删除事件原因记录实际窗口 |
+| `cleanupBatch()` | `NODE_CLEANUP_BATCH`（默认 256，上限 20000）。`Number()` 有 1–64 的并发语义，批量必须单独读 |
+| `laneConcurrency` | `RECOVERY_LIVE_CONCURRENCY`（connectivity lane）与 `NODE_CLEANUP_CONCURRENCY` 可配，默认 2；删除吞吐 ≈ 探针 lane 并发 × 单价 |
+| `services.sql` | `node_explorer_work((payload->>'identity')) WHERE state <> 'done'`，清理否决与准入 busy 检查原本每次任务全表扫 15 万行账本 |
+
+### 线上参数与预期
+
+服务器 `.env`：`NODE_CLEANUP_MIN_AGE_SECONDS=86400`、`NODE_CLEANUP_BATCH=2048`、
+`NODE_CLEANUP_CONCURRENCY=2`、`RECOVERY_LIVE_CONCURRENCY=8`。
+
+按 41346 个「超过 24 小时未见/不可用」的节点、单次探针约 15 秒（两次连通性检查
+之间固定等下 `PROBE_RETRY_SECONDS`）估算，8 路探针约 1900 个/小时，积压约一天
+排空；之后进入稳态——源批次重新发现的节点要重新走「3 轮失败 → 24 小时 →
+受控探针」才会再次删除。
+
+### 回归用例
+
+- `TestCleanupWindowIsConfigurable`：2 天的节点在 24 小时窗口下必须入队；
+- `TestCleanupDefaultsKeepAWeekOfGrace`：同样的节点在默认窗口下不得入队；
+- `TestCleanupBatchReader`：默认 256、可配 2048、非法值与上限钳制；
+- 既有 `TestCleanupDeletionVetoes` 的 11 个否决场景与
+  `TestCleanupPhysicallyDeletesAndPreservesOtherNodes` 继续通过。
+
+### 上线实测：第二个卡点是 Publish 的 lane 深度
+
+v1.5.62 放开窗口后，`node_explorer_work` 里 2 分钟积了 12288 个 `node-cleanup`
+任务，但 12287 个 `due_at` 已过期却始终 `attempts=0` —— 一个都没被领取。原因在
+`Publish`：
+
+```sql
+WHERE lane_position <= CASE ... WHEN pending.kind='node-cleanup' THEN 1 ... END
+ - coalesce(occupied.running,0)
+```
+
+`node-cleanup` 的投递深度写死为 1：最多只把一个任务放进 Redis，正在跑一个时
+`1 - 1 = 0`，一个都不放。按每次探针约 15 秒算，这条 lane 每小时只能处理约
+240 个节点，41346 个积压要跑一周。同一时刻第二个消费者也是空转。
+
+改动（v1.5.63）：`NODE_CLEANUP_INFLIGHT`（默认 32）取代写死的 1，作为 Publish
+的 lane 深度。strict 探针 lane 的内核容量本来就是 8 路，深度 32 已足够让它一直
+有活干，再深只会增加轮询账本的次数。同时把「探针未就绪」的轮询间隔从 1 秒放宽
+到 5 秒——strict 探针本身就要两次连通性检查，1 秒轮询只是在刷账本。
+
+另一个本可以避免的坑：一开始用「在途任务数上限」限制准入，但延后一小时的任务
+（活节点每小时复验一次）也算在途，会把窗口占满，导致新候选一小时进不来。准入
+只负责把候选填进账本，真正限制并发的是 Publish 的 lane 深度。

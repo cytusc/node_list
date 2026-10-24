@@ -122,6 +122,39 @@ func TestCleanupBatchReader(t *testing.T) {
 			t.Fatalf("batch %q clamped to %d", bad, v)
 		}
 	}
+	if cleanupInflight() != 32 {
+		t.Fatalf("default inflight: %d", cleanupInflight())
+	}
+	t.Setenv("NODE_CLEANUP_INFLIGHT", "128")
+	if cleanupInflight() != 128 {
+		t.Fatalf("configured inflight: %d", cleanupInflight())
+	}
+}
+func TestCleanupPublicationHonoursInflight(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	t.Setenv("NODE_CLEANUP_INFLIGHT", "2")
+	for i := 0; i < 5; i++ {
+		f.exec(t, `INSERT INTO node_explorer_work(kind,key,payload,priority,due_at) VALUES($1,$2,'{}',0,now()-interval '1 minute')`, KindCleanup, fmt.Sprintf("job-%d", i))
+	}
+	q := &publicationQueue{}
+	if e := f.repo.Publish(ctx, q, []string{KindCleanup}); e != nil {
+		t.Fatal(e)
+	}
+	if got := len(q.waves); got != 1 || len(q.waves[0]) != 2 {
+		t.Fatalf("published %d waves, first %v", got, q.waves)
+	}
+	// A running job consumes one slot; the wave may only top it up to the limit.
+	// Simulate the 30-second republication window instead of sleeping through it.
+	f.exec(t, `UPDATE node_explorer_work SET state='running',lease_until=now()+interval '2 minutes',lease_token='x' WHERE key='job-0'`)
+	f.exec(t, `UPDATE node_explorer_work SET published_at=NULL WHERE state='queued'`)
+	q2 := &publicationQueue{}
+	if e := f.repo.Publish(ctx, q2, []string{KindCleanup}); e != nil {
+		t.Fatal(e)
+	}
+	if len(q2.waves) != 1 || len(q2.waves[0]) != 1 {
+		t.Fatalf("occupied slot not accounted: %v", q2.waves)
+	}
 }
 func TestCleanupDeletionVetoes(t *testing.T) {
 	for _, scenario := range []string{"reachable", "inconclusive", "stale", "missing-proof", "concurrent-success", "newer-observation", "changed-config", "recreated", "running-probe", "wrong-session", "admitting-probe"} {

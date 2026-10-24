@@ -35,6 +35,18 @@ func cleanupBatch() int {
 	return min(v, 20000)
 }
 
+// cleanupInflight is how many verification jobs Publish admits at once. The
+// ledger may hold the whole eligible pool, but only this many may run: each
+// in-flight job polls for its probe result, and the strict probe lane caps out
+// long before the registry scan does, so a deeper wave only adds poll traffic.
+func cleanupInflight() int {
+	v, e := strconv.Atoi(os.Getenv("NODE_CLEANUP_INFLIGHT"))
+	if e != nil || v < 1 {
+		return 32
+	}
+	return min(v, 500)
+}
+
 func intervalParam(d time.Duration) string {
 	return fmt.Sprintf("%f seconds", d.Seconds())
 }
@@ -77,6 +89,8 @@ func (r *Runner) scheduleCleanup(ctx context.Context) error {
 	if _, err := r.Repo.Pool.Exec(ctx, `DELETE FROM node_explorer_service_status WHERE updated_at<now()-interval '30 minutes'`); err != nil {
 		return err
 	}
+	// Admission only fills the candidate ledger; Publish bounds how many run at
+	// once, so a deferred candidate never blocks a fresh one for a whole hour.
 	_, err := r.Repo.Pool.Exec(ctx, `INSERT INTO node_explorer_work(kind,key,payload,priority,due_at)
  SELECT 'node-cleanup',n.identity||':'||n.incarnation,
  jsonb_build_object('identity',n.identity,'incarnation',n.incarnation,'reason',md5(n.node::text),'action','cleanup'),0,now()
@@ -137,7 +151,9 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 		return err
 	}
 	if !ready {
-		return waiting{time.Second}
+		// The strict probe owns the timeline (two connectivity attempts plus a
+		// control node); polling harder than that only burns ledger writes.
+		return waiting{5 * time.Second}
 	}
 	if proof.Reachable || !proof.ConfirmedDead || !fresh(proof.CheckedAt, time.Minute) {
 		return deferCycle()

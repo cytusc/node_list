@@ -149,6 +149,8 @@ services:
       # first_seen_at 若是加列迁移统一刷新的，默认 7 天会一直不满足。
       NODE_CLEANUP_MIN_AGE_SECONDS: ${NODE_CLEANUP_MIN_AGE_SECONDS:-604800}
       NODE_CLEANUP_BATCH: ${NODE_CLEANUP_BATCH:-256}
+      # 在途任务上限：每个任务都在轮询自己的探针，放太多会把账本打爆。
+      NODE_CLEANUP_INFLIGHT: ${NODE_CLEANUP_INFLIGHT:-32}
       NODE_CLEANUP_CONCURRENCY: ${NODE_CLEANUP_CONCURRENCY:-2}
     healthcheck:
       test: [CMD, node-worker, -role, node-cleanup, -health]
