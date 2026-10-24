@@ -156,6 +156,25 @@ func TestCleanupPublicationHonoursInflight(t *testing.T) {
 		t.Fatalf("occupied slot not accounted: %v", q2.waves)
 	}
 }
+func TestCleanupClaimsAreNotSingleFlight(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	t.Setenv("NODE_CLEANUP_INFLIGHT", "3")
+	// Two assessments already hold the lane. A third must still be claimable:
+	// one stuck probe waiting on capacity used to block every other node.
+	for _, key := range []string{"a", "b"} {
+		f.exec(t, `INSERT INTO node_explorer_work(kind,key,payload,priority,due_at) VALUES($1,$2,'{"startedAt":"2026-10-24T00:00:00Z"}',0,now()-interval '1 minute')`, KindCleanup, key)
+	}
+	f.exec(t, `INSERT INTO node_explorer_work(kind,key,payload,priority,due_at) VALUES($1,'c','{}',0,now()-interval '1 minute')`, KindCleanup)
+	var ref string
+	if e := f.repo.Pool.QueryRow(ctx, `SELECT id::text||':'||generation::text FROM node_explorer_work WHERE kind=$1 AND key='c'`, KindCleanup).Scan(&ref); e != nil {
+		t.Fatal(e)
+	}
+	j, e := f.repo.Claim(ctx, KindCleanup, ref, false)
+	if e != nil || j == nil {
+		t.Fatalf("third verification blocked by single-flight admission: %v", e)
+	}
+}
 func TestCleanupDeletionVetoes(t *testing.T) {
 	for _, scenario := range []string{"reachable", "inconclusive", "stale", "missing-proof", "concurrent-success", "newer-observation", "changed-config", "recreated", "running-probe", "wrong-session", "admitting-probe"} {
 		t.Run(scenario, func(t *testing.T) {

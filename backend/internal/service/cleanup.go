@@ -152,7 +152,11 @@ func (r *Runner) cleanup(ctx context.Context, j Job) error {
 	}
 	if !ready {
 		// The strict probe owns the timeline (two connectivity attempts plus a
-		// control node); polling harder than that only burns ledger writes.
+		// control node); polling harder than that only burns ledger writes. A
+		// proof that never lands (guard lost the node) must not hold a slot.
+		if !j.Payload.StartedAt.IsZero() && time.Since(j.Payload.StartedAt) > 15*time.Minute {
+			return deferCycle()
+		}
 		return waiting{5 * time.Second}
 	}
 	if proof.Reachable || !proof.ConfirmedDead || !fresh(proof.CheckedAt, time.Minute) {

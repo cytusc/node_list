@@ -266,8 +266,8 @@ func (r *Repository) Claim(ctx context.Context, kind, ref string, high bool) (*J
 	AND (priority>0)=$5 AND due_at<=now() AND (state='queued' OR (state='running' AND lease_until<now()))
  AND (kind NOT IN ('recovery','normal-recovery','node-cleanup') OR (payload ? 'startedAt' AND payload->>'startedAt' NOT LIKE '0001-%') OR
  (SELECT count(*) FROM node_explorer_work active WHERE active.kind=node_explorer_work.kind AND (active.priority>0)=$5
- AND active.state<>'done' AND active.payload ? 'startedAt' AND active.payload->>'startedAt' NOT LIKE '0001-%')<CASE WHEN kind='normal-recovery' THEN $6 WHEN kind='node-cleanup' THEN 1 ELSE 2 END)
-	RETURNING key,payload,priority,attempts,due_at`, id, generation, kind, j.Token, high, r.normalRecoveryLimit()).Scan(&j.Key, &raw, &j.Priority, &j.Attempts, &j.Due)
+ AND active.state<>'done' AND active.payload ? 'startedAt' AND active.payload->>'startedAt' NOT LIKE '0001-%')<CASE WHEN kind='normal-recovery' THEN $6 WHEN kind='node-cleanup' THEN $7 ELSE 2 END)
+	RETURNING key,payload,priority,attempts,due_at`, id, generation, kind, j.Token, high, r.normalRecoveryLimit(), cleanupInflight()).Scan(&j.Key, &raw, &j.Priority, &j.Attempts, &j.Due)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

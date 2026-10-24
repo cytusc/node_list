@@ -290,3 +290,28 @@ WHERE lane_position <= CASE ... WHEN pending.kind='node-cleanup' THEN 1 ... END
 另一个本可以避免的坑：一开始用「在途任务数上限」限制准入，但延后一小时的任务
 （活节点每小时复验一次）也算在途，会把窗口占满，导致新候选一小时进不来。准入
 只负责把候选填进账本，真正限制并发的是 Publish 的 lane 深度。
+
+### 第三个闸门：Claim 里的单飞准入（v1.5.64）
+
+Publish 放开后仍不动：Redis 里明明有 12 个 ref，`attempts` 还是 0。原因在
+`Claim` 的准入子查询：
+
+```sql
+AND (SELECT count(*) FROM node_explorer_work active
+     WHERE active.kind=node_explorer_work.kind AND active.state<>'done'
+       AND active.payload ? 'startedAt') < CASE WHEN kind='normal-recovery' THEN $6
+       WHEN kind='node-cleanup' THEN 1 ELSE 2 END
+```
+
+`node-cleanup` 同样是写死的 1：**整个系统同时只允许一个带 `startedAt` 的清理任务
+存在**。当时正好有一个任务的探针结果没落库（`cleanupGuard` 在节点配置变更后否决），
+它每 5 秒重试一次、`startedAt` 一直挂着，把唯一的准入位锁死，于是四万多个任务
+一个都领不到。
+
+改动：该处也用 `NODE_CLEANUP_INFLIGHT`（`$7`）；另给「探针迟迟不落库」加了时间
+上限——`startedAt` 超过 15 分钟仍未就绪就 `deferCycle`（`recur` 会清掉
+`startedAt`，把准入位还回去），避免一个坏任务永久占位。
+
+教训：`node-cleanup` 的并发在三层被写死过（Publish 深度、Claim 准入、消费者数），
+改并发时必须三层一起看；判断「队列是否在动」要看 `attempts`、`published_at` 与
+`due_at` 三者的关系，只看 `state` 会被「全部 queued」骗过去。
