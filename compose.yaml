@@ -176,11 +176,9 @@ services:
       # 24h 选出候选、门禁按默认 7 天一律否决。
       NODE_CLEANUP_MIN_AGE_SECONDS: ${NODE_CLEANUP_MIN_AGE_SECONDS:-604800}
     cpus: ${DEAD_VERIFY_CPUS:-1}
-    healthcheck:
-      test: [CMD, node-worker, -health, -role, dead-verify]
-      interval: 60s
-      timeout: 10s
-      start_period: 90s
+    # 不加 healthcheck：一批握手可能跑几分钟，任何以「多久没写心跳」为准的探针
+    # 都会把正在干活的容器判成 unhealthy，进而拖垮 `up -d --wait` 的整批更新。
+    # 存活性看 node_explorer_service_status 里的 dead-verify 行（20 秒一次脉冲）。
   mihomo-manager:
     <<: *worker
     cpus: ${MIHOMO_MANAGER_CPUS:-0.5}
