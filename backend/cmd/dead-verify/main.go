@@ -156,8 +156,16 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 	if err != nil {
 		return stats, err
 	}
-	if len(names) != len(picked) || len(names) <= len(controls) {
-		return stats, fmt.Errorf("wave did not load: names=%d picked=%d controls=%d", len(names), len(picked), len(controls))
+	// Controls come first, but a control without a usable config is skipped, so
+	// the mapping must be read from picked instead of assumed.
+	candidates := 0
+	for _, index := range picked {
+		if index >= len(controls) {
+			candidates++
+		}
+	}
+	if len(names) != len(picked) || candidates == 0 {
+		return stats, fmt.Errorf("wave did not load: names=%d picked=%d controls=%d candidates=%d", len(names), len(picked), len(controls), candidates)
 	}
 
 	verdict := make([]int32, len(names)) // 0 unknown, 1 alive, 2 dead
@@ -188,21 +196,27 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 	wg.Wait()
 
 	// The control must answer; otherwise the whole wave is untrustworthy.
-	controlAlive := false
-	for i := range controls {
+	controlAlive, controlSeen := false, 0
+	for i := range names {
+		if picked[i] >= len(controls) {
+			continue
+		}
+		controlSeen++
 		if atomic.LoadInt32(&verdict[i]) == 1 {
 			controlAlive = true
-			break
 		}
 	}
 	if !controlAlive {
-		return stats, errors.New("egress control failed: wave discarded")
+		return stats, fmt.Errorf("egress control failed: wave discarded (%d controls tried)", controlSeen)
 	}
 
 	sem := make(chan struct{}, o.deleters)
 	var deleted, vetoed, dead, alive atomic.Int32
 	var delWG sync.WaitGroup
-	for i := len(controls); i < len(names); i++ {
+	for i := range names {
+		if picked[i] < len(controls) {
+			continue
+		}
 		switch atomic.LoadInt32(&verdict[i]) {
 		case 1:
 			alive.Add(1)

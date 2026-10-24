@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,18 +55,41 @@ func LoadVerificationProxies(ctx context.Context, instance MihomoConfig, nodes [
 			names = append(names, name)
 		}
 	}
-	payload, err := marshalMihomoConfig(config)
-	if err != nil {
-		return nil, nil, fmt.Errorf("render verification config: %w", err)
+	// One unsupported parameter rejects the whole wave with HTTP 400 and names
+	// the offending index; drop that entry and try again so a single bad node
+	// cannot block the pool.
+	for attempt := 0; attempt < 4; attempt++ {
+		payload, err := marshalMihomoConfig(config)
+		if err != nil {
+			return nil, nil, fmt.Errorf("render verification config: %w", err)
+		}
+		status, body, err := putConfig(ctx, instance, payload)
+		if err != nil {
+			return nil, nil, err
+		}
+		if status == http.StatusNoContent || status == http.StatusOK {
+			return names, picked, nil
+		}
+		index, ok := rejectedProxyIndex(body)
+		if status != http.StatusBadRequest || !ok || index < 0 || index >= len(config.Proxies) || len(config.Proxies) <= 1 {
+			return nil, nil, fmt.Errorf("load verification proxies: controller answered %d", status)
+		}
+		config.Proxies = append(config.Proxies[:index], config.Proxies[index+1:]...)
+		names = append(names[:index], names[index+1:]...)
+		picked = append(picked[:index], picked[index+1:]...)
 	}
+	return nil, nil, errors.New("load verification proxies: every attempt rejected")
+}
+
+func putConfig(ctx context.Context, instance MihomoConfig, payload []byte) (int, string, error) {
 	body, err := json.Marshal(map[string]string{"payload": string(payload)})
 	if err != nil {
-		return nil, nil, err
+		return 0, "", err
 	}
 	endpoint := strings.TrimSuffix(instance.Controller, "/") + "/configs?force=true"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, err
+		return 0, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if instance.Secret != "" {
@@ -73,13 +97,21 @@ func LoadVerificationProxies(ctx context.Context, instance MihomoConfig, nodes [
 	}
 	resp, err := verificationClient.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("load verification proxies: %w", err)
+		return 0, "", fmt.Errorf("load verification proxies: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("load verification proxies: controller answered %d", resp.StatusCode)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return resp.StatusCode, string(raw), nil
+}
+
+// rejectedProxyIndex extracts Mihomo's "proxy N:" index from a rejected config.
+func rejectedProxyIndex(body string) (int, bool) {
+	match := proxyErrorIndex.FindStringSubmatch(strings.TrimSpace(body))
+	if len(match) != 2 {
+		return 0, false
 	}
-	return names, picked, nil
+	index, err := strconv.Atoi(match[1])
+	return index, err == nil
 }
 
 // usableProxy reports whether a rendered proxy names a dialable endpoint.

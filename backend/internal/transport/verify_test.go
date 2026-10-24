@@ -95,3 +95,38 @@ func TestProxyCountConfirmsWaveLanded(t *testing.T) {
 		t.Fatalf("count=%d err=%v", n, err)
 	}
 }
+
+func TestLoadVerificationProxiesDropsRejectedEntry(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body struct {
+			Payload string `json:"payload"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		// The second attempt must no longer carry the rejected endpoint.
+		if calls == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`proxy 1: unsupported field`))
+			return
+		}
+		if strings.Contains(body.Payload, "198.51.100.7") {
+			t.Errorf("rejected proxy survived:\n%s", body.Payload)
+		}
+		if strings.Count(body.Payload, "name: verify-") != 1 {
+			t.Errorf("expect exactly one surviving proxy:\n%s", body.Payload)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	names, picked, err := LoadVerificationProxies(context.Background(), MihomoConfig{Controller: server.URL}, []domain.Node{
+		{Type: "http", Server: "192.0.2.1", Port: "8080"},
+		{Type: "vless", RawConfig: domain.ProxyConfig{"type": "vless", "server": "198.51.100.7", "port": 443, "uuid": "x"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(names) != 1 || picked[0] != 0 {
+		t.Fatalf("calls=%d names=%v picked=%v", calls, names, picked)
+	}
+}
