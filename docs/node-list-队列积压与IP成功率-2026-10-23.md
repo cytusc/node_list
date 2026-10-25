@@ -610,3 +610,70 @@ v1.5.75 把响应体打进日志，才第一次看到真正的原因。三个叠
 
 原则没变：**配置问题只影响「能不能测」，不影响「死没死」**。判死依据始终是
 真实握手 + DIRECT 出口对照 + `deleteUnavailable` 的全部门禁。
+
+## 澄清：「1 小时」不是检测耗时（v1.5.77）
+
+用户质疑：本地 mihomo + zashboard 检测节点连通性很快，不可能需要 1 小时。
+质疑成立。核实后，检测能力本来就是 **20+ 个/秒**：
+
+| 通路 | 实测 |
+|---|---|
+| dead-verify（独立 mihomo，真实握手） | 一波 400 个 **18 秒** ≈ 22 个/秒 |
+| sweep（共享内核） | 一轮 8811 个 **415 秒** ≈ 21 个/秒 |
+
+按这个速率，1.4 万个节点全量测一遍只要 **11 分钟**。所以「1 小时」从来不是
+检测本身，而是两个**等待**叠出来的：
+
+### 等待一：sweep 重启后空转一个完整周期
+
+```go
+func newSweepRunner(every time.Duration) *sweepRunner {
+    next := time.Now().Add(every)   // ← 30 分钟后才跑第一轮
+```
+
+每次部署重启都要空转一个周期。证据在心跳里：容器启动 25 分钟后，
+`sweep.started_at` 仍是零值、`processed=0`、`phase=finished`——**一轮都没跑过**。
+`connectivity.checked_at` 的落点也印证了：成批记录停在 09:20–09:40（上一代容器），
+之后一小时只有零星几条。
+
+### 等待二：内核 reload 无限等租约
+
+```
+"kernel": { "healthy": false, "reloads": 42,
+            "reloadDrainMillis": 14617, "reloadPauseMillis": 16297 }
+"error": "内核未就绪或正在重载"
+```
+
+reload 换配置前要等所有在途租约排空，而 IP 检测流量会把租约攥十几秒。
+drain 期间 `Stats.Healthy` 因 `reloading` 直接为 false，sweep 每个调度点都读到
+「内核未就绪」就跳过——25 分钟 42 次 reload，内核近半时间不可用。
+
+### 等待三：策略性的 1 小时宽限期
+
+这一层是**故意的**，不是性能问题：节点必须「最近 1 小时没有可用记录」才允许判死
+删除，用来过滤刚抖动的节点。它不消耗任何检测时间，只是把删除推迟。
+
+### 修复
+
+- `newSweepRunner` 首轮改为 `min(every, 30s)`：新进程没有任何可用性视图，
+  等整周期没有道理；
+- drain 设 2 秒上限：换配置可能让一个在途请求失败，但让整条探测流水线停摆更糟；
+- reload 防重入：已在 reload 时再次调用直接返回。
+
+### 怎么验证这类判断（方法论）
+
+不要看「有没有在跑」，要看**数据落点**：
+
+```sql
+-- 探测到底多久轮到一次
+SELECT date_trunc('hour', checked_at) + (extract(minute from checked_at)::int/10)
+       * interval '10 minutes' AS bucket, count(*)
+FROM node_explorer_connectivity c JOIN node_explorer_node_registry n USING(identity)
+WHERE n.available GROUP BY 1 ORDER BY 1 DESC LIMIT 12;
+
+-- 调度器自述：started_at 是零值就说明从没跑过
+SELECT updated_at, payload FROM node_explorer_service_status WHERE service='mihomo-manager';
+```
+
+三个数一起看就能区分「慢」和「停」：`checked_at` 的落点（是否在推进）、
+`started_at`（是否零值）、`reloadDrainMillis`（是否被阻塞）。
