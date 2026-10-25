@@ -124,6 +124,9 @@ type ManagerStats struct {
 
 // Manager is the sole controller writer. Leases fence reloads and are never renewed.
 // The owner must terminate it immediately upon losing the DB ownership session.
+// reloadDrainLimit bounds how long a config swap waits for in-flight leases.
+const reloadDrainLimit = 2 * time.Second
+
 type Manager struct {
 	healthMu sync.Mutex
 	Instance MihomoConfig
@@ -246,6 +249,13 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 	}
 	previousEntries := m.entries
 	previousRejected := m.rejected
+	// A reload in progress already carries the newest state it can: letting a
+	// second caller start another one just extends the window where the kernel
+	// reports unhealthy and every periodic probe skips.
+	if m.reloading {
+		m.mu.Unlock()
+		return nil
+	}
 	m.reloading = true
 	m.mu.Unlock()
 	pauseStarted := time.Now()
@@ -255,12 +265,18 @@ func (m *Manager) Sync(ctx context.Context, entries []RegistryEntry) error {
 		m.reloading = false
 		m.mu.Unlock()
 	}()
+	// Drain in-flight probes, but never unbounded: IP-verification traffic holds
+	// leases for tens of seconds, and waiting for all of it kept the kernel in
+	// "reloading" long enough that every periodic sweep was skipped. Swapping the
+	// config may fail a request that was already in flight; stalling the whole
+	// probe pipeline is worse.
+	drainDeadline := time.Now().Add(reloadDrainLimit)
 	for {
 		m.mu.Lock()
 		m.prune()
 		empty := len(m.leases) == 0
 		m.mu.Unlock()
-		if empty {
+		if empty || time.Now().After(drainDeadline) {
 			break
 		}
 		select {

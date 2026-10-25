@@ -49,8 +49,14 @@ type sweepStatus struct {
 	NextRunAt      time.Time      `json:"next_run_at,omitempty"`
 }
 
+// sweepFirstRoundDelay bounds how long the first round waits after start. A
+// fresh process has no availability view at all, so waiting a whole interval
+// leaves every consumer reading stale reachability for that long (a restart
+// during the day did exactly that for 30 minutes).
+const sweepFirstRoundDelay = 30 * time.Second
+
 func newSweepRunner(every time.Duration) *sweepRunner {
-	next := time.Now().Add(every)
+	next := time.Now().Add(min(every, sweepFirstRoundDelay))
 	return &sweepRunner{every: every, next: next, state: sweepStatus{NextRunAt: next}}
 }
 func (s *sweepRunner) status() sweepStatus {
