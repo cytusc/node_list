@@ -1170,3 +1170,21 @@ select option {
   border-top: 1px solid var(--border);
   text-align: left;
 }
+
+.node-times {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.node-times > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.node-times span,
+.node-times > div:last-child {
+  color: var(--muted-foreground);
+}

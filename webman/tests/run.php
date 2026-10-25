@@ -169,9 +169,11 @@ $node = NodePresenter::node([
     'lifecycle' => ['status' => 'active'],
     'rawLink' => 'ss://secret',   // 必须被剥离
     'rawConfig' => ['server' => 'x'],
+    'addedAt' => '2026-10-17T00:00:00Z',
     'checkedAt' => '2026-10-18T00:00:00Z',
 ]);
 
+same('2026-10-17T00:00:00Z', $node['addedAt'] ?? null, '添加时间保留在节点响应中');
 same('443', $node['port'] ?? null, 'port 数字字符串化');
 same(5242880, $node['speed'] ?? null, 'speed 整数值不输出 .0');
 same(false, $node['udp'] ?? null, '非 omitempty 的 false 保留');

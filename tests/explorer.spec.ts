@@ -83,7 +83,12 @@ test.describe("interactions and data states", () => {
           nodes: [
             {
               ...snapshot.nodes[0],
+              addedAt: "2026-10-09T00:00:00Z",
               checkedAt: "2026-10-10T00:00:00Z",
+              connectivity: {
+                checkedAt: "2026-10-11T01:30:00Z",
+                reachable: true,
+              },
               name: "Current node",
               baseName: "Current node",
             },
@@ -94,6 +99,14 @@ test.describe("interactions and data states", () => {
     );
     await page.getByRole("button", { name: "刷新结果" }).click();
     await expect(page.locator(".title-count")).toHaveText("2");
+    const times = page
+      .locator('.node-row [data-column="time"]')
+      .filter({ hasText: "2026/10/09" });
+    await expect(times).toContainText("添加时间2026/10/09 08:00");
+    await expect(times).toContainText("最后检测时间2026/10/11 09:30");
+    await expect(
+      page.locator('.node-row [data-column="time"]').filter({ hasText: "暂无记录" }),
+    ).toHaveCount(1);
     await expect(page.getByLabel("检测批次")).toHaveCount(0);
     await expect(page.getByText(/已聚合 2 轮检测/)).toHaveCount(0);
     await expect(page.getByText("订阅下载仍使用最新生成的文件。")).toHaveCount(

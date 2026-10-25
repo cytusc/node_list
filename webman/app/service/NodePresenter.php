@@ -60,6 +60,7 @@ final class NodePresenter
         ['exit',          true,  'exit'],
         ['lifecycle',     true,  'lifecycle'],
         ['snapshotId',    true,  'number'],
+        ['addedAt',       true,  'string'],
         ['checkedAt',     true,  'string'],
         ['speedTest',     true,  'bool'],
         ['mediaCheck',    true,  'bool'],

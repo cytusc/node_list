@@ -162,6 +162,7 @@ type Node struct {
 	// single-batch view — the JavaScript store only attaches them while folding.
 	SnapshotID *int   `json:"snapshotId,omitempty"`
 	Index      int    `json:"-"`
+	AddedAt    string `json:"addedAt,omitempty"`
 	CheckedAt  string `json:"checkedAt,omitempty"`
 	SpeedTest  *bool  `json:"speedTest,omitempty"`
 	MediaCheck *bool  `json:"mediaCheck,omitempty"`

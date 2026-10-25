@@ -303,6 +303,34 @@ function Speed({ value, max }: { value: number; max: number }) {
     </div>
   );
 }
+function NodeTimes({ node }: { node: NodeRecord }) {
+  const checkedAt = [
+    node.checkedAt,
+    node.connectivity?.checkedAt,
+    node.exit?.checkedAt,
+    node.ippure?.checkedAt,
+    node.ippure?.classification?.checkedAt,
+  ]
+    .filter(
+      (date): date is string => !!date && Number.isFinite(Date.parse(date)),
+    )
+    .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+  const label = (date?: string) =>
+    date && Number.isFinite(Date.parse(date)) ? timeLabel(date) : "暂无记录";
+  return (
+    <div className="node-times">
+      <div>
+        <span>添加时间</span>
+        <time dateTime={node.addedAt}>{label(node.addedAt)}</time>
+      </div>
+      <div>
+        <span>最后检测时间</span>
+        <time dateTime={checkedAt}>{label(checkedAt)}</time>
+      </div>
+    </div>
+  );
+}
+
 async function copy(text: string, source: HTMLElement) {
   try {
     await copyText(text, source);
@@ -317,6 +345,7 @@ const columnLabels: Record<string, string> = {
   type: "协议 / 传输",
   media: "服务解锁",
   speed: "下载速度",
+  time: "时间",
   ...Object.fromEntries(
     ippureMetrics.map(({ column, label }) => [column, label]),
   ),
@@ -332,6 +361,7 @@ const columnWidths: Record<string, number> = {
   trafficRatio: 205,
   media: 160,
   speed: 125,
+  time: 225,
   actions: 44,
 };
 const emptyNodes: NodeRecord[] = [];
@@ -608,6 +638,12 @@ export default function App() {
             },
           ]
         : []),
+      {
+        id: "time",
+        header: "时间",
+        enableSorting: false,
+        cell: ({ row }) => <NodeTimes node={row.original} />,
+      },
       {
         id: "actions",
         header: "",
@@ -1101,6 +1137,9 @@ export default function App() {
                       {row.original.server}:{row.original.port}
                     </span>
                     <IPPureSummary result={row.original.ippure} />
+                    {table.getColumn("time")?.getIsVisible() && (
+                      <NodeTimes node={row.original} />
+                    )}
                     <div className="mobile-node-bottom">
                       <div>
                         <Badge variant="outline" className="protocol-badge">

@@ -44,6 +44,7 @@ export type IPPureResult = {
   label?: string;
 };
 export type NodeRecord = {
+  addedAt?: string;
   connectivity?: { checkedAt: string; reachable: boolean; error?: string };
   exit?: {
     ip?: string;

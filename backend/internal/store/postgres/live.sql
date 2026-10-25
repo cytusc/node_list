@@ -45,7 +45,7 @@ FROM observed;
 
 CREATE OR REPLACE VIEW node_explorer_live_nodes AS
 WITH facts AS (
- SELECT f.*,
+ SELECT f.*, n.first_seen_at,
  exit_payload || jsonb_build_object('version',exit_version) AS exit,
  CASE WHEN exit_payload IS NULL THEN NULL
  ELSE coalesce(attributes,jsonb_build_object('status','error','ip',exit_ip,'checkedAt',exit_payload->>'checkedAt',
@@ -58,10 +58,11 @@ WITH facts AS (
  jsonb_build_object('status','unsupported','failureStage','unsupported-ipv6','error','仅 IPv6，暂无评分')
  ELSE '{}'::jsonb END END AS ippure
  FROM node_explorer_live_facts f
+ JOIN node_explorer_node_registry n USING(identity)
 )
 SELECT identity,snapshot_id,node_index,country,
  node - 'rawLink' - 'rawConfig' - 'ippure' - 'connectivity' - 'exit' - 'lifecycle'
- || jsonb_build_object('lifecycle',jsonb_build_object('status','active'))
+ || jsonb_build_object('addedAt',first_seen_at,'lifecycle',jsonb_build_object('status','active'))
  || CASE WHEN connectivity IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('connectivity',connectivity) END
  || CASE WHEN exit IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('exit',exit,'ippure',ippure) END
  || CASE WHEN country IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('country',country) END
