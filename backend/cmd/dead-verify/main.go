@@ -42,15 +42,6 @@ func main() {
 	}
 }
 
-// envAllowZero differs from envInt only in accepting an explicit 0, which the
-// age window needs to express "ignore the gate" during an operational dry run.
-func envAllowZero(key string, fallback int) int {
-	if v, err := strconv.Atoi(os.Getenv(key)); err == nil && v >= 0 {
-		return v
-	}
-	return fallback
-}
-
 func envInt(key string, fallback int) int {
 	if v, err := strconv.Atoi(os.Getenv(key)); err == nil && v > 0 {
 		return v
@@ -72,20 +63,26 @@ type options struct {
 }
 
 func run() error {
+	service.LoadEnv(service.Root())
 	var o options
 	flag.IntVar(&o.limit, "limit", envInt("DEAD_VERIFY_LIMIT", 400), "节点每批数量")
 	flag.IntVar(&o.workers, "workers", envInt("DEAD_VERIFY_WORKERS", 96), "并行握手数")
 	flag.IntVar(&o.deleters, "deleters", envInt("DEAD_VERIFY_DELETERS", 8), "并行删除事务数")
 	flag.DurationVar(&o.timeout, "timeout", time.Duration(envInt("DEAD_VERIFY_TIMEOUT_SECONDS", 6))*time.Second, "单节点握手超时")
-	flag.DurationVar(&o.minAge, "min-age", time.Duration(envAllowZero("DEAD_VERIFY_MIN_AGE_SECONDS", 86400))*time.Second, "候选年龄窗口；0 表示忽略年龄门禁")
+	flag.DurationVar(&o.minAge, "min-age", time.Duration(envInt("NODE_CLEANUP_MIN_AGE_SECONDS", 604800))*time.Second, "候选年龄窗口，不得小于删除保护窗口")
 	flag.DurationVar(&o.recheck, "recheck", time.Duration(envInt("DEAD_VERIFY_RECHECK_SECONDS", 21600))*time.Second, "同一节点再次核验的间隔")
 	flag.DurationVar(&o.interval, "interval", time.Duration(envInt("DEAD_VERIFY_INTERVAL_SECONDS", 5))*time.Second, "无候选时的等待")
 	flag.DurationVar(&o.compact, "compact-every", time.Duration(envInt("DEAD_VERIFY_COMPACT_SECONDS", 120))*time.Second, "快照压缩间隔")
 	flag.BoolVar(&o.once, "once", false, "只跑一批")
-	flag.BoolVar(&o.dryRun, "dry-run", false, "只报告判定，不删除")
+	flag.BoolVar(&o.dryRun, "dry-run", service.Env("LIFECYCLE_DRY_RUN", "false") == "true", "只报告判定，不删除")
 	flag.Parse()
 
-	service.LoadEnv(service.Root())
+	if o.limit <= 0 || o.workers <= 0 || o.deleters <= 0 || o.timeout <= 0 || o.recheck <= 0 || o.interval <= 0 || o.compact < 0 {
+		return errors.New("limit, workers, deleters, timeout, recheck and interval must be positive; compact-every cannot be negative")
+	}
+	if o.minAge < time.Duration(envInt("NODE_CLEANUP_MIN_AGE_SECONDS", 604800))*time.Second {
+		return errors.New("min-age cannot be shorter than NODE_CLEANUP_MIN_AGE_SECONDS")
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	cfg, err := postgres.ConfigFromEnv()
@@ -98,10 +95,19 @@ func run() error {
 	}
 	defer a.Close()
 	repo := &service.Repository{Pool: a.Pool()}
+	return repo.WithServiceLock(ctx, "dead-verify", func(ctx context.Context) error {
+		return runVerifier(ctx, repo, o)
+	})
+}
+
+func runVerifier(ctx context.Context, repo *service.Repository, o options) error {
+	ctx, cancel := context.WithCancel(ctx)
+	pulseDone := make(chan struct{})
 
 	binary := service.Env("DEAD_VERIFY_MIHOMO", "mihomo")
 	instance, shutdown, err := startMihomo(ctx, binary)
 	if err != nil {
+		cancel()
 		return err
 	}
 	defer shutdown()
@@ -111,6 +117,7 @@ func run() error {
 	// the pulse must not depend on wave completion. It refreshes only the
 	// timestamp and leaves the stats payload in place.
 	go func() {
+		defer close(pulseDone)
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -127,11 +134,13 @@ func run() error {
 		}
 	}()
 
+	defer func() { cancel(); <-pulseDone }()
+
 	// Deletions skip snapshot compaction so each removal stays O(1); this pass
 	// pays the rewrite cost once per batch in the background.
 	lastCompact := time.Now()
 	maybeCompact := func() {
-		if o.compact <= 0 || time.Since(lastCompact) < o.compact {
+		if o.dryRun || o.compact <= 0 || time.Since(lastCompact) < o.compact {
 			return
 		}
 		lastCompact = time.Now()
@@ -199,7 +208,7 @@ func skipUnparseable(ctx context.Context, repo *service.Repository, wave []servi
 			ProbeTarget: "config-rejected",
 			Error:       "kernel cannot parse this proxy configuration",
 		}
-		if err := repo.RecordVerification(ctx, c.Identity, c.Incarnation, proof); err != nil {
+		if err := repo.RecordVerification(ctx, c.Identity, c.Incarnation, c.Digest, proof); err != nil {
 			log.Printf("dead-verify: record unparseable %s: %v", c.Identity, err)
 			continue
 		}
@@ -245,8 +254,10 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 	// occupying the head of the candidate queue every single wave: the candidate
 	// query skips anything verified within recheck, and by then the source may
 	// have shipped a parseable config.
-	if skipped := skipUnparseable(ctx, repo, wave, dropped, len(controls)); skipped > 0 {
-		log.Printf("dead-verify: skipped %d candidates the kernel cannot parse", skipped)
+	if !o.dryRun {
+		if skipped := skipUnparseable(ctx, repo, wave, dropped, len(controls)); skipped > 0 {
+			log.Printf("dead-verify: skipped %d candidates the kernel cannot parse", skipped)
+		}
 	}
 	candidates := 0
 	for _, index := range picked {
@@ -294,6 +305,7 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 					continue
 				}
 				ok, e := transport.ProxyDelay(ctx, instance, names[i], o.timeout)
+				checkedAt := time.Now().UTC().Format(time.RFC3339Nano)
 				if e != nil {
 					// Controller trouble says nothing about the node.
 					continue
@@ -305,8 +317,8 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 					// age window instead of being retested every wave.
 					if !o.dryRun {
 						c := wave[picked[i]-len(controls)]
-						proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Reachable: true, ProbeTarget: "batch-verify"}
-						if err := repo.RecordVerification(ctx, c.Identity, c.Incarnation, proof); err != nil {
+						proof := domain.ConnectivityState{CheckedAt: checkedAt, Reachable: true, ProbeTarget: "batch-verify"}
+						if err := repo.RecordVerification(ctx, c.Identity, c.Incarnation, c.Digest, proof); err != nil {
 							mu.Lock()
 							reasons[err.Error()]++
 							mu.Unlock()
@@ -321,12 +333,17 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 				c := wave[picked[i]-len(controls)]
 				// Delete while the proof is still seconds old: the gate only
 				// accepts evidence under a minute.
-				sem <- struct{}{}
-				proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Reachable: false, ConfirmedDead: true, ProbeTarget: "batch-verify"}
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				proof := domain.ConnectivityState{CheckedAt: checkedAt, Reachable: false, ConfirmedDead: true, ProbeTarget: "batch-verify"}
 				done, err := repo.DeleteVerifiedDead(ctx, c.Identity, c.Incarnation, c.Digest, proof)
 				<-sem
 				switch {
 				case err != nil:
+					vetoed.Add(1)
 					mu.Lock()
 					reasons[err.Error()]++
 					mu.Unlock()

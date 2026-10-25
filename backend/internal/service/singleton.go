@@ -74,3 +74,8 @@ func (r *Repository) withServiceLock(parent context.Context, name string, run fu
 	}
 	return err
 }
+
+// WithServiceLock owns a service until the callback and all its workers stop.
+func (r *Repository) WithServiceLock(ctx context.Context, name string, run func(context.Context) error) error {
+	return r.withServiceLock(ctx, name, run)
+}

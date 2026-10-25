@@ -69,8 +69,7 @@ export const queueGroups: Record<string, { label: string; kinds: string[] }> = {
     kinds: ["exit", "fast-delay", "connectivity"],
   },
   "exit-attributes": { label: "IP 属性", kinds: ["attributes", "risk"] },
-  recovery: { label: "节点恢复", kinds: ["recovery", "normal-recovery"] },
-  "node-cleanup": { label: "数据维护", kinds: ["node-cleanup", "lifecycle"] },
+  recovery: { label: "节点恢复", kinds: ["recovery", "normal-recovery", "lifecycle"] },
 };
 export function totals(queues: Queue[], group = "all") {
   const kinds = queueGroups[group]?.kinds ?? [];

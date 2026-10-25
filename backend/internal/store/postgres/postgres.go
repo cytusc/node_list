@@ -91,7 +91,7 @@ func quoteConnValue(value string) string {
 // schemaVersion bumps whenever base tables, service SQL or live views change.
 // Forgetting to bump it is silent: the new statements simply never run against
 // an existing database (that is how node_explorer_work_identity went missing).
-const schemaVersion = 12
+const schemaVersion = 13
 
 type Adapter struct {
 	pool *pgxpool.Pool

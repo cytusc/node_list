@@ -6,12 +6,10 @@ import (
 )
 
 func TestProbeServicesHaveIndependentConcurrency(t *testing.T) {
+	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
+	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
 	t.Setenv("RESIDENTIAL_CONCURRENCY", "2")
 	t.Setenv("NORMAL_CONCURRENCY", "2")
-	t.Setenv("IP_SERVICE_HIGH_CONTROLLER", "http://high-1:9090,http://high-2:9090,http://high-3:9090,http://high-4:9090")
-	t.Setenv("IP_SERVICE_HIGH_PROXY_URL", "http://high-1:7890,http://high-2:7890,http://high-3:7890,http://high-4:7890")
-	t.Setenv("IP_SERVICE_NORMAL_CONTROLLER", "http://normal-1:9090,http://normal-2:9090,http://normal-3:9090,http://normal-4:9090")
-	t.Setenv("IP_SERVICE_NORMAL_PROXY_URL", "http://normal-1:7890,http://normal-2:7890,http://normal-3:7890,http://normal-4:7890")
 	t.Setenv("IP_SERVICE_HIGH_CONCURRENCY", "3")
 	t.Setenv("IP_SERVICE_NORMAL_CONCURRENCY", "4")
 	exit, err := ConfigFromEnv("exit-provision")
@@ -23,12 +21,14 @@ func TestProbeServicesHaveIndependentConcurrency(t *testing.T) {
 	}
 	t.Setenv("IP_SERVICE_HIGH_CONCURRENCY", "")
 	exit, err = ConfigFromEnv("exit-provision")
-	if err != nil || exit.HighConcurrency != 2 {
-		t.Fatalf("legacy fallback: %d %v", exit.HighConcurrency, err)
+	if err != nil || exit.HighConcurrency != 8 {
+		t.Fatalf("managed default: %d %v", exit.HighConcurrency, err)
 	}
 }
 
 func TestRecoveryRoleDefaultsAndIntervalOverride(t *testing.T) {
+	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
+	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
 	t.Setenv("NORMAL_RECOVERY_INTERVAL_SECONDS", "")
 	t.Setenv("NORMAL_RECOVERY_CONCURRENCY", "")
 	cfg, err := ConfigFromEnv("recovery")
@@ -51,6 +51,8 @@ func TestRecoveryRoleDefaultsAndIntervalOverride(t *testing.T) {
 }
 
 func TestNormalRecoveryConcurrencyOverride(t *testing.T) {
+	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
+	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
 	for _, n := range []string{"1", "2", "4", "8"} {
 		t.Run(n, func(t *testing.T) {
 			t.Setenv("NORMAL_RECOVERY_CONCURRENCY", n)
@@ -68,6 +70,8 @@ func TestNormalRecoveryConcurrencyOverride(t *testing.T) {
 }
 
 func TestExitProbeTimeoutConfig(t *testing.T) {
+	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
+	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
 	cases := []struct {
 		name, value string
 		want        time.Duration
@@ -90,6 +94,8 @@ func TestExitProbeTimeoutConfig(t *testing.T) {
 }
 
 func TestManagedConcurrencyHonorsConfiguration(t *testing.T) {
+	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
+	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
 	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
 	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
 	t.Setenv("MIHOMO_EXIT_CONCURRENCY", "12")
@@ -116,5 +122,14 @@ func TestManagedConcurrencyHonorsConfiguration(t *testing.T) {
 	r.configureAdmission()
 	if r.Repo.normalRecoveryLimit() != 4 {
 		t.Fatal("managed assessments ignore configured bound")
+	}
+}
+
+func TestWorkersRequireManager(t *testing.T) {
+	t.Setenv("MIHOMO_MANAGER_URL", "")
+	for _, role := range []string{"exit-provision", "exit-attributes", "recovery"} {
+		if _, err := ConfigFromEnv(role); err == nil {
+			t.Fatalf("%s accepted missing manager", role)
+		}
 	}
 }

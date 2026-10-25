@@ -173,9 +173,8 @@ func (n Node) PortString() string {
 // normalised by normalizeVmessConnection: two spellings of the same connection
 // collapse into one identity. This intentionally changed the hash input for
 // affected vmess links relative to the pre-normalisation build; identities
-// re-converge on the next full registry rebuild, and the legacy oracle at
-// legacy/node-server/node-sources.js keeps the unnormalised form (accepted
-// drift, Go is authoritative since modularisation).
+// re-converge on the next full registry rebuild. Go is authoritative; stable
+// pre-migration cases are retained in testdata/identity-contract.json.
 func AggregateIdentity(n Node) string {
 	if len(n.RawConfig) == 0 && n.RawLink != "" {
 		if id, ok := shareLinkIdentity(n.RawLink); ok {
@@ -215,13 +214,12 @@ func shareLinkIdentity(link string) (string, bool) {
 }
 
 // ShareLinkConnection renders the canonical connection string that
-// AggregateIdentity hashes for a share link. It exists so the parity checker
-// can diff the hashing input itself instead of only the digest.
+// AggregateIdentity hashes for a share link; tests inspect the input directly.
 //
 // vmess links are further normalised by normalizeVmessConnection: upstream
 // aggregators emit the same effective connection with different spellings of
 // no-op fields (numeric vs string port, absent vs empty transport fields,
-// "---"/"auto" noise). The oracle at legacy/node-server/node-sources.js does
+// "---"/"auto" noise). The archived implementation did
 // not normalise these; Go is the authoritative implementation since the
 // modularisation, so already-stored identities converge on the next full
 // registry rebuild while variants collapse into one row.
@@ -317,12 +315,6 @@ func normalizeVmessConnection(config map[string]any) {
 	if s, ok := config["net"].(string); ok && (s == "tcp" || s == "raw") {
 		delete(config, "net")
 	}
-}
-
-// ConnectionConfig is the exported form of connectionConfig, used by the
-// parity checker to compare hashing inputs.
-func ConnectionConfig(proxy ProxyConfig) map[string]any {
-	return connectionConfig(proxy)
 }
 
 // decorativeConfigFields lists config keys that name a subscription entry

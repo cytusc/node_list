@@ -47,7 +47,7 @@ CPU 百分比为 Docker 相对单核的读数。分钟吞吐为滚动一分钟�
 
 上游 subs-check 采集器保持原部署，原来启用的 `node-list-update.timer` 已恢复。应用镜像尚未发布，因此 `NODE_EXPLORER_AUTO_UPDATE=false` 固定本次镜像；发布正式版本后应按正常发布流程切回版本标签并恢复应用自动更新。
 
-原始回滚备份：`/root/node_list-backups/single-mihomo-20261019T020722Z`。保留 `compose.legacy-mihomo.yaml`、原镜像及备份配置。路由串线或错误删除证明出现时，先停止生命周期及清理，再恢复原部署。
+原始回滚备份：`/root/node_list-backups/single-mihomo-20261019T020722Z`。这是历史验收记录；旧多内核 Compose 已从当前源码移除。历史回滚需使用部署时的备份文件、原镜像及备份配置。路由串线或错误删除证明出现时，先停止生命周期及清理，再恢复原部署。
 
 ## 204 测活、20 分钟周期与 CPU 优化复验
 

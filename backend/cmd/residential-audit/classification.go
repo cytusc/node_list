@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
-	"github.com/cytusc/node_list/backend/internal/patrol"
+	"github.com/cytusc/node_list/backend/internal/store"
 	"os"
 	"strings"
 	"time"
@@ -164,5 +164,5 @@ func parseCrossCheck(raw []byte, ip, checkedAt string) *crossCheck {
 }
 
 func recoverableReason(reason string) bool {
-	return reason == patrol.PatrolRetireReason || strings.HasPrefix(reason, "IPPure:")
+	return reason == store.RetireRestoreReason || strings.HasPrefix(reason, "IPPure:")
 }

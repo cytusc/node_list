@@ -153,11 +153,10 @@ func laneConcurrency(role string) map[string]int {
 	}
 	out[KindNormalRecovery] = Number("NORMAL_RECOVERY_CONCURRENCY", 2)
 	// The connectivity lane carries the sweeper's retirement evidence, the
-	// recovery assessments and the cleanup role's second-verification probe. It
+	// recovery assessments. It
 	// defaulted to the normal-lane count; naming it lets an operator raise the
 	// verification rate without touching assessment admission.
 	out[KindLive] = Number(prefix+"_LIVE_CONCURRENCY", Number("LIVE_CONCURRENCY", 2))
-	out[KindCleanup] = Number("NODE_CLEANUP_CONCURRENCY", 2)
 	return out
 }
 
@@ -192,42 +191,5 @@ func ConfigFromEnv(role string) (Config, error) {
 		}
 		return c, nil
 	}
-	// Only exit-provision keeps a native mihomo fleet; every other manager-less
-	// role waits for MIHOMO_MANAGER_URL (compose always provides it).
-	if role != "exit-provision" {
-		return c, nil
-	}
-	prefix := "IP_SERVICE"
-	c.HighConcurrency = Number(prefix+"_HIGH_CONCURRENCY", c.HighConcurrency)
-	c.NormalConcurrency = Number(prefix+"_NORMAL_CONCURRENCY", c.NormalConcurrency)
-	seen := map[string]bool{}
-	for _, lane := range []string{"HIGH", "NORMAL"} {
-		base := prefix + "_" + lane
-		controllers := strings.Split(os.Getenv(base+"_CONTROLLER"), ",")
-		proxies := strings.Split(os.Getenv(base+"_PROXY_URL"), ",")
-		if len(controllers) != len(proxies) {
-			return c, fmt.Errorf("%s controller/proxy counts differ", base)
-		}
-		instances := []transport.MihomoConfig{}
-		for i, controller := range controllers {
-			controller = strings.TrimRight(strings.TrimSpace(controller), "/")
-			proxy := strings.TrimSpace(proxies[i])
-			if controller == "" || proxy == "" {
-				return c, fmt.Errorf("%s_CONTROLLER and %s_PROXY_URL are required", base, base)
-			}
-			if seen[controller] {
-				return c, fmt.Errorf("residential and normal lanes require different Mihomo controllers")
-			}
-			seen[controller] = true
-			instances = append(instances, transport.MihomoConfig{Controller: controller, ProxyURL: proxy, Secret: os.Getenv(base + "_CONTROLLER_SECRET")})
-		}
-		engine := transport.NewMihomoEngine(instances, 15*time.Second)
-		router := transport.NewRouter(transport.NewNativeEngine()).WithFallback(engine)
-		if lane == "HIGH" {
-			c.HighRouter = router
-		} else {
-			c.NormalRouter = router
-		}
-	}
-	return c, nil
+	return c, fmt.Errorf("MIHOMO_MANAGER_URL is required")
 }

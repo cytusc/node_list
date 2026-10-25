@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -22,10 +23,19 @@ func main() {
 	}
 }
 func run() error {
-	role := flag.String("role", "", "source, exit-provision, exit-attributes, recovery, node-cleanup, mihomo-manager")
+	role := flag.String("role", "", "source, exit-provision, exit-attributes, recovery, mihomo-manager")
 	health := flag.Bool("health", false, "check persistent service heartbeat")
 	flag.Parse()
 	service.LoadEnv(service.Root())
+	switch *role {
+	case "source", "exit-provision", "exit-attributes", "recovery", "mihomo-manager":
+	case "dead-verify":
+		if !*health {
+			return fmt.Errorf("use the dead-verify command to start this service")
+		}
+	default:
+		return fmt.Errorf("unknown worker role: %s", *role)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	cfg, err := postgres.ConfigFromEnv()

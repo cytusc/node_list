@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"github.com/cytusc/node_list/backend/internal/patrol"
+	"github.com/cytusc/node_list/backend/internal/store"
 	"io"
 	"net/http"
 	"strings"
@@ -122,7 +122,7 @@ func TestClassificationDoesNotReuseVerdictForDifferentExit(t *testing.T) {
 func supportedRecord(ip string) record {
 	no := false
 	now := time.Now().UTC().Format(time.RFC3339)
-	return record{ID: ip, Reason: patrol.PatrolRetireReason, Retired: true, RetiredAt: time.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339), Reachable: true, VerifiedIP: ip, ProbedAt: now,
+	return record{ID: ip, Reason: store.RetireRestoreReason, Retired: true, RetiredAt: time.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339), Reachable: true, VerifiedIP: ip, ProbedAt: now,
 		Verdict:    &collector.IPPureResult{IP: ip, Attributes: []string{"住宅IP"}},
 		CrossCheck: &crossCheck{IP: ip, Provider: "ipinfo", CheckedAt: now, Hosting: &no, CompanyType: "isp", Outcome: "supports-residential"}}
 }

@@ -17,9 +17,9 @@ final class ServiceMonitor
         'exit-provision' => ['出口检测', '核验节点实际出口 IP'],
         'exit-attributes' => ['IP 属性', '更新 IP 分类与风险信息'],
         'recovery' => ['节点恢复', '评估退役节点并补充检测'],
-        'node-cleanup' => ['数据维护', '复核长期失活节点并清理'],
+        'dead-verify' => ['数据维护', '复核长期失活节点并清理'],
     ];
-    public const KINDS = ['exit', 'attributes', 'risk', 'fast-delay', 'connectivity', 'recovery', 'normal-recovery', 'node-cleanup', 'lifecycle'];
+    public const KINDS = ['exit', 'attributes', 'risk', 'fast-delay', 'connectivity', 'recovery', 'normal-recovery', 'lifecycle'];
 
     public static function hours(mixed $value): int
     {

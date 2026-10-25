@@ -1,3 +1,4 @@
+// Test-only pagination for synthetic browser fixtures; never used by the API.
 const regions = new Intl.DisplayNames(["zh-CN"], { type: "region" });
 export function countryName(code) {
   if (!code || code === "unknown") return "未知地区";

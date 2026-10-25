@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -27,29 +26,6 @@ func cleanupMinAge() time.Duration {
 	return Seconds("NODE_CLEANUP_MIN_AGE_SECONDS", int(defaultCleanupMinAge.Seconds()))
 }
 
-// cleanupBatch caps how many candidates one schedule tick admits. The lane
-// verifies far slower than the registry scan, so the cap only shapes the queue;
-// Number() would clamp it into the concurrency range, hence its own reader.
-func cleanupBatch() int {
-	v, e := strconv.Atoi(os.Getenv("NODE_CLEANUP_BATCH"))
-	if e != nil || v < 1 {
-		return 256
-	}
-	return min(v, 20000)
-}
-
-// cleanupInflight is how many verification jobs Publish admits at once. The
-// ledger may hold the whole eligible pool, but only this many may run: each
-// in-flight job polls for its probe result, and the strict probe lane caps out
-// long before the registry scan does, so a deeper wave only adds poll traffic.
-func cleanupInflight() int {
-	v, e := strconv.Atoi(os.Getenv("NODE_CLEANUP_INFLIGHT"))
-	if e != nil || v < 1 {
-		return 32
-	}
-	return min(v, 500)
-}
-
 // cleanupMinPool stops deletions from emptying the survival set. A source
 // outage, an egress fault or a mass false-negative would otherwise delete every
 // temporarily unreachable node and leave nothing to serve. Below this many
@@ -67,12 +43,9 @@ func intervalParam(d time.Duration) string {
 	return fmt.Sprintf("%f seconds", d.Seconds())
 }
 
-var errNoEgressControl = errors.New("no reachable tcp reference")
-
-// tcpVerifiable reports whether a plain TCP dial is meaningful for this node.
-// QUIC-based transports never accept TCP, so they keep the kernel probe; every
-// other supported type is a TCP endpoint, where a direct dial from this
-// container bypasses the proxy stack and costs a fraction of a kernel lease.
+// tcpVerifiable identifies TCP endpoints eligible for the source admission check.
+// QUIC-based transports bypass this check. Deletion always requires a controlled
+// protocol handshake, regardless of endpoint reachability.
 func tcpVerifiable(n domain.Node) bool {
 	switch strings.ToLower(n.Type) {
 	case "http", "https", "socks5", "socks", "ss", "ssr", "vmess", "vless", "trojan", "anytls":
@@ -82,8 +55,8 @@ func tcpVerifiable(n domain.Node) bool {
 }
 
 // dialEndpoint is a direct TCP connect with no proxy stack in the path. A dial
-// that completes proves the endpoint accepts connections; it says nothing about
-// the protocol behind it, which is all a death verdict needs.
+// that completes proves only that the endpoint accepts connections; it cannot
+// establish protocol health and is used only by source admission.
 func dialEndpoint(ctx context.Context, server, port string, timeout time.Duration) bool {
 	d := net.Dialer{Timeout: timeout}
 	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(server, port))
@@ -94,92 +67,6 @@ func dialEndpoint(ctx context.Context, server, port string, timeout time.Duratio
 	return true
 }
 
-// tcpReference picks a recently reachable TCP node as the egress control. A dead
-// verdict without one would mean "our container cannot dial anything", not
-// "the node is gone".
-func (r *Runner) tcpReference(ctx context.Context, exclude string) (*domain.Node, error) {
-	var raw []byte
-	err := r.Repo.Pool.QueryRow(ctx, `SELECT n.node FROM node_explorer_node_registry n
- JOIN node_explorer_connectivity c USING(identity)
- WHERE n.available AND n.identity<>$1 AND c.payload->>'reachable'='true' AND c.checked_at>now()-interval '30 minutes'
- AND lower(n.node->>'type') IN ('http','https','socks5','socks','ss','ssr','vmess','vless','trojan','anytls')
- ORDER BY c.checked_at DESC LIMIT 1`, exclude).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var n domain.Node
-	if err = json.Unmarshal(raw, &n); err != nil {
-		return nil, err
-	}
-	return &n, nil
-}
-
-// verifyByDial is the second verification for TCP endpoints: two direct dials
-// from this container, with a reference endpoint proving egress in the same
-// window, replace the kernel's two proxied attempts. The deletion gates in
-// deleteUnavailable are unchanged — the dial only produces the fresh proof.
-func (r *Runner) verifyByDial(ctx context.Context, j Job, t *Target) error {
-	const timeout = 6 * time.Second
-	ref, err := r.tcpReference(ctx, t.Identity)
-	if err != nil {
-		return err
-	}
-	if ref == nil || !dialEndpoint(ctx, ref.Server, ref.Port, timeout) {
-		// Egress unproven: every endpoint would look dead, so never conclude
-		// here. The kernel probe keeps its own control check and still yields a
-		// fenced proof, so fall back to it.
-		return errNoEgressControl
-	}
-	alive := dialEndpoint(ctx, t.Node.Server, t.Node.Port, timeout)
-	if !alive {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-		alive = dialEndpoint(ctx, t.Node.Server, t.Node.Port, timeout)
-	}
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	proof := domain.ConnectivityState{CheckedAt: stamp, Reachable: alive, ConfirmedDead: !alive, ProbeTarget: "tcp-dial"}
-	session := "cleanup:" + j.Ref()
-	if alive {
-		// Still there: refresh availability so the age gate restarts, and let the
-		// recovery lane own the restore.
-		return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
-			if e := recordAvailable(ctx, tx, t.Identity, t.Incarnation, stamp); e != nil {
-				return e
-			}
-			if e := writeProbe(ctx, tx, session, KindLive, t.Identity, proof); e != nil {
-				return e
-			}
-			return recur(ctx, tx, j, time.Hour)
-		})
-	}
-	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
-		if e := writeProbe(ctx, tx, session, KindLive, t.Identity, proof); e != nil {
-			return e
-		}
-		if r.Config.DryRun {
-			// Validation mode records the verdict but never removes data.
-			if _, e := tx.Exec(ctx, `INSERT INTO node_explorer_lifecycle_events(identity,action,dry_run,reason) VALUES($1,'delete',true,'validation mode: deletion suppressed')`, j.Payload.Identity); e != nil {
-				return e
-			}
-			return recur(ctx, tx, j, time.Hour)
-		}
-		deleted, _, e := deleteUnavailable(ctx, tx, j, proof, session, true)
-		if e != nil {
-			return e
-		}
-		if !deleted {
-			return recur(ctx, tx, j, time.Hour)
-		}
-		return nil
-	})
-}
-
 // Imports never refresh the monotonic successful observation clock.
 func recordAvailable(ctx context.Context, tx pgx.Tx, id, incarnation, stamp string) error {
 	_, err := tx.Exec(ctx, `UPDATE node_explorer_node_registry SET last_available_at=greatest(last_available_at,$3::timestamptz)
@@ -187,22 +74,9 @@ func recordAvailable(ctx context.Context, tx pgx.Tx, id, incarnation, stamp stri
 	return err
 }
 func (r *Repository) probeTarget(ctx context.Context, p Payload) (*Target, error) {
-	if p.Action != "cleanup" {
-		return r.Target(ctx, p.Identity)
-	}
-	t := &Target{Identity: p.Identity}
-	var raw []byte
-	err := r.Pool.QueryRow(ctx, `SELECT node,incarnation FROM node_explorer_node_registry
- WHERE identity=$1 AND incarnation=$2 AND md5(node::text)=$3`, p.Identity, p.Incarnation, p.Reason).Scan(&raw, &t.Incarnation)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	err = json.Unmarshal(raw, &t.Node)
-	return t, err
+	return r.Target(ctx, p.Identity)
 }
+
 func cleanupGuard(ctx context.Context, tx pgx.Tx, p Payload) (bool, error) {
 	var id string
 	err := tx.QueryRow(ctx, `SELECT identity FROM node_explorer_node_registry WHERE identity=$1
@@ -211,132 +85,6 @@ func cleanupGuard(ctx context.Context, tx pgx.Tx, p Payload) (bool, error) {
 		return false, nil
 	}
 	return err == nil, err
-}
-func (r *Runner) scheduleCleanup(ctx context.Context) error {
-	// Heartbeat rows of decommissioned services do not linger as ghosts
-	// (REFACTOR_PLAN §8.5): a stale row whose writer is gone is swept here.
-	if _, err := r.Repo.Pool.Exec(ctx, `DELETE FROM node_explorer_service_status WHERE updated_at<now()-interval '30 minutes'`); err != nil {
-		return err
-	}
-	// Admission only fills the candidate ledger; Publish bounds how many run at
-	// once, so a deferred candidate never blocks a fresh one for a whole hour.
-	_, err := r.Repo.Pool.Exec(ctx, `INSERT INTO node_explorer_work(kind,key,payload,priority,due_at)
- SELECT 'node-cleanup',n.identity||':'||n.incarnation,
- jsonb_build_object('identity',n.identity,'incarnation',n.incarnation,'reason',md5(n.node::text),'action','cleanup'),0,now()
- FROM node_explorer_node_registry n
- WHERE greatest(n.first_seen_at,coalesce(n.last_available_at,n.first_seen_at))<now()-$1::interval
- AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.kind='node-cleanup' AND w.key=n.identity||':'||n.incarnation)
- ORDER BY greatest(n.first_seen_at,coalesce(n.last_available_at,n.first_seen_at)),n.identity LIMIT $2
- ON CONFLICT(kind,key) DO NOTHING`, intervalParam(cleanupMinAge()), cleanupBatch())
-	return err
-}
-func (r *Runner) cleanup(ctx context.Context, j Job) error {
-	var eligible bool
-	err := r.Repo.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_explorer_node_registry n
- WHERE identity=$1 AND incarnation=$2 AND greatest(first_seen_at,coalesce(last_available_at,first_seen_at))<now()-$3::interval)`, j.Payload.Identity, j.Payload.Incarnation, intervalParam(cleanupMinAge())).Scan(&eligible)
-	if err != nil {
-		return err
-	}
-	deferCycle := func() error {
-		return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
-			_, e := tx.Exec(ctx, `UPDATE node_explorer_work w SET payload=jsonb_set(w.payload,'{reason}',to_jsonb(md5(n.node::text))) FROM node_explorer_node_registry n WHERE w.id=$1 AND n.identity=$2 AND n.incarnation=$3`, j.ID, j.Payload.Identity, j.Payload.Incarnation)
-			if e != nil {
-				return e
-			}
-			return recur(ctx, tx, j, time.Hour)
-		})
-	}
-	expired, e := r.assessmentExpired(ctx, "cleanup:"+j.Ref(), j.Payload.StartedAt)
-	if e != nil {
-		return e
-	}
-	if !eligible || expired {
-		return deferCycle()
-	}
-	session := "cleanup:" + j.Ref()
-	p := j.Payload
-	p.Session = session
-	var busy bool
-	err = r.Repo.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_explorer_work WHERE payload->>'identity'=$1 AND id<>$2
- AND state<>'done' AND (state='running' OR payload ? 'session' OR kind IN ('recovery','normal-recovery') AND payload ? 'startedAt') AND key<>$3)`, p.Identity, j.ID, session).Scan(&busy)
-	if err != nil {
-		return err
-	}
-	if busy {
-		return waiting{30 * time.Second}
-	}
-	// A TCP endpoint is verified by dialing it from this container: no kernel
-	// lease, no proxy stack, so a forty-thousand-node backlog stays tractable.
-	// The same deletion gates still decide.
-	if agent, e := r.Repo.probeTarget(ctx, j.Payload); e != nil {
-		return e
-	} else if agent != nil && tcpVerifiable(agent.Node) {
-		if e := r.verifyByDial(ctx, j, agent); !errors.Is(e, errNoEgressControl) {
-			return e
-		}
-	}
-	if err = r.Repo.FinishDependencies(ctx, func(tx pgx.Tx) error {
-		kind := KindLive
-		if r.Config.Manager != nil {
-			kind = KindFast
-		}
-		return once(ctx, tx, kind, session, p, 0)
-	}); err != nil {
-		return err
-	}
-	var proof domain.ConnectivityState
-	ready, err := r.Repo.Probe(ctx, session, KindLive, &proof)
-	if err != nil {
-		return err
-	}
-	if !ready {
-		// The strict probe owns the timeline (two connectivity attempts plus a
-		// control node); polling harder than that only burns ledger writes. A
-		// proof that never lands (guard lost the node) must not hold a slot.
-		if !j.Payload.StartedAt.IsZero() && time.Since(j.Payload.StartedAt) > 15*time.Minute {
-			return deferCycle()
-		}
-		return waiting{5 * time.Second}
-	}
-	if proof.Reachable || !proof.ConfirmedDead || !fresh(proof.CheckedAt, time.Minute) {
-		return deferCycle()
-	}
-	ctx, release, paths, err := r.proofFence(ctx, j.Payload)
-	if err != nil {
-		return err
-	}
-	defer release()
-	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
-		// Match deletion/source lock order before locking the registry proof row.
-		if r.Config.Manager != nil {
-			if _, e := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-registry'))`); e != nil {
-				return e
-			}
-		}
-		if e := validatePaths(ctx, tx, paths); e != nil {
-			return e
-		}
-		if r.Config.Manager != nil {
-			if e := r.Config.Manager.Generation(ctx, proof.KernelGeneration); e != nil {
-				return e
-			}
-		}
-		if r.Config.DryRun {
-			_, e := tx.Exec(ctx, `INSERT INTO node_explorer_lifecycle_events(identity,action,dry_run,reason) VALUES($1,'delete',true,'validation mode: deletion suppressed')`, j.Payload.Identity)
-			if e != nil {
-				return e
-			}
-			return recur(ctx, tx, j, time.Hour)
-		}
-		deleted, _, e := deleteUnavailable(ctx, tx, j, proof, session, true)
-		if e != nil {
-			return e
-		}
-		if !deleted {
-			return recur(ctx, tx, j, time.Hour)
-		}
-		return nil
-	})
 }
 
 // The registry lock fences successful commits. Active probes and config changes veto deletion.

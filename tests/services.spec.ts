@@ -24,7 +24,7 @@ function fixture(hours = 24): MonitorData {
       "exit-provision",
       "exit-attributes",
       "recovery",
-      "node-cleanup",
+      "dead-verify",
     ].map((id, i) => ({
       id,
       name: [

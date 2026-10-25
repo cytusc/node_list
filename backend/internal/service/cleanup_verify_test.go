@@ -51,7 +51,7 @@ func TestVerifiedCandidatesSkipsRecentlyVerified(t *testing.T) {
 	}
 	// A fresh verdict for the same node takes it out of the next wave, so
 	// successive waves cover the pool instead of retesting the same head.
-	f.exec(t, `INSERT INTO node_explorer_probe_results(session,kind,identity,checked_at,payload) VALUES($1,$2,$3,now(),'{}')`, VerificationSession(f.id), KindLive, f.id)
+	f.exec(t, `INSERT INTO node_explorer_probe_results(session,kind,identity,checked_at,payload) SELECT $1,$2,$3,now(),jsonb_build_object('verificationIncarnation',incarnation,'verificationDigest',md5(node::text)) FROM node_explorer_node_registry WHERE identity=$3`, VerificationSession(f.id), KindLive, f.id)
 	wave, e = f.repo.VerifiedCandidates(ctx, 24*time.Hour, 6*time.Hour, 10)
 	if e != nil || len(wave) != 0 {
 		t.Fatalf("recently verified resurfaced: %+v %v", wave, e)
@@ -108,14 +108,14 @@ func TestRecordVerificationKeepsAliveOutOfTheNextWave(t *testing.T) {
 	if wave, e := f.repo.VerifiedCandidates(ctx, 24*time.Hour, 6*time.Hour, 10); e != nil || len(wave) != 1 {
 		t.Fatalf("candidate before: %+v %v", wave, e)
 	}
-	var incarnation string
-	if e := f.repo.Pool.QueryRow(ctx, `SELECT incarnation FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&incarnation); e != nil {
+	var incarnation, digest string
+	if e := f.repo.Pool.QueryRow(ctx, `SELECT incarnation,md5(node::text) FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&incarnation, &digest); e != nil {
 		t.Fatal(e)
 	}
 	// A reachable verdict must leave the age window and the recheck window, or the
 	// next wave would retest the same node forever.
 	proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Reachable: true, ProbeTarget: "batch-verify"}
-	if e := f.repo.RecordVerification(ctx, f.id, incarnation, proof); e != nil {
+	if e := f.repo.RecordVerification(ctx, f.id, incarnation, digest, proof); e != nil {
 		t.Fatal(e)
 	}
 	if wave, e := f.repo.VerifiedCandidates(ctx, 24*time.Hour, 6*time.Hour, 10); e != nil || len(wave) != 0 {
@@ -146,5 +146,110 @@ func TestPoolFloorRefusesDeletion(t *testing.T) {
 	var alive bool
 	if e := f.repo.Pool.QueryRow(ctx, `SELECT available FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&alive); e != nil || !alive {
 		t.Fatalf("node removed despite the floor: alive=%v err=%v", alive, e)
+	}
+}
+
+func TestVerificationCacheFollowsConfigurationAndIncarnation(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.exec(t, `UPDATE node_explorer_node_registry SET first_seen_at=now()-interval '8 days'`)
+	f.exec(t, `INSERT INTO node_explorer_connectivity(identity,checked_at,payload) VALUES($1,now(),'{"reachable":false}')`, f.id)
+	wave, err := f.repo.VerifiedCandidates(ctx, 7*24*time.Hour, 6*time.Hour, 10)
+	if err != nil || len(wave) != 1 {
+		t.Fatalf("initial wave: %+v %v", wave, err)
+	}
+	original := wave[0]
+	proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Error: "config rejected"}
+	if err = f.repo.RecordVerification(ctx, original.Identity, original.Incarnation, original.Digest, proof); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutation := range []string{
+		`UPDATE node_explorer_node_registry SET node=node || '{"rawConfig":{"password":"replacement"}}'`,
+		`UPDATE node_explorer_node_registry SET incarnation='replacement-incarnation'`,
+	} {
+		f.exec(t, mutation)
+		wave, err = f.repo.VerifiedCandidates(ctx, 7*24*time.Hour, 6*time.Hour, 10)
+		if err != nil || len(wave) != 1 {
+			t.Fatalf("replacement suppressed: %+v %v", wave, err)
+		}
+		staleAlive := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Reachable: true}
+		if err = f.repo.RecordVerification(ctx, original.Identity, original.Incarnation, original.Digest, staleAlive); err == nil {
+			t.Fatal("replaced config accepted stale liveness")
+		}
+		current := wave[0]
+		if err = f.repo.RecordVerification(ctx, current.Identity, current.Incarnation, current.Digest, proof); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var lastAvailable *time.Time
+	if err = f.repo.Pool.QueryRow(ctx, `SELECT last_available_at FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&lastAvailable); err != nil || lastAvailable != nil {
+		t.Fatalf("stale proof refreshed availability: %v %v", lastAvailable, err)
+	}
+}
+
+func TestVetoCommitsObservationForNextWave(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.exec(t, `UPDATE node_explorer_node_registry SET first_seen_at=now()-interval '8 days'`)
+	f.exec(t, `INSERT INTO node_explorer_connectivity(identity,checked_at,payload) VALUES($1,now(),'{"reachable":false}')`, f.id)
+	wave, err := f.repo.VerifiedCandidates(ctx, 7*24*time.Hour, 6*time.Hour, 10)
+	if err != nil || len(wave) != 1 {
+		t.Fatalf("initial wave: %+v %v", wave, err)
+	}
+	t.Setenv("NODE_CLEANUP_MIN_POOL", "500")
+	c := wave[0]
+	proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), ConfirmedDead: true}
+	if deleted, err := f.repo.DeleteVerifiedDead(ctx, c.Identity, c.Incarnation, c.Digest, proof); deleted || !strings.Contains(fmt.Sprint(err), "pool-floor") {
+		t.Fatalf("floor: %v %v", deleted, err)
+	}
+	wave, err = f.repo.VerifiedCandidates(ctx, 7*24*time.Hour, 6*time.Hour, 10)
+	if err != nil || len(wave) != 0 {
+		t.Fatalf("veto caused repeated probe: %+v %v", wave, err)
+	}
+}
+
+func TestConcurrentDeletionsRespectPoolFloor(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	t.Setenv("NODE_CLEANUP_MIN_POOL", "1")
+	f.exec(t, `UPDATE node_explorer_node_registry SET first_seen_at=now()-interval '8 days';
+ INSERT INTO node_explorer_node_registry(identity,node,snapshot_id,node_index,first_seen_at)
+ SELECT identity||suffix,node,snapshot_id,node_index,first_seen_at FROM node_explorer_node_registry CROSS JOIN (VALUES('-a'),('-b')) extras(suffix)`)
+	rows, err := f.repo.Pool.Query(ctx, `SELECT identity,incarnation,md5(node::text) FROM node_explorer_node_registry`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidates []VerifiedCandidate
+	for rows.Next() {
+		var c VerifiedCandidate
+		if err = rows.Scan(&c.Identity, &c.Incarnation, &c.Digest); err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, c)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, len(candidates))
+	for _, c := range candidates {
+		go func() {
+			proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), ConfirmedDead: true}
+			deleted, err := f.repo.DeleteVerifiedDead(ctx, c.Identity, c.Incarnation, c.Digest, proof)
+			if !deleted && !strings.Contains(fmt.Sprint(err), "pool-floor") {
+				results <- fmt.Errorf("unexpected veto: %v", err)
+				return
+			}
+			results <- nil
+		}()
+	}
+	for range candidates {
+		if err = <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var remaining, deleted int
+	if err = f.repo.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM node_explorer_node_registry WHERE available),(SELECT count(*) FROM node_explorer_deleted_nodes)`).Scan(&remaining, &deleted); err != nil || remaining != 1 || deleted != 2 {
+		t.Fatalf("remaining=%d deleted=%d err=%v", remaining, deleted, err)
 	}
 }

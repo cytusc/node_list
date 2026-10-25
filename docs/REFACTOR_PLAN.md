@@ -1,3 +1,5 @@
+> 历史重构方案。当前服务职责与升级步骤以 [MODULAR_SERVICES.md](../MODULAR_SERVICES.md) 为准。
+
 # 轮次制测活重构计划（sweep 架构收敛）
 
 > 状态：**已实施（批次 1→4 全部落地，backend `go build`+`go vet`+`go test` 全绿）**。基线原则：避免过度设计与过度执行，先满足需求。

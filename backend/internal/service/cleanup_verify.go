@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
+	"github.com/jackc/pgx/v5"
 )
 
 // vetoError reports which gate refused a deletion, so the batch verifier can
@@ -35,18 +36,16 @@ func VerificationSession(identity string) string {
 	return "dead-verify:" + hex.EncodeToString(sum[:])
 }
 
-// DeleteVerifiedDead applies the queue's deletion gates to a verdict produced
-// outside the queue. The proof must be fresh (under a minute) and the digest
-// must name the exact configuration that was tested; the registry lock, the
-// exclusive snapshot locks, the age window, the running-work veto and the
-// newer-observation veto are the same code that guards the queue path.
+// DeleteVerifiedDead applies the shared deletion gates to a verifier verdict.
+// Proof must be fresh (under a minute) and name the exact tested configuration.
+// Registry serialization, the age window, the running-work veto and the
+// newer-observation veto remain mandatory; snapshot compaction runs separately.
 //
 // It never decides death by itself: the caller supplies a proof that already
 // says ConfirmedDead, and every gate re-checks that claim.
 func (r *Repository) DeleteVerifiedDead(ctx context.Context, identity, incarnation, digest string, proof domain.ConnectivityState) (bool, error) {
-	// The deletion transaction takes an exclusive lock on the snapshot tables,
-	// which ingestion and the queue's own deletions also hold. Queue behind it
-	// briefly instead of eating the 30-second session statement timeout, and let
+	// The deletion transaction serializes with ingestion on the registry lock.
+	// Wait briefly instead of eating the 30-second statement timeout, and let
 	// the caller's next wave retry a node that lost the race.
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -74,49 +73,77 @@ func (r *Repository) deleteVerifiedDeadOnce(ctx context.Context, identity, incar
 	if _, err = tx.Exec(ctx, `SET LOCAL lock_timeout='3s'`); err != nil {
 		return false, err
 	}
-	if err = writeProbe(ctx, tx, session, KindLive, identity, proof); err != nil {
+	// Use the same lock order as source folding and deletion before persisting
+	// evidence: a verdict for a replaced configuration must not suppress recheck.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-registry'))`); err != nil {
 		return false, err
 	}
-	j := Job{Kind: KindCleanup, Payload: Payload{Identity: identity, Incarnation: incarnation, Reason: digest, Action: "cleanup"}}
+	ok, err := cleanupGuard(ctx, tx, Payload{Identity: identity, Incarnation: incarnation, Reason: digest})
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, &vetoError{reason: "guard"}
+	}
+	if err = writeVerification(ctx, tx, identity, incarnation, digest, proof); err != nil {
+		return false, err
+	}
+	j := Job{Payload: Payload{Identity: identity, Incarnation: incarnation, Reason: digest, Action: "cleanup"}}
 	// Bulk deletions skip snapshot compaction: rewriting a snapshot per node
 	// costs O(snapshot) and holds the exclusive table lock for seconds. The
 	// tombstone already stops the node from coming back; CompactDeleted reclaims
 	// the payload space in batches.
 	deleted, reason, err := deleteUnavailable(ctx, tx, j, proof, session, false)
-	if err == nil && !deleted {
-		return false, &vetoError{reason: reason}
-	}
 	if err != nil {
 		return false, err
 	}
-	// A refusal leaves the node for the queue path, but the observation still
+	// A refusal leaves the node for a later wave, but the observation still
 	// commits: without it every wave would retest the same head against the same
 	// gate and never reach the rest of the pool.
 	if err = tx.Commit(ctx); err != nil {
 		return false, err
 	}
-	return deleted, nil
+	if !deleted {
+		return false, &vetoError{reason: reason}
+	}
+	return true, nil
 }
 
 // RecordVerification stores a liveness observation produced outside the queue.
 // Alive verdicts need it as much as dead ones: without an observation the next
 // wave would hand the same node to the prober again, and as the pool drains the
 // alive set would crowd out everything still untested.
-func (r *Repository) RecordVerification(ctx context.Context, identity, incarnation string, proof domain.ConnectivityState) error {
+func (r *Repository) RecordVerification(ctx context.Context, identity, incarnation, digest string, proof domain.ConnectivityState) error {
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	ok, err := cleanupGuard(ctx, tx, Payload{Identity: identity, Incarnation: incarnation, Reason: digest})
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return &vetoError{reason: "guard"}
+	}
 	if proof.Reachable && proof.Error == "" {
 		if err = recordAvailable(ctx, tx, identity, incarnation, proof.CheckedAt); err != nil {
 			return err
 		}
 	}
-	if err = writeProbe(ctx, tx, VerificationSession(identity), KindLive, identity, proof); err != nil {
+	if err = writeVerification(ctx, tx, identity, incarnation, digest, proof); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// Metadata fences the recheck cache across configuration replacement and recreation.
+func writeVerification(ctx context.Context, tx pgx.Tx, identity, incarnation, digest string, proof domain.ConnectivityState) error {
+	if err := writeProbe(ctx, tx, VerificationSession(identity), KindLive, identity, proof); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE node_explorer_probe_results SET payload=payload || jsonb_build_object('verificationIncarnation',$2::text,'verificationDigest',$3::text) WHERE session=$1 AND kind=$4`, VerificationSession(identity), incarnation, digest, KindLive)
+	return err
 }
 
 // VerifiedCandidates lists the nodes a batch verifier may test: available,
@@ -130,7 +157,7 @@ func (r *Repository) VerifiedCandidates(ctx context.Context, minAge, recheck tim
  WHERE n.available AND c.payload->>'reachable'='false'
  AND greatest(n.first_seen_at,coalesce(n.last_available_at,n.first_seen_at))<now()-$1::interval
  AND NOT EXISTS(SELECT 1 FROM node_explorer_work w WHERE w.payload->>'identity'=n.identity AND w.state='running' AND w.lease_until>now())
- AND NOT EXISTS(SELECT 1 FROM node_explorer_probe_results p WHERE p.session='dead-verify:'||md5(n.identity) AND p.checked_at>now()-$2::interval)
+ AND NOT EXISTS(SELECT 1 FROM node_explorer_probe_results p WHERE p.session='dead-verify:'||md5(n.identity) AND p.payload->>'verificationIncarnation'=n.incarnation AND p.payload->>'verificationDigest'=md5(n.node::text) AND p.checked_at>now()-$2::interval)
  ORDER BY n.first_seen_at,n.identity LIMIT $3`, intervalParam(minAge), intervalParam(recheck), limit)
 	if err != nil {
 		return nil, err

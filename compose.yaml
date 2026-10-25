@@ -137,33 +137,14 @@ services:
       NORMAL_RECOVERY_INTERVAL_SECONDS: ${NORMAL_RECOVERY_INTERVAL_SECONDS:-1200}
       RECOVERY_RECOVERY_CONCURRENCY: ${RECOVERY_RECOVERY_CONCURRENCY:-2}
       RECOVERY_LIFECYCLE_CONCURRENCY: ${RECOVERY_LIFECYCLE_CONCURRENCY:-1}
-      # 二验探针 lane：退役评估与 node-cleanup 的受控连通性探针都走这里，
-      # 删除吞吐 ≈ 该值 × 单价。积压万级时调到 8。
+      # 二验探针 lane：退役与恢复评估的受控连通性探针走这里，
+      # 此处控制恢复探针并发，不影响 dead-verify 的核验并发。
       RECOVERY_LIVE_CONCURRENCY: ${RECOVERY_LIVE_CONCURRENCY:-2}
     depends_on:
       task-redis: { condition: service_healthy }
       mihomo-manager: { condition: service_healthy }
     healthcheck:
       test: [CMD, node-worker, -role, recovery, -health]
-      interval: 30s
-      timeout: 10s
-      start_period: 60s
-  node-cleanup:
-    <<: *worker
-    command: [node-worker, -role, node-cleanup]
-    environment:
-      <<: *environment
-      SCHEDULE_INTERVAL_SECONDS: 30
-      NODE_CLEANUP_MIN_POOL: ${NODE_CLEANUP_MIN_POOL:-500}
-      # 超过该窗口「新近出现或最后可用」的节点才做二次验证；registry 的
-      # first_seen_at 若是加列迁移统一刷新的，默认 7 天会一直不满足。
-      NODE_CLEANUP_MIN_AGE_SECONDS: ${NODE_CLEANUP_MIN_AGE_SECONDS:-604800}
-      NODE_CLEANUP_BATCH: ${NODE_CLEANUP_BATCH:-256}
-      # 在途任务上限：每个任务都在轮询自己的探针，放太多会把账本打爆。
-      NODE_CLEANUP_INFLIGHT: ${NODE_CLEANUP_INFLIGHT:-32}
-      NODE_CLEANUP_CONCURRENCY: ${NODE_CLEANUP_CONCURRENCY:-2}
-    healthcheck:
-      test: [CMD, node-worker, -role, node-cleanup, -health]
       interval: 30s
       timeout: 10s
       start_period: 60s
@@ -180,21 +161,18 @@ services:
       DEAD_VERIFY_WORKERS: ${DEAD_VERIFY_WORKERS:-96}
       DEAD_VERIFY_DELETERS: ${DEAD_VERIFY_DELETERS:-8}
       DEAD_VERIFY_TIMEOUT_SECONDS: ${DEAD_VERIFY_TIMEOUT_SECONDS:-6}
-      DEAD_VERIFY_MIN_AGE_SECONDS: ${DEAD_VERIFY_MIN_AGE_SECONDS:-86400}
       DEAD_VERIFY_RECHECK_SECONDS: ${DEAD_VERIFY_RECHECK_SECONDS:-21600}
-      # 删除门禁自己也会复核年龄窗口；两条路径必须用同一个值，否则核验器按
-      # 24h 选出候选、门禁按默认 7 天一律否决。
+      # 候选筛选与最终删除门禁共用年龄配置。
       NODE_CLEANUP_MIN_AGE_SECONDS: ${NODE_CLEANUP_MIN_AGE_SECONDS:-604800}
       # 生存集下限：可用节点少于这个数就停止删除，防止源断供或出口故障时
       # 把注册表删空。0 关闭。
       NODE_CLEANUP_MIN_POOL: ${NODE_CLEANUP_MIN_POOL:-500}
     cpus: ${DEAD_VERIFY_CPUS:-1}
-    # 必须显式禁用：镜像自带 HEALTHCHECK 探的是 PHP 的 3001 端口，不覆盖就会
-    # 一直 unhealthy，把 `up -d --wait` 的整批更新拖垮（实测触发过一次回滚）。
-    # 也不适合用心跳探针——一批握手可能跑几分钟。存活性看
-    # node_explorer_service_status 里的 dead-verify 行（20 秒一次脉冲）。
     healthcheck:
-      disable: true
+      test: [CMD, node-worker, -role, dead-verify, -health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
   mihomo-manager:
     <<: *worker
     cpus: ${MIHOMO_MANAGER_CPUS:-0.5}

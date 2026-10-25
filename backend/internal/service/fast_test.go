@@ -172,32 +172,6 @@ func TestManagedNormalAdmissionIncludesWaitingAssessments(t *testing.T) {
 	}
 }
 
-func TestManagedValidationSuppressesPhysicalDeletion(t *testing.T) {
-	// No reachable reference exists here, so the direct dial cannot conclude and
-	// the assessment falls back to the kernel path this test covers.
-	f := managedFixture(t, 503)
-	ctx := context.Background()
-	f.runner.Config.DryRun = true
-	_, release, paths, err := f.runner.proofFence(ctx, Payload{Identity: f.id})
-	if err != nil {
-		t.Fatal(err)
-	}
-	generation := paths[f.id].Generation
-	release()
-	j := queueCleanup(t, f)
-	cleanupProof(t, f, j, domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), ConfirmedDead: true, KernelGeneration: generation})
-	if err = f.runner.cleanup(ctx, j); err != nil {
-		t.Fatal(err)
-	}
-	var nodes, events int
-	if err = f.repo.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM node_explorer_node_registry),(SELECT count(*) FROM node_explorer_lifecycle_events WHERE action='delete' AND dry_run)`).Scan(&nodes, &events); err != nil {
-		t.Fatal(err)
-	}
-	if nodes != 1 || events != 1 {
-		t.Fatalf("validation changed registry: nodes=%d events=%d", nodes, events)
-	}
-}
-
 func TestManaged204RecoveryStillWaitsForRealExit(t *testing.T) {
 	f := managedFixture(t, 200)
 	ctx := context.Background()

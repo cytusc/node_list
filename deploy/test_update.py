@@ -19,7 +19,7 @@ class UpdateTests(unittest.TestCase):
             (root / '.env').write_text('NODE_EXPLORER_AUTO_UPDATE=true\n')
             (root / 'release.env').write_text(f'IMAGE_TAG={current}\nSUBS_CHECK_TAG=1.6.5\n')
             services = ['node-explorer', 'source-ingest', 'mihomo-manager',
-                        'exit-provision', 'exit-attributes', 'recovery', 'node-cleanup']
+                        'exit-provision', 'exit-attributes', 'recovery', 'dead-verify']
             config = {'services': {name: {'image': 'ghcr.io/cytusc/node_list:' + current}
                                    for name in services}}
             config['services']['task-redis'] = {'image': 'redis:7-alpine'}
@@ -42,7 +42,8 @@ Path(sys.argv[sys.argv.index('--dump-header') + 1]).write_text('HTTP/2 '+status+
 print(status)
 ''')
             (root / 'bin/docker').write_text('#!/bin/sh\necho healthy\n')
-            for name in ['curl', 'docker']:
+            (root / 'bin/flock').write_text('#!/bin/sh\nexit 0\n')
+            for name in ['curl', 'docker', 'flock']:
                 (root / 'bin' / name).chmod(0o755)
             env = dict(os.environ, PATH=str(root / 'bin') + ':' + os.environ['PATH'],
                        TEST_LATEST_TAG=latest, TEST_STATUS=str(status))

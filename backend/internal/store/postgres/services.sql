@@ -155,3 +155,17 @@ INSERT INTO node_explorer_service_migrations(version) VALUES (7) ON CONFLICT DO 
 CREATE INDEX IF NOT EXISTS node_explorer_work_recovery_exit
  ON node_explorer_work ((priority>0),due_at,id)
  WHERE kind='exit' AND state='queued' AND payload->>'session' LIKE 'recovery:%';
+
+-- Retire the superseded cleanup coordinator and only its probe dependencies.
+-- Incrementing generations and clearing leases fences in-flight Redis deliveries.
+DO $$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM node_explorer_service_migrations WHERE version=13) THEN
+  UPDATE node_explorer_work SET state='done',generation=generation+1,
+   lease_token=NULL,lease_until=NULL,published_at=NULL,error='retired: dead-verify owns deletion'
+  WHERE kind='node-cleanup' OR payload->>'action'='cleanup'
+   OR (kind IN ('fast-delay','connectivity','exit') AND payload->>'session' LIKE 'cleanup:%');
+  DELETE FROM node_explorer_probe_results WHERE session LIKE 'cleanup:%';
+  DELETE FROM node_explorer_service_status WHERE service IN ('node-cleanup','lifecycle');
+ END IF;
+END $$;

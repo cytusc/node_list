@@ -8,7 +8,6 @@ import (
 	"log"
 	"math/rand/v2"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/cytusc/node_list/backend/internal/taskqueue"
 	"github.com/cytusc/node_list/backend/internal/transport"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -43,10 +41,6 @@ func (r *Runner) kinds() []string {
 	// and exit probes as dependencies, so the role consumes those kinds too.
 	case "recovery":
 		return []string{KindRecovery, KindNormalRecovery, KindFast, KindLive, KindLifecycle}
-	case "node-cleanup":
-		return []string{KindCleanup}
-	case "lifecycle":
-		return []string{KindLifecycle}
 	}
 	return nil
 }
@@ -94,48 +88,10 @@ func (r *Runner) run(ctx context.Context) error {
 	}
 	r.Classification.BeforeProvider = r.Repo.BeforeProvider
 	r.Classification.AfterProvider = r.Repo.AfterProvider
-	// One session holds cross-process controller ownership for both lanes.
-	var conn *pgxpool.Conn
-	var err error
-	if r.Config.Manager == nil && isExitRole(r.Config.Role) {
-		if r.Repo.Pool.Config().MaxConns < 2 {
-			return fmt.Errorf("probe services require PGPOOL_MAX >= 2")
-		}
-		conn, err = r.Repo.Pool.Acquire(ctx)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-			defer stop()
-			_ = conn.Conn().Close(cleanup)
-			conn.Release()
-		}()
-	}
-	prefix := ""
-	if isExitRole(r.Config.Role) {
-		prefix = "IP_SERVICE"
-	}
-	if r.Config.Manager == nil && isExitRole(r.Config.Role) {
-		for _, lane := range []string{"HIGH", "NORMAL"} {
-			for _, controller := range strings.Split(os.Getenv(prefix+"_"+lane+"_CONTROLLER"), ",") {
-				if controller == "" {
-					continue
-				}
-				var locked bool
-				if err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext(current_schema()),hashtext($1))`, strings.TrimRight(strings.TrimSpace(controller), "/")).Scan(&locked); err != nil {
-					return err
-				}
-				if !locked {
-					return fmt.Errorf("Mihomo controller already owned by another service")
-				}
-			}
-		}
-	}
 	var wg sync.WaitGroup
 	for _, kind := range kinds {
 		for _, high := range []bool{true, false} {
-			if (kind == KindNormalRecovery || kind == KindCleanup) && high {
+			if kind == KindNormalRecovery && high {
 				continue
 			}
 			count := r.laneCount(kind, high)
@@ -153,14 +109,6 @@ func (r *Runner) run(ctx context.Context) error {
 	lastMessage := ""
 	for {
 		message := ""
-		if conn != nil {
-			check, stop := context.WithTimeout(ctx, 3*time.Second)
-			err := conn.Ping(check)
-			stop()
-			if err != nil {
-				return fmt.Errorf("controller ownership connection lost")
-			}
-		}
 		if time.Since(lastSchedule) >= r.Config.ScheduleInterval {
 			if err := r.schedule(ctx); err != nil {
 				message = "任务调度暂时失败"
@@ -185,11 +133,6 @@ func (r *Runner) run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
-}
-
-// isExitRole reports the roles split out of the former single ip-service worker.
-func isExitRole(role string) bool {
-	return role == "exit-provision" || role == "exit-attributes"
 }
 
 func ServiceName(role string) string {
@@ -323,8 +266,6 @@ func (r *Runner) handle(ctx context.Context, j Job, high bool) error {
 		return r.risk(ctx, j, high)
 	case KindRecovery, KindNormalRecovery:
 		return r.recovery(ctx, j)
-	case KindCleanup:
-		return r.cleanup(ctx, j)
 	case KindLifecycle:
 		return r.lifecycle(ctx, j)
 	}

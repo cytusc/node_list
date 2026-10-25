@@ -2,13 +2,13 @@
 
 React／TypeScript 节点浏览器与 PHP（webman）接口层，实时展示 subs-check 和 Qilan 节点的当前连通性及出口 IP 属性。支持筛选、分页、详情、列设置和深浅主题。
 
-现在由七个独立服务运行：API 查询（PHP/webman，实现见 `webman/`）、来源导入、出口探测、IP 属性、恢复与生命周期、节点清理、Mihomo 管理与全量巡检（后六个是 Go `node-worker`）。**PostgreSQL 保存业务数据，Redis 分发任务；API 只查询当前状态，全量连通性巡检由 `mihomo-manager` 在上一轮结束后默认间隔 30 分钟启动下一轮；`recovery` 消费住宅和普通节点的复核、恢复及生命周期任务，失败后按退避间隔重试。** 全量巡检更新检测证据，不能替代恢复任务；人工禁用不会自动恢复。
+现在由七个独立服务运行：API 查询（PHP/webman，实现见 `webman/`）、来源导入、出口探测、IP 属性、恢复与生命周期、节点清理、Mihomo 管理与全量巡检（常规后台使用 Go `node-worker`，清理使用 `dead-verify`）。**PostgreSQL 保存业务数据，Redis 分发任务；API 只查询当前状态，全量连通性巡检由 `mihomo-manager` 在上一轮结束后默认间隔 30 分钟启动下一轮；`recovery` 消费住宅和普通节点的复核、恢复及生命周期任务，失败后按退避间隔重试。** 全量巡检更新检测证据，不能替代恢复任务；人工禁用不会自动恢复。
 
 完整的模块职责、任务契约、故障恢复、部署与升级步骤见 [MODULAR_SERVICES.md](MODULAR_SERVICES.md)，住宅判定规则见 [RESIDENTIAL_RECOVERY.md](RESIDENTIAL_RECOVERY.md)。
 
 ## 开发与运行
 
-需要 Node.js 22.13+、Go 1.26+、PHP 8.1+（含 pdo_pgsql／pcntl／sockets／mbstring 扩展）、PostgreSQL 和 Redis。复制 `.env.example` 为 `.env`，填写 PostgreSQL、Redis 及四组专用 Mihomo 地址；接口另需 `cp webman/.env.example webman/.env` 并 `composer install`。
+需要 Node.js 22.13+、Go 1.26+、PHP 8.1+（含 pdo_pgsql／pcntl／sockets／mbstring 扩展）、PostgreSQL 和 Redis。复制 `.env.example` 为 `.env`，填写 PostgreSQL、Redis 及共享 Mihomo、manager 地址；接口另需 `cp webman/.env.example webman/.env` 并 `composer install`。
 
 ```bash
 npm ci
@@ -20,10 +20,11 @@ npm run dev
 
 ```bash
 go -C backend run ./cmd/node-worker -role source
-go -C backend run ./cmd/node-worker -role connectivity
-go -C backend run ./cmd/node-worker -role ip
-go -C backend run ./cmd/node-worker -role residential
-go -C backend run ./cmd/node-worker -role lifecycle
+go -C backend run ./cmd/node-worker -role mihomo-manager
+go -C backend run ./cmd/node-worker -role exit-provision
+go -C backend run ./cmd/node-worker -role exit-attributes
+go -C backend run ./cmd/node-worker -role recovery
+go -C backend run ./cmd/dead-verify
 ```
 
 生产构建使用 `npm run build && npm run build:worker`；接口用 `npm start`（= `php webman/start.php start`），工作进程用 `node-worker -role <角色>` 独立启动。运行时必须接入 PostgreSQL，不再使用 SQLite。测试夹具仍保留 SQLite，用于验证旧行为。接口测试：`npm run test:api`（离线断言）+ `php webman/tests/integration.php`（连库契约，见 `webman/README.md`）。
@@ -103,9 +104,9 @@ IPPure 人机比例接口明确返回空数据时记为“暂无数据”，6 �
 - `/api/results`：实时查询全部当前节点。历史接口已移除，历史路径返回 404，snapshot 参数返回 400。
 - `/api/health`：HTTP API 存活。worker 使用 `node-worker -role <角色> -health`。
 
-后端主要目录：`backend/internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-worker` 按角色启动独立服务（source／exit-provision／exit-attributes／recovery／node-cleanup／mihomo-manager）；HTTP 接口已改为 `webman/` 下的 PHP/webman 实现（同一镜像内运行，命令 `php start.php start`）。切换期的一次性分析命令（idcheck/idscan/linkdiff/sortchk）与旧 patrol 入口已完成使命并删除。
+后端主要目录：`backend/internal/service` 为工作进程和事务边界，`internal/taskqueue` 为 Redis 引用队列，`internal/store/postgres` 为业务存储和当前状态 SQL 查询，`internal/domain` 为身份、分类与排序模型，`internal/transport` 为 Native／Mihomo 隔离通道。`cmd/node-worker` 按角色启动独立服务（source／exit-provision／exit-attributes／recovery／mihomo-manager），`cmd/dead-verify` 独立核验长期失活节点；HTTP 接口已改为 `webman/` 下的 PHP/webman 实现（同一镜像内运行，命令 `php start.php start`）。切换期的一次性分析命令（idcheck/idscan/linkdiff/sortchk）与旧 patrol 入口已完成使命并删除。
 
-`legacy/node-server/` 已归档，仅作为兼容行为基准及旧数据维护参考，不参与运行时调度。`npm test` 运行归档行为测试；`npm run test:backend` 验证 Go。集成测试使用显式 `NODE_EXPLORER_TEST_PG`／`NODE_EXPLORER_TEST_REDIS`，不自动连接生产环境。
+旧 Node 运行时与重复调度器已移除；身份兼容样例保留在 Go 测试夹具中。`npm test` 运行当前 PHP API 离线契约测试；`npm run test:backend` 验证 Go。集成测试使用显式 `NODE_EXPLORER_TEST_PG`／`NODE_EXPLORER_TEST_REDIS`，不自动连接生产环境。
 
 GitHub Actions 执行构建、Go race 测试、webman 离线与连库契约测试、归档行为测试，并验证 API 和独立生命周期 worker 镜像。容器包含 PHP 接口运行时（含前端静态资源）与 Go worker 二进制。发布不会自动执行当前工作区部署。
 

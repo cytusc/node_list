@@ -1,5 +1,5 @@
-// Package collector probes node exits and queries IPPure, and schedules that
-// work across the available engines.
+// Package collector probes node exits and queries IPPure. Service workers own
+// scheduling and engine selection.
 package collector
 
 import (

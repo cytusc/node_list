@@ -84,8 +84,6 @@ func onceDue(ctx context.Context, tx pgx.Tx, kind, key string, p Payload, due ti
 
 func (r *Runner) schedule(ctx context.Context) error {
 	switch r.Config.Role {
-	case "node-cleanup":
-		return r.scheduleCleanup(ctx)
 	case "recovery":
 		// Strict recovery upkeep moves here with the merged role: requeue
 		// finished markers on their backoff, skip hosting-gone candidates, and
@@ -217,9 +215,6 @@ func nextDue(stamp string, interval time.Duration) time.Time {
 // guard rechecks retirement after the network requests and serializes against
 // lifecycle transitions. Manual disable always wins over in-flight probes.
 func guard(ctx context.Context, tx pgx.Tx, p Payload) (bool, error) {
-	if p.Action == "cleanup" {
-		return cleanupGuard(ctx, tx, p)
-	}
 	var id string
 	err := tx.QueryRow(ctx, `SELECT identity FROM node_explorer_node_registry WHERE identity=$1 AND available AND ($2::text='' OR incarnation=$2)
 	AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=snapshot_id) FOR UPDATE`, p.Identity, p.Incarnation).Scan(&id)

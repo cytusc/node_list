@@ -48,14 +48,11 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      - run: npm test
-        env:
-          TEST_POSTGRES_URL: postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test
       - run: npm run build
       - name: Test deployment updater
         run: |
           bash -n deploy/update.sh
-          python3 -m unittest discover -s deploy -p test_update.py -v
+          python3 -m unittest discover -s deploy -p 'test_*.py' -v
       - uses: actions/setup-go@v5
         with:
           go-version-file: backend/go.mod
@@ -215,6 +212,7 @@ jobs:
           docker run -d --read-only --tmpfs /tmp --network host \
             -e PGHOST=127.0.0.1 -e PGPORT=5432 -e PGDATABASE=node_explorer_test \
             -e PGUSER=postgres -e PGPASSWORD=test_password -e REDIS_URL=redis://127.0.0.1:6379/0 \
+            -e MIHOMO_MANAGER_URL=http://127.0.0.1:9080 -e MIHOMO_MANAGER_TOKEN=smoke-manager-token \
             --name recovery-smoke "$IMAGE_NAME@$IMAGE_DIGEST" node-worker -role recovery
           trap 'docker logs recovery-smoke; docker rm -f recovery-smoke' EXIT
           for attempt in $(seq 1 20); do
@@ -321,12 +319,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         # webman/ 只打包源码：vendor 由镜像的 composer stage 重装，runtime 是运行产物。
         # 生产跑容器镜像，这份 tar 是服务器上的参考副本与部署脚本集合。
-        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz --exclude='webman/vendor' --exclude='webman/runtime' --exclude='webman/composer.phar' dist backend webman legacy package.json package-lock.json Dockerfile SINGLE_MIHOMO.md compose.legacy-mihomo.yaml compose.yaml compose.subs-check.yaml compose.qilan.yaml deploy README.md MODULAR_SERVICES.md RESIDENTIAL_RECOVERY.md .env.example
+        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz --exclude='webman/vendor' --exclude='webman/runtime' --exclude='webman/composer.phar' dist backend webman package.json package-lock.json Dockerfile SINGLE_MIHOMO.md NODE_CLEANUP.md compose.yaml compose.subs-check.yaml compose.qilan.yaml deploy README.md MODULAR_SERVICES.md RESIDENTIAL_RECOVERY.md .env.example
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_DIGEST: ${{ steps.manifest.outputs.digest }}
         run: |
-          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n所有探测服务共享单个 Mihomo 内核；快速测活请求 gstatic 204，普通节点测活与恢复评估由 mihomo-manager 内的 30 分钟轮次 sweeper 统一驱动（SWEEP_INTERVAL_SECONDS=1800），住宅复核与独立生命周期治理统一收敛进 recovery 聚合角色，原有服务内并发保持不变，原有服务内并发保持不变。升级步骤、CPU 预算和回滚方式见 SINGLE_MIHOMO.md。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
+          printf '容器镜像：`%s:%s`\n\n镜像摘要：`%s`\n\n常规探测共享 Mihomo 内核；dead-verify 使用私有内核完成长期失活节点核验和受保护删除；快速测活请求 gstatic 204，普通节点测活与恢复评估由 mihomo-manager 内的 30 分钟轮次 sweeper 统一驱动（SWEEP_INTERVAL_SECONDS=1800），住宅复核与独立生命周期治理统一收敛进 recovery 聚合角色，原有服务内并发保持不变。升级步骤、CPU 预算和回滚方式见 SINGLE_MIHOMO.md。\n' "$IMAGE_NAME" "$GITHUB_REF_NAME" "$IMAGE_DIGEST" > /tmp/release-notes.md
           gh release create "$GITHUB_REF_NAME" "node-explorer-$GITHUB_REF_NAME.tar.gz" --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md --verify-tag

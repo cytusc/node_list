@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,19 +15,22 @@ import (
 	"github.com/cytusc/node_list/backend/internal/store"
 )
 
-// SourceProvider feeds one external source into the shared ingestor. Each
-// provider runs in its own container and mounts its own inputs (REFACTOR_PLAN §5).
+// SourceProvider feeds one external source into the shared ingestor.
+// Providers run inside the source-ingest service.
 type SourceProvider interface {
 	Name() string
 	Start(ctx context.Context)
 	Close()
 }
 
-type subsCheckProvider struct{ watcher *source.Watcher }
+type subsCheckProvider struct {
+	watcher *source.Watcher
+	err     error
+}
 
 func (p *subsCheckProvider) Name() string { return "subs-check" }
 func (p *subsCheckProvider) Start(ctx context.Context) {
-	_ = p.watcher.Start(ctx)
+	p.err = p.watcher.Start(ctx)
 }
 func (p *subsCheckProvider) Close() {}
 
@@ -43,6 +47,8 @@ func (r *Repository) RunSource(ctx context.Context, st *store.Store) error {
 }
 
 func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	monitorCtx, stopMonitor := context.WithCancel(ctx)
 	monitorDone := make(chan struct{})
 	go func() { defer close(monitorDone); r.runMonitor(monitorCtx) }()
@@ -65,16 +71,16 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 		}
 		return r.SyncRegistry(ctx, st)
 	}
-	_ = ingest(ctx)
 	enabled := map[string]bool{}
 	for _, name := range strings.Split(Env("SOURCE_PROVIDERS", "subs-check,qilan,proxio-all,Jakee-http,xyzs996-all"), ",") {
 		enabled[strings.TrimSpace(name)] = true
 	}
-	var watcher *source.Watcher
+	var subs *subsCheckProvider
 	var providers []SourceProvider
 	if enabled["subs-check"] {
-		watcher = source.NewWatcher([]string{results, clash, links}, source.WatcherConfig{Quiet: 5 * time.Second, Sweep: 2 * time.Minute, Ingest: ingest})
-		providers = append(providers, &subsCheckProvider{watcher})
+		watcher := source.NewWatcher([]string{results, clash, links}, source.WatcherConfig{Quiet: 5 * time.Second, Sweep: 2 * time.Minute, Ingest: ingest})
+		subs = &subsCheckProvider{watcher: watcher}
+		providers = append(providers, subs)
 	}
 	if enabled["qilan"] {
 		sessionFile := Env("QILAN_SESSION_FILE", "/data/qilan/session.txt")
@@ -91,6 +97,11 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 	for _, p := range providers {
 		p.Start(ctx)
 		defer p.Close()
+	}
+	polling := subs != nil && subs.err != nil
+	if polling {
+		log.Printf("source: file watcher unavailable; using polling: %v", subs.err)
+		_ = ingest(ctx)
 	}
 	tick := time.NewTicker(10 * time.Second)
 	defer tick.Stop()
@@ -118,8 +129,8 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 				lastSweep = time.Now()
 			}
 			if time.Since(lastIngest) >= 30*time.Second {
-				if watcher != nil {
-					watcher.Trigger(ctx)
+				if polling {
+					_ = ingest(ctx)
 				}
 				lastIngest = time.Now()
 			}
