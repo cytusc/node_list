@@ -173,3 +173,42 @@ func TestRejectRecentlyDeletedHonoursCooldown(t *testing.T) {
 		t.Fatalf("cooldown never expires: %v", denied)
 	}
 }
+
+func TestRegistryReappearanceInheritsTombstoneAge(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	node := domain.Node{Type: "http", Server: "reappear.example", Port: "8080", RawLink: "http://reappear.example:8080"}
+	identity := domain.AggregateIdentity(node)
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	raw, _ := json.Marshal(domain.Snapshot{CheckedAt: stamp, Nodes: []domain.Node{node}})
+	if err := f.st.Adapter().Insert(ctx, "reappear", raw, stamp, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.repo.SyncRegistry(ctx, f.st); err != nil {
+		t.Fatal(err)
+	}
+	// It was judged dead a week ago, then the source re-delivered it. A fresh
+	// first_seen_at would restart the age gate and keep a dead node forever.
+	f.exec(t, `DELETE FROM node_explorer_node_registry WHERE identity=$1`, identity)
+	f.exec(t, `INSERT INTO node_explorer_deleted_nodes(identity,deleted_at) VALUES($1,now()-interval '8 days')`, identity)
+
+	later := time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+	raw, _ = json.Marshal(domain.Snapshot{CheckedAt: later, Nodes: []domain.Node{node}})
+	if err := f.st.Adapter().Insert(ctx, "reappear", raw, later, 2); err != nil {
+		t.Fatal(err)
+	}
+	// The fold is revision-driven; a direct adapter insert has to announce one.
+	f.exec(t, `INSERT INTO node_explorer_results_changes(snapshot_id,revision)
+ SELECT max(id),(SELECT coalesce(max(revision),0)+1 FROM node_explorer_results_changes) FROM node_explorer_snapshots
+ ON CONFLICT(snapshot_id) DO UPDATE SET revision=EXCLUDED.revision`)
+	if err := f.repo.SyncRegistry(ctx, f.st); err != nil {
+		t.Fatal(err)
+	}
+	var age time.Duration
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT now()-first_seen_at FROM node_explorer_node_registry WHERE identity=$1`, identity).Scan(&age); err != nil {
+		t.Fatalf("node was not re-admitted: %v", err)
+	}
+	if age < 7*24*time.Hour {
+		t.Fatalf("tombstone age not inherited, gate restarted at %v", age)
+	}
+}
