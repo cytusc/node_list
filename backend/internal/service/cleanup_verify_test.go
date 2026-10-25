@@ -126,3 +126,25 @@ func TestRecordVerificationKeepsAliveOutOfTheNextWave(t *testing.T) {
 		t.Fatalf("availability not refreshed: %v %v", stamp, e)
 	}
 }
+
+func TestPoolFloorRefusesDeletion(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.exec(t, `UPDATE node_explorer_node_registry SET first_seen_at=now()-interval '8 days'`)
+	var digest, incarnation string
+	if e := f.repo.Pool.QueryRow(ctx, `SELECT md5(node::text),incarnation FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&digest, &incarnation); e != nil {
+		t.Fatal(e)
+	}
+	// A floor above the current pool must park the deletion: emptying the
+	// survival set is worse than keeping a node that will be retested later.
+	t.Setenv("NODE_CLEANUP_MIN_POOL", "100000")
+	proof := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), ConfirmedDead: true}
+	ok, err := f.repo.DeleteVerifiedDead(ctx, f.id, incarnation, digest, proof)
+	if ok || !strings.Contains(fmt.Sprint(err), "pool-floor") {
+		t.Fatalf("floor not enforced: ok=%v err=%v", ok, err)
+	}
+	var alive bool
+	if e := f.repo.Pool.QueryRow(ctx, `SELECT available FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&alive); e != nil || !alive {
+		t.Fatalf("node removed despite the floor: alive=%v err=%v", alive, e)
+	}
+}

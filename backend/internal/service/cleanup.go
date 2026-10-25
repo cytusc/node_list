@@ -50,6 +50,19 @@ func cleanupInflight() int {
 	return min(v, 500)
 }
 
+// cleanupMinPool stops deletions from emptying the survival set. A source
+// outage, an egress fault or a mass false-negative would otherwise delete every
+// temporarily unreachable node and leave nothing to serve. Below this many
+// available nodes deletions are refused and the same nodes are retried later,
+// when the pool has recovered. 0 disables the floor.
+func cleanupMinPool() int {
+	v, e := strconv.Atoi(os.Getenv("NODE_CLEANUP_MIN_POOL"))
+	if e != nil || v < 0 {
+		return 500
+	}
+	return min(v, 1000000)
+}
+
 func intervalParam(d time.Duration) string {
 	return fmt.Sprintf("%f seconds", d.Seconds())
 }
@@ -353,13 +366,22 @@ func deleteUnavailable(ctx context.Context, tx pgx.Tx, j Job, proof domain.Conne
 	if e = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtext(current_schema()),hashtext($1))`, "node-probe:"+j.Payload.Identity).Scan(&admitted); e != nil || !admitted {
 		return false, "probe-in-flight", e
 	}
-	var safe bool
-	e = tx.QueryRow(ctx, `SELECT greatest(first_seen_at,coalesce(last_available_at,first_seen_at))<now()-$4::interval
- AND NOT EXISTS(SELECT 1 FROM node_explorer_work WHERE id<>$2 AND payload->>'identity'=$1 AND state='running' AND lease_until>now())
- AND NOT EXISTS(SELECT 1 FROM node_explorer_connectivity WHERE identity=$1 AND checked_at>$3::timestamptz)
- FROM node_explorer_node_registry WHERE identity=$1`, j.Payload.Identity, j.ID, proof.CheckedAt, intervalParam(cleanupMinAge())).Scan(&safe)
-	if e != nil || !safe {
-		return false, "not-safe", e
+	// One statement returns either the refusal reason or nothing, so a parked
+	// deletion says why instead of a generic "not-safe".
+	var refusal string
+	e = tx.QueryRow(ctx, `SELECT CASE
+ WHEN (SELECT count(*) FROM (SELECT 1 FROM node_explorer_node_registry WHERE available LIMIT ($5::int + 1)) pool) <= $5::int THEN 'pool-floor'
+ WHEN NOT (greatest(first_seen_at,coalesce(last_available_at,first_seen_at))<now()-$4::interval
+  AND NOT EXISTS(SELECT 1 FROM node_explorer_work WHERE id<>$2 AND payload->>'identity'=$1 AND state='running' AND lease_until>now())
+  AND NOT EXISTS(SELECT 1 FROM node_explorer_connectivity WHERE identity=$1 AND checked_at>$3::timestamptz)) THEN 'not-safe'
+ ELSE '' END
+ FROM node_explorer_node_registry WHERE identity=$1`,
+		j.Payload.Identity, j.ID, proof.CheckedAt, intervalParam(cleanupMinAge()), cleanupMinPool()).Scan(&refusal)
+	if e != nil {
+		return false, "", e
+	}
+	if refusal != "" {
+		return false, refusal, nil
 	}
 	var raw []byte
 	e = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_probe_results WHERE session=$1 AND kind=$2 AND identity=$3`, session, KindLive, j.Payload.Identity).Scan(&raw)

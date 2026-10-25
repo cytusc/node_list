@@ -32,6 +32,9 @@ type fixture struct {
 
 func setup(t *testing.T) *fixture {
 	t.Helper()
+	// Fixtures hold one or two nodes, so the production survival floor (500)
+	// would park every deletion. Tests that care about the floor set their own.
+	t.Setenv("NODE_CLEANUP_MIN_POOL", "0")
 	cfg := testutil.Postgres(t)
 	ctx := context.Background()
 	a, e := postgres.NewAdapter(ctx, postgres.Config{Host: cfg.Host, Port: int(cfg.Port), User: cfg.User, Database: cfg.Database, Password: cfg.Password, PoolMax: 6})

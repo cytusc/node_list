@@ -63,6 +63,11 @@ services:
       <<: *environment
       SOURCE_PROVIDERS: ${SOURCE_PROVIDERS:-subs-check,proxio-all,Jakee-http,xyzs996-all}
       PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS: ${PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS:-1800}
+      # 入库前的端点拨号（0 关闭）。端口完全不通的节点直接不入库，趁它们是
+      # 垃圾而不是等它们进注册表再删。UDP 传输不参与。
+      SOURCE_PROBE_SECONDS: ${SOURCE_PROBE_SECONDS:-3}
+      SOURCE_PROBE_CONCURRENCY: ${SOURCE_PROBE_CONCURRENCY:-32}
+      SOURCE_PROBE_BUDGET_SECONDS: ${SOURCE_PROBE_BUDGET_SECONDS:-45}
       SUBS_CHECK_DIR: /data/sub
     volumes:
       - type: bind
@@ -145,6 +150,7 @@ services:
     environment:
       <<: *environment
       SCHEDULE_INTERVAL_SECONDS: 30
+      NODE_CLEANUP_MIN_POOL: ${NODE_CLEANUP_MIN_POOL:-500}
       # 超过该窗口「新近出现或最后可用」的节点才做二次验证；registry 的
       # first_seen_at 若是加列迁移统一刷新的，默认 7 天会一直不满足。
       NODE_CLEANUP_MIN_AGE_SECONDS: ${NODE_CLEANUP_MIN_AGE_SECONDS:-604800}
@@ -175,6 +181,9 @@ services:
       # 删除门禁自己也会复核年龄窗口；两条路径必须用同一个值，否则核验器按
       # 24h 选出候选、门禁按默认 7 天一律否决。
       NODE_CLEANUP_MIN_AGE_SECONDS: ${NODE_CLEANUP_MIN_AGE_SECONDS:-604800}
+      # 生存集下限：可用节点少于这个数就停止删除，防止源断供或出口故障时
+      # 把注册表删空。0 关闭。
+      NODE_CLEANUP_MIN_POOL: ${NODE_CLEANUP_MIN_POOL:-500}
     cpus: ${DEAD_VERIFY_CPUS:-1}
     # 必须显式禁用：镜像自带 HEALTHCHECK 探的是 PHP 的 3001 端口，不覆盖就会
     # 一直 unhealthy，把 `up -d --wait` 的整批更新拖垮（实测触发过一次回滚）。

@@ -43,6 +43,9 @@ CREATE INDEX IF NOT EXISTS node_explorer_work_delivery ON node_explorer_work(kin
 -- index would be unusable and every removal would seq-scan the whole ledger
 -- (measured 670 ms against 108k rows / 1.2 GB).
 CREATE INDEX IF NOT EXISTS node_explorer_work_identity ON node_explorer_work((payload->>'identity'));
+-- The deletion gate checks the survival-set size on every removal; a partial
+-- index keeps that check cheap once the registry is large again.
+CREATE INDEX IF NOT EXISTS node_explorer_registry_available ON node_explorer_node_registry(identity) WHERE available;
 CREATE TABLE IF NOT EXISTS node_explorer_probe_results (
   session text NOT NULL, kind text NOT NULL, identity text NOT NULL,
   checked_at timestamptz NOT NULL, payload jsonb NOT NULL,
