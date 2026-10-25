@@ -130,3 +130,21 @@ func TestLoadVerificationProxiesDropsRejectedEntry(t *testing.T) {
 		t.Fatalf("calls=%d names=%v picked=%v", calls, names, picked)
 	}
 }
+
+func TestProxyDelayProbesDirectEgress(t *testing.T) {
+	var seen string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.Path
+		if r.URL.Path != "/proxies/DIRECT/delay" {
+			t.Errorf("direct probe hit %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"delay":8}`))
+	}))
+	defer server.Close()
+	ok, err := ProxyDelay(context.Background(), MihomoConfig{Controller: server.URL}, DirectProxy, 2*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("direct egress probe: ok=%v err=%v path=%s", ok, err, seen)
+	}
+}

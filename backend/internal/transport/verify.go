@@ -21,6 +21,11 @@ import (
 // verifier's worker.
 var verificationClient = &http.Client{Timeout: 30 * time.Second}
 
+// DirectProxy is Mihomo's built-in direct outbound. Probing its delay is how
+// the verifier proves its own egress works, without trusting a registry node
+// whose reachable flag may be stale or falsely positive.
+const DirectProxy = "DIRECT"
+
 // LoadVerificationProxies replaces the instance's proxy set with one entry per
 // usable node and returns the generated names plus the index of the node each
 // name stands for. Verification never routes traffic through these proxies: the

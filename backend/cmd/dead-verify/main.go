@@ -42,6 +42,15 @@ func main() {
 	}
 }
 
+// envAllowZero differs from envInt only in accepting an explicit 0, which the
+// age window needs to express "ignore the gate" during an operational dry run.
+func envAllowZero(key string, fallback int) int {
+	if v, err := strconv.Atoi(os.Getenv(key)); err == nil && v >= 0 {
+		return v
+	}
+	return fallback
+}
+
 func envInt(key string, fallback int) int {
 	if v, err := strconv.Atoi(os.Getenv(key)); err == nil && v > 0 {
 		return v
@@ -68,7 +77,7 @@ func run() error {
 	flag.IntVar(&o.workers, "workers", envInt("DEAD_VERIFY_WORKERS", 96), "并行握手数")
 	flag.IntVar(&o.deleters, "deleters", envInt("DEAD_VERIFY_DELETERS", 8), "并行删除事务数")
 	flag.DurationVar(&o.timeout, "timeout", time.Duration(envInt("DEAD_VERIFY_TIMEOUT_SECONDS", 6))*time.Second, "单节点握手超时")
-	flag.DurationVar(&o.minAge, "min-age", time.Duration(envInt("DEAD_VERIFY_MIN_AGE_SECONDS", 86400))*time.Second, "候选年龄窗口")
+	flag.DurationVar(&o.minAge, "min-age", time.Duration(envAllowZero("DEAD_VERIFY_MIN_AGE_SECONDS", 86400))*time.Second, "候选年龄窗口；0 表示忽略年龄门禁")
 	flag.DurationVar(&o.recheck, "recheck", time.Duration(envInt("DEAD_VERIFY_RECHECK_SECONDS", 21600))*time.Second, "同一节点再次核验的间隔")
 	flag.DurationVar(&o.interval, "interval", time.Duration(envInt("DEAD_VERIFY_INTERVAL_SECONDS", 5))*time.Second, "无候选时的等待")
 	flag.DurationVar(&o.compact, "compact-every", time.Duration(envInt("DEAD_VERIFY_COMPACT_SECONDS", 120))*time.Second, "快照压缩间隔")
@@ -178,12 +187,26 @@ type waveStats struct {
 
 func verifyWave(ctx context.Context, repo *service.Repository, instance transport.MihomoConfig, wave []service.VerifiedCandidate, o options) (waveStats, error) {
 	var stats waveStats
-	controls, err := repo.VerificationControls(ctx, 3)
-	if err != nil {
-		return stats, err
+	// DIRECT is the authoritative egress control: it proves this container can
+	// reach the probe target without borrowing a node from the registry, whose
+	// reachable flag goes stale or falsely positive (Cloudflare-fronted
+	// endpoints accept TCP long after the backend is gone). Registry nodes stay
+	// as a fallback for deployments that can only egress through a proxy.
+	directAlive := false
+	for attempt := 0; attempt < 3 && !directAlive; attempt++ {
+		if ok, e := transport.ProxyDelay(ctx, instance, transport.DirectProxy, o.timeout); e == nil && ok {
+			directAlive = true
+		}
 	}
-	if len(controls) == 0 {
-		return stats, errors.New("no egress control: refusing to judge a wave")
+	controls := []domain.Node{}
+	if !directAlive {
+		var e error
+		if controls, e = repo.VerificationControls(ctx, 3); e != nil {
+			return stats, e
+		}
+		if len(controls) == 0 {
+			return stats, errors.New("no egress control: DIRECT failed and no registry control is reachable")
+		}
 	}
 	nodes := make([]domain.Node, 0, len(controls)+len(wave))
 	nodes = append(nodes, controls...)
@@ -204,20 +227,22 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 		return stats, fmt.Errorf("wave did not load: names=%d picked=%d controls=%d candidates=%d", len(names), len(picked), len(controls), candidates)
 	}
 
-	// The egress control decides whether this wave may judge anything at all, so
-	// it is checked before a single candidate is touched.
-	controlSeen, controlAlive := 0, false
-	for i := range names {
-		if picked[i] >= len(controls) {
-			continue
+	// Only reached when DIRECT failed: the registry control decides whether this
+	// wave may judge anything at all, before a single candidate is touched.
+	if !directAlive {
+		controlSeen, controlAlive := 0, false
+		for i := range names {
+			if picked[i] >= len(controls) {
+				continue
+			}
+			controlSeen++
+			if ok, e := transport.ProxyDelay(ctx, instance, names[i], o.timeout); e == nil && ok {
+				controlAlive = true
+			}
 		}
-		controlSeen++
-		if ok, e := transport.ProxyDelay(ctx, instance, names[i], o.timeout); e == nil && ok {
-			controlAlive = true
+		if !controlAlive {
+			return stats, fmt.Errorf("egress control failed: wave discarded (DIRECT down, %d registry controls tried)", controlSeen)
 		}
-	}
-	if !controlAlive {
-		return stats, fmt.Errorf("egress control failed: wave discarded (%d controls tried)", controlSeen)
 	}
 
 	sem := make(chan struct{}, o.deleters)

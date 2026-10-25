@@ -176,9 +176,12 @@ services:
       # 24h 选出候选、门禁按默认 7 天一律否决。
       NODE_CLEANUP_MIN_AGE_SECONDS: ${NODE_CLEANUP_MIN_AGE_SECONDS:-604800}
     cpus: ${DEAD_VERIFY_CPUS:-1}
-    # 不加 healthcheck：一批握手可能跑几分钟，任何以「多久没写心跳」为准的探针
-    # 都会把正在干活的容器判成 unhealthy，进而拖垮 `up -d --wait` 的整批更新。
-    # 存活性看 node_explorer_service_status 里的 dead-verify 行（20 秒一次脉冲）。
+    # 必须显式禁用：镜像自带 HEALTHCHECK 探的是 PHP 的 3001 端口，不覆盖就会
+    # 一直 unhealthy，把 `up -d --wait` 的整批更新拖垮（实测触发过一次回滚）。
+    # 也不适合用心跳探针——一批握手可能跑几分钟。存活性看
+    # node_explorer_service_status 里的 dead-verify 行（20 秒一次脉冲）。
+    healthcheck:
+      disable: true
   mihomo-manager:
     <<: *worker
     cpus: ${MIHOMO_MANAGER_CPUS:-0.5}
