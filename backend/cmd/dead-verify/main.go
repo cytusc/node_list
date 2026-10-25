@@ -185,6 +185,29 @@ type waveStats struct {
 	alive, dead, deleted, vetoed int
 }
 
+// skipUnparseable records a liveness-neutral observation for candidates the
+// kernel rejected, so the wave can move past them. They are never marked dead.
+func skipUnparseable(ctx context.Context, repo *service.Repository, wave []service.VerifiedCandidate, dropped []int, controlCount int) int {
+	skipped := 0
+	for _, index := range dropped {
+		if index < controlCount {
+			continue
+		}
+		c := wave[index-controlCount]
+		proof := domain.ConnectivityState{
+			CheckedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+			ProbeTarget: "config-rejected",
+			Error:       "kernel cannot parse this proxy configuration",
+		}
+		if err := repo.RecordVerification(ctx, c.Identity, c.Incarnation, proof); err != nil {
+			log.Printf("dead-verify: record unparseable %s: %v", c.Identity, err)
+			continue
+		}
+		skipped++
+	}
+	return skipped
+}
+
 func verifyWave(ctx context.Context, repo *service.Repository, instance transport.MihomoConfig, wave []service.VerifiedCandidate, o options) (waveStats, error) {
 	var stats waveStats
 	// DIRECT is the authoritative egress control: it proves this container can
@@ -213,9 +236,17 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 	for _, c := range wave {
 		nodes = append(nodes, c.Node)
 	}
-	names, picked, err := transport.LoadVerificationProxies(ctx, instance, nodes)
+	names, picked, dropped, err := transport.LoadVerificationProxies(ctx, instance, nodes)
 	if err != nil {
 		return stats, err
+	}
+	// A node whose configuration the kernel refuses is not evidence of death,
+	// so it is never judged. Recording an observation is what stops it from
+	// occupying the head of the candidate queue every single wave: the candidate
+	// query skips anything verified within recheck, and by then the source may
+	// have shipped a parseable config.
+	if skipped := skipUnparseable(ctx, repo, wave, dropped, len(controls)); skipped > 0 {
+		log.Printf("dead-verify: skipped %d candidates the kernel cannot parse", skipped)
 	}
 	candidates := 0
 	for _, index := range picked {
@@ -223,8 +254,11 @@ func verifyWave(ctx context.Context, repo *service.Repository, instance transpor
 			candidates++
 		}
 	}
-	if len(names) != len(picked) || candidates == 0 {
-		return stats, fmt.Errorf("wave did not load: names=%d picked=%d controls=%d candidates=%d", len(names), len(picked), len(controls), candidates)
+	if candidates == 0 {
+		if len(dropped) > 0 {
+			return stats, nil
+		}
+		return stats, fmt.Errorf("wave did not load: names=%d picked=%d controls=%d", len(names), len(picked), len(controls))
 	}
 
 	// Only reached when DIRECT failed: the registry control decides whether this

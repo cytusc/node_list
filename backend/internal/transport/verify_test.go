@@ -32,7 +32,7 @@ func TestLoadVerificationProxiesNamesEveryUsableNode(t *testing.T) {
 	}))
 	defer server.Close()
 	instance := MihomoConfig{Controller: server.URL, Secret: "s3cret"}
-	names, picked, err := LoadVerificationProxies(context.Background(), instance, []domain.Node{
+	names, picked, _, err := LoadVerificationProxies(context.Background(), instance, []domain.Node{
 		{Type: "http", Server: "192.0.2.1", Port: "8080"},
 		{Type: "vless", RawConfig: domain.ProxyConfig{"type": "vless", "server": "198.51.100.7", "port": 443, "uuid": "x"}},
 		{Type: "http"}, // no endpoint: skipped, and the mapping must say so
@@ -120,7 +120,7 @@ func TestLoadVerificationProxiesDropsRejectedEntry(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	names, picked, err := LoadVerificationProxies(context.Background(), MihomoConfig{Controller: server.URL}, []domain.Node{
+	names, picked, _, err := LoadVerificationProxies(context.Background(), MihomoConfig{Controller: server.URL}, []domain.Node{
 		{Type: "http", Server: "192.0.2.1", Port: "8080"},
 		{Type: "vless", RawConfig: domain.ProxyConfig{"type": "vless", "server": "198.51.100.7", "port": 443, "uuid": "x"}},
 	})
@@ -177,7 +177,7 @@ func TestLoadVerificationProxiesBisectsWhenMessageCarriesNoIndex(t *testing.T) {
 		}
 		nodes = append(nodes, domain.Node{Type: "http", Server: host, Port: "8080"})
 	}
-	names, picked, err := LoadVerificationProxies(context.Background(), MihomoConfig{Controller: server.URL}, nodes)
+	names, picked, _, err := LoadVerificationProxies(context.Background(), MihomoConfig{Controller: server.URL}, nodes)
 	if err != nil {
 		t.Fatalf("bisection did not recover: %v (loads=%d)", err, loads)
 	}
@@ -192,5 +192,57 @@ func TestLoadVerificationProxiesBisectsWhenMessageCarriesNoIndex(t *testing.T) {
 	// 1 rejected full load + log2(8)=3 halvings + 1 accepted reload.
 	if loads > 8 {
 		t.Fatalf("bisection used %d loads", loads)
+	}
+}
+
+func TestLoadVerificationProxiesReportsDroppedInsteadOfFailing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Payload string `json:"payload"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if strings.Contains(body.Payload, "bad-node-marker") {
+			w.WriteHeader(http.StatusBadRequest)
+			// No index in the message on purpose: dropping by an untrusted index
+			// would discard a healthy neighbour, so the verifier must bisect.
+			_, _ = w.Write([]byte(`{"message":"initialize v2ray-plugin error: 'mux' expected type 'bool'"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	// A wave where every candidate is unparseable must report them, not fail:
+	// failing would retry the identical wave every five seconds forever.
+	allBad := []domain.Node{
+		{Type: "http", Server: "bad-node-marker", Port: "8080"},
+		{Type: "http", Server: "bad-node-marker", Port: "8081"},
+	}
+	names, picked, dropped, err := LoadVerificationProxies(context.Background(), MihomoConfig{Controller: server.URL}, allBad)
+	if err != nil {
+		t.Fatalf("all-unparseable wave must not error: %v", err)
+	}
+	if len(names) != 0 || len(picked) != 0 {
+		t.Fatalf("expected nothing loadable, got names=%v", names)
+	}
+	if len(dropped) != 2 {
+		t.Fatalf("dropped=%v", dropped)
+	}
+
+	// Mixed wave: the healthy node still gets probed and the bad one is named.
+	mixed := []domain.Node{
+		{Type: "http", Server: "192.0.2.1", Port: "8080"},
+		{Type: "http", Server: "bad-node-marker", Port: "8082"},
+		{Type: "http", Server: "192.0.2.3", Port: "8080"},
+	}
+	names, picked, dropped, err = LoadVerificationProxies(context.Background(), MihomoConfig{Controller: server.URL}, mixed)
+	if err != nil {
+		t.Fatalf("mixed wave: %v", err)
+	}
+	if len(names) != 2 || len(picked) != 2 {
+		t.Fatalf("names=%v picked=%v", names, picked)
+	}
+	if len(dropped) != 1 || dropped[0] != 1 {
+		t.Fatalf("dropped=%v, want [1]", dropped)
 	}
 }

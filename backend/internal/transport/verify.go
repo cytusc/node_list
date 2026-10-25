@@ -31,15 +31,18 @@ const DirectProxy = "DIRECT"
 // name stands for. Verification never routes traffic through these proxies: the
 // controller's delay probe performs the handshake, so no listener, rule set or
 // geo database is involved.
-func LoadVerificationProxies(ctx context.Context, instance MihomoConfig, nodes []domain.Node) ([]string, []int, error) {
+func LoadVerificationProxies(ctx context.Context, instance MihomoConfig, nodes []domain.Node) ([]string, []int, []int, error) {
 	proxies := make([]domain.ProxyConfig, 0, len(nodes))
 	picked := make([]int, 0, len(nodes))
+	dropped := make([]int, 0)
 	for i, node := range nodes {
 		// outboundConfig always renders a map; a node without a real endpoint
 		// would be rejected by the controller and take the whole wave with it.
 		if p := outboundConfig(node); usableProxy(p) {
 			proxies = append(proxies, p)
 			picked = append(picked, i)
+		} else {
+			dropped = append(dropped, i)
 		}
 	}
 	config := mihomoConfig{
@@ -65,35 +68,49 @@ func LoadVerificationProxies(ctx context.Context, instance MihomoConfig, nodes [
 	// the index is read when present and bisected for otherwise: a single bad
 	// node must never block the pool. A node that keeps failing leaves the
 	// candidate query's oldest-first order and the wave moves on.
-	for attempt := 0; attempt < 24; attempt++ {
+	lastIndex := -1
+	for attempt := 0; attempt < 64; attempt++ {
 		payload, err := marshalMihomoConfig(config)
 		if err != nil {
-			return nil, nil, fmt.Errorf("render verification config: %w", err)
+			return nil, nil, nil, fmt.Errorf("render verification config: %w", err)
+		}
+		if len(config.Proxies) == 0 {
+			// Everything was rejected; the caller records these nodes and moves
+			// on instead of retrying the same wave forever.
+			return nil, nil, dropped, nil
 		}
 		status, body, err := putConfig(ctx, instance, payload)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if status == http.StatusNoContent || status == http.StatusOK {
-			return names, picked, nil
+			return names, picked, dropped, nil
 		}
 		if status != http.StatusBadRequest {
-			return nil, nil, fmt.Errorf("load verification proxies: controller answered %d: %s", status, clip(body))
+			return nil, nil, nil, fmt.Errorf("load verification proxies: controller answered %d: %s", status, clip(body))
 		}
 		index, ok := rejectedProxyIndex(body)
+		if ok && index == lastIndex {
+			// The message keeps naming the same slot after that slot was already
+			// removed, so it is not tracking the rejected entry (observed with an
+			// ss node whose plugin options fail to initialise). Stop trusting it.
+			ok = false
+		}
 		if !ok {
 			if index, err = findRejectedProxy(ctx, instance, config); err != nil {
-				return nil, nil, fmt.Errorf("load verification proxies: %w (controller said %s)", err, clip(body))
+				return nil, nil, nil, fmt.Errorf("load verification proxies: %w (controller said %s)", err, clip(body))
 			}
 		}
-		if index < 0 || index >= len(config.Proxies) || len(config.Proxies) <= 1 {
-			return nil, nil, fmt.Errorf("load verification proxies: controller answered %d: %s", status, clip(body))
+		if index < 0 || index >= len(config.Proxies) {
+			return nil, nil, nil, fmt.Errorf("load verification proxies: controller answered %d: %s", status, clip(body))
 		}
+		lastIndex = index
+		dropped = append(dropped, picked[index])
 		config.Proxies = append(config.Proxies[:index], config.Proxies[index+1:]...)
 		names = append(names[:index], names[index+1:]...)
 		picked = append(picked[:index], picked[index+1:]...)
 	}
-	return nil, nil, errors.New("load verification proxies: every attempt rejected")
+	return nil, nil, dropped, errors.New("load verification proxies: every attempt rejected")
 }
 
 // findRejectedProxy locates one proxy that makes the controller reject the
