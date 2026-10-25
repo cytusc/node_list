@@ -88,6 +88,11 @@ func quoteConnValue(value string) string {
 }
 
 // Adapter persists snapshots and enrichment.
+// schemaVersion bumps whenever base tables, service SQL or live views change.
+// Forgetting to bump it is silent: the new statements simply never run against
+// an existing database (that is how node_explorer_work_identity went missing).
+const schemaVersion = 11
+
 type Adapter struct {
 	pool *pgxpool.Pool
 }
@@ -140,10 +145,8 @@ func (a *Adapter) initSchema(ctx context.Context) error {
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-explorer-schema'))`); err != nil {
 		return err
 	}
-	// Bump schemaVersion whenever base tables, service SQL or live views change.
-	// All services share one transactional migration lock and skip DDL once this
-	// version has committed. A failed migration leaves no applied-version marker.
-	const schemaVersion = 10
+	// All services share one transactional migration lock and skip DDL once
+	// schemaVersion has committed. A failed migration leaves no applied marker.
 	var migrationTable *string
 	if err = tx.QueryRow(ctx, `SELECT to_regclass('node_explorer_service_migrations')::text`).Scan(&migrationTable); err != nil {
 		return err

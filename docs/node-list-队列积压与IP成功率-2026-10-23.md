@@ -417,3 +417,79 @@ Cloudflare 前置的 vless 节点（`172.67.*`、`104.24.*`、`162.159.*`）**TC
 `dead-verify` 只拿到 `DEAD_VERIFY_MIN_AGE_SECONDS`，没拿到 `NODE_CLEANUP_MIN_AGE_SECONDS`；
 而删除门禁 `deleteUnavailable` 自己也会复核年龄窗口。于是候选按 24 小时选出、
 门禁按默认 7 天判断 —— 95 个全被判「not-safe」。compose 里已给两侧显式传同一个值。
+
+### 性能优化：删除降到 O(1)，快照压缩转后台（v1.5.70 – v1.5.72）
+
+删除的瓶颈原本不在探测，而在删除本身：`removeSnapshotIdentities` 每删一个节点都要
+重写它所在的整张快照、重排全快照的 `node_index`，单事务持排他锁 1–3 秒。于是删除
+吞吐被锁在约 1800/小时，加并发只会互相撞 `lock_timeout`（实测 26/58 个死节点卡在
+锁等待）。
+
+改动：
+
+- **删除不再碰快照**：`deleteUnavailable` 增加 `compact` 开关，批量路径传 false——
+  既不重写 payload，也不抢 `LOCK TABLE ... EXCLUSIVE`（注册表 advisory 锁已经和
+  source fold 串行化）。节点仍写 `deleted_nodes` 水印，回流由 `syncRegistry` 的
+  `x.source_at<=d.deleted_at` 挡住。删除从此与快照大小无关。
+- **压缩转后台按批**：`CompactDeleted` 每次取 400 个「已 tombstone 但仍在快照里」的
+  identity，一次事务重写涉及到的快照；幂等，核验器每 5 分钟跑一次。
+- **判活也落证据**：判活原来什么都不写，下一波又被同一个候选查询捞出来重测；随着
+  死节点减少，这批活节点会吃掉整波容量。现在写入 `Reachable` 证据并刷新
+  `last_available_at`，既进 recheck 去重窗口，也离开年龄窗口。
+- 修 `removeSnapshotIdentities` 的边界：整张快照被清空时 `oldIndices` 编码成 NULL，
+  `=ANY(NULL)` 匹配不到任何行，成员与 ippure 索引永远删不掉（压缩器会死循环）。
+
+实测（400 个/批）：`alive=109 dead=285 deleted=266`，删除率 **15/分钟 → 56/分钟**
+（约 3400/小时），注册表两小时从 47235 降到 45248。四万积压预计十余小时排空，
+之后进入稳态。
+
+**运维注意**：镜像自带 `HEALTHCHECK`（探 PHP 的 3001 端口），dead-verify 必须显式
+`healthcheck: disable: true`，否则永远 unhealthy，会把 `up -d --wait` 的整批更新
+拖垮并触发回滚（实测发生过一次）。心跳由程序每 20 秒写一次 `service_status`。
+
+## 追加：候选池为什么会空（v1.5.73）
+
+### 现象
+
+`dead-verify` 日志刷 `wave did not load: names=3 picked=3 controls=3 candidates=0`，
+CPU 只有 0.02%，删除率归零。看起来像卡死，其实是**没有候选可测**。
+
+逐层拆开候选查询（`available AND reachable=false AND 年龄窗口`）：
+
+| 条件 | 剩余 |
+|---|---|
+| `available` | 25868 |
+| `+ reachable=false` | 24438 |
+| `+ 超过 24 小时未见/不可用` | **8** |
+
+原因：这 24438 个节点里有 **24382 个的 `last_available_at` 就在今天 00:01**
+——它们是今天凌晨成批变成不可达的，还在 24 小时宽限期里。另有 8686 个的
+`first_seen_at` 是 10-24 00:00（源批次重新发现的节点，identity 变了，算新节点）。
+也就是说**这一轮的死节点是「新鲜死亡」，不是历史垃圾**，核验器没有活干是正常
+的，不是故障。
+
+一处顺带的可用性问题：`envInt` 要求值大于 0，所以
+`DEAD_VERIFY_MIN_AGE_SECONDS=0` 会被静默回落成 86400，运维想「忽略窗口抽样」
+时拿不到候选。改用 `envAllowZero`，0 现在真的表示忽略年龄门禁。
+
+### 第二个问题：出口对照自证失败
+
+忽略窗口抽样（`-min-age=0 -dry-run`，150 个候选）立刻撞上
+`egress control failed: wave discarded (3 controls tried)`。原因是对照池来自
+`connectivity.reachable=true` 的节点，而**这批节点恰恰是假活**——Cloudflare
+前置的端点 TCP 永远连得上、后端早就死了。用假活节点当出口基准，等于用被测对象
+证明自己没问题。
+
+改用 mihomo 内置的 **DIRECT 出站**做对照（`GET /proxies/DIRECT/delay`）：
+
+- 容器自己能握手到 `generate_204` → 本批的失败判定才成立；
+- 完全不依赖库里的 `reachable` 标记，也不受假活污染；
+- 实测容器直连 gstatic / cloudflare 均正常；
+- DIRECT 不可达时才退回注册表对照，兼容只能经代理出网的部署。
+
+### 环境事实
+
+宿主 **4 核**、load average 6.18（`1Panel-postgresql` 一个容器占 257% CPU），
+核验器自身 CPU 0.02%。所以「提 CPU / 提并发」在这个节点上没有收益——它是在等
+候选、等对照，不是在算。真正的容量瓶颈依次是：候选池（时效）→ 出口对照
+（已修）→ 注册表 advisory 锁（已把并发降到 6）。
