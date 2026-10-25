@@ -88,6 +88,8 @@ func TestRejectUnreachableEndpointsDropsOnlyDeadPorts(t *testing.T) {
 	}
 	defer ln.Close()
 	live := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	// The control endpoint stands in for the probe path's own health.
+	t.Setenv("SOURCE_PROBE_CONTROL", "127.0.0.1:"+live)
 
 	nodes := []domain.Node{
 		{Type: "http", Server: "127.0.0.1", Port: live},
@@ -112,8 +114,10 @@ func TestRejectUnreachableEndpointsDropsOnlyDeadPorts(t *testing.T) {
 
 func TestRejectUnreachableEndpointsYieldsWhenTheProbePathIsBroken(t *testing.T) {
 	f := setup(t)
-	// Everything looks dead. That is far more likely a broken probe path than a
-	// fully dead batch, and silencing the source would be worse than admitting it.
+	// These sources are routinely 80-90% dead, so a mostly-dead batch proves
+	// nothing about our egress. Only the control endpoint can decide, and here
+	// it fails: silencing the source would be worse than admitting the batch.
+	t.Setenv("SOURCE_PROBE_CONTROL", "127.0.0.1:1,127.0.0.1:2")
 	nodes := []domain.Node{
 		{Type: "http", Server: "127.0.0.1", Port: "1"},
 		{Type: "http", Server: "127.0.0.1", Port: "2"},
@@ -124,7 +128,7 @@ func TestRejectUnreachableEndpointsYieldsWhenTheProbePathIsBroken(t *testing.T) 
 		t.Fatal(err)
 	}
 	if len(denied) != 0 {
-		t.Fatalf("whole-batch rejection must yield: %v", denied)
+		t.Fatalf("a broken probe path must admit the batch: %v", denied)
 	}
 }
 
@@ -136,5 +140,36 @@ func TestRejectUnreachableEndpointsCanBeDisabled(t *testing.T) {
 	})
 	if err != nil || len(denied) != 0 {
 		t.Fatalf("disabled probe still filtered: %v %v", denied, err)
+	}
+}
+
+func TestRejectRecentlyDeletedHonoursCooldown(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	node := domain.Node{Type: "http", Server: "example.com", Port: "8080", RawLink: "http://example.com:8080"}
+	identity := domain.AggregateIdentity(node)
+	if _, err := f.repo.Pool.Exec(ctx, `INSERT INTO node_explorer_deleted_nodes(identity,deleted_at)
+ VALUES($1,now()) ON CONFLICT(identity) DO UPDATE SET deleted_at=now()`, identity); err != nil {
+		t.Fatal(err)
+	}
+	denied, err := f.repo.RejectRecentlyDeleted(ctx, []domain.Node{node})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Without this the deletion is undone on the next import, with a fresh
+	// first_seen_at that also restarts the seven-day age gate.
+	if denied[0] != "recently-deleted" {
+		t.Fatalf("freshly deleted identity re-admitted: %v", denied)
+	}
+	if _, err := f.repo.Pool.Exec(ctx, `UPDATE node_explorer_deleted_nodes SET deleted_at=now()-interval '10 days' WHERE identity=$1`, identity); err != nil {
+		t.Fatal(err)
+	}
+	denied, err = f.repo.RejectRecentlyDeleted(ctx, []domain.Node{node})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A node that may have been repaired must come back eventually.
+	if len(denied) != 0 {
+		t.Fatalf("cooldown never expires: %v", denied)
 	}
 }

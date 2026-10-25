@@ -25,6 +25,19 @@ func Seconds(key string, def int) time.Duration {
 	}
 	return time.Duration(v) * time.Second
 }
+
+// EnvInt reads an integer with an explicit range, and unlike Number it can
+// express 0. Number caps at 64 and rejects 0 by falling back to the default,
+// which silently breaks any "0 disables this" switch and any fan-out wider than
+// 64. Out-of-range values fall back to def rather than failing the role.
+func EnvInt(key string, def, low, high int) int {
+	v, e := strconv.Atoi(os.Getenv(key))
+	if e != nil || v < low || v > high {
+		return def
+	}
+	return v
+}
+
 func Number(key string, def int) int {
 	v, e := strconv.Atoi(os.Getenv(key))
 	if e != nil || v < 1 || v > 64 {

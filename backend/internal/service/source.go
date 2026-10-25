@@ -47,9 +47,11 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 	monitorDone := make(chan struct{})
 	go func() { defer close(monitorDone); r.runMonitor(monitorCtx) }()
 	defer func() { stopMonitor(); <-monitorDone }()
-	// Cheap SQL admission first, then the endpoint dial: the dial is the slow
-	// one, so it only ever sees what survived the registry checks.
-	ingestor := store.NewPersistentIngestor(st, r.RejectConfirmedFaults, r.RejectUnreachableEndpoints)
+	// Cheapest first: the tombstone check is one indexed lookup per identity and
+	// removes the bulk of a re-delivered dead batch, the fault check is a few
+	// SQL round trips, and the endpoint dial — by far the slowest — only sees
+	// what survived both.
+	ingestor := store.NewPersistentIngestor(st, r.RejectRecentlyDeleted, r.RejectConfirmedFaults, r.RejectUnreachableEndpoints)
 	dir := Env("SUBS_CHECK_DIR", filepath.Join(Root(), "data", "sub"))
 	results := Env("RESULTS_FILE", filepath.Join(dir, "config", "cache", "config", "results.json"))
 	clash, links := filepath.Join(dir, "output", "all.yaml"), filepath.Join(dir, "output", "base64.txt")

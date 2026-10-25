@@ -66,8 +66,12 @@ services:
       # 入库前的端点拨号（0 关闭）。端口完全不通的节点直接不入库，趁它们是
       # 垃圾而不是等它们进注册表再删。UDP 传输不参与。
       SOURCE_PROBE_SECONDS: ${SOURCE_PROBE_SECONDS:-3}
-      SOURCE_PROBE_CONCURRENCY: ${SOURCE_PROBE_CONCURRENCY:-32}
-      SOURCE_PROBE_BUDGET_SECONDS: ${SOURCE_PROBE_BUDGET_SECONDS:-45}
+      SOURCE_PROBE_CONCURRENCY: ${SOURCE_PROBE_CONCURRENCY:-256}
+      SOURCE_PROBE_BUDGET_SECONDS: ${SOURCE_PROBE_BUDGET_SECONDS:-120}
+      # 探测链路自身的健康对照端点：全部不通就视为出口故障，整批放行。
+      SOURCE_PROBE_CONTROL: ${SOURCE_PROBE_CONTROL:-1.1.1.1:443,8.8.8.8:53,223.5.5.5:443}
+      # 已判定死亡的连接在这个冷却期内不再被同源重新灌入（0 关闭）。
+      SOURCE_DELETED_COOLDOWN_HOURS: ${SOURCE_DELETED_COOLDOWN_HOURS:-72}
       SUBS_CHECK_DIR: /data/sub
     volumes:
       - type: bind
