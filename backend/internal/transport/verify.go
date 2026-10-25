@@ -60,10 +60,12 @@ func LoadVerificationProxies(ctx context.Context, instance MihomoConfig, nodes [
 			names = append(names, name)
 		}
 	}
-	// One unsupported parameter rejects the whole wave with HTTP 400 and names
-	// the offending index; drop that entry and try again so a single bad node
-	// cannot block the pool.
-	for attempt := 0; attempt < 4; attempt++ {
+	// One unsupported parameter rejects the whole wave with HTTP 400. The
+	// controller names the offending index in some versions and not others, so
+	// the index is read when present and bisected for otherwise: a single bad
+	// node must never block the pool. A node that keeps failing leaves the
+	// candidate query's oldest-first order and the wave moves on.
+	for attempt := 0; attempt < 24; attempt++ {
 		payload, err := marshalMihomoConfig(config)
 		if err != nil {
 			return nil, nil, fmt.Errorf("render verification config: %w", err)
@@ -75,15 +77,67 @@ func LoadVerificationProxies(ctx context.Context, instance MihomoConfig, nodes [
 		if status == http.StatusNoContent || status == http.StatusOK {
 			return names, picked, nil
 		}
+		if status != http.StatusBadRequest {
+			return nil, nil, fmt.Errorf("load verification proxies: controller answered %d: %s", status, clip(body))
+		}
 		index, ok := rejectedProxyIndex(body)
-		if status != http.StatusBadRequest || !ok || index < 0 || index >= len(config.Proxies) || len(config.Proxies) <= 1 {
-			return nil, nil, fmt.Errorf("load verification proxies: controller answered %d", status)
+		if !ok {
+			if index, err = findRejectedProxy(ctx, instance, config); err != nil {
+				return nil, nil, fmt.Errorf("load verification proxies: %w (controller said %s)", err, clip(body))
+			}
+		}
+		if index < 0 || index >= len(config.Proxies) || len(config.Proxies) <= 1 {
+			return nil, nil, fmt.Errorf("load verification proxies: controller answered %d: %s", status, clip(body))
 		}
 		config.Proxies = append(config.Proxies[:index], config.Proxies[index+1:]...)
 		names = append(names[:index], names[index+1:]...)
 		picked = append(picked[:index], picked[index+1:]...)
 	}
 	return nil, nil, errors.New("load verification proxies: every attempt rejected")
+}
+
+// findRejectedProxy locates one proxy that makes the controller reject the
+// config, using bisection so the verifier never depends on the controller's
+// error wording. The caller already knows the full set is rejected; every
+// subset containing the offender is rejected too, so halving is sound.
+func findRejectedProxy(ctx context.Context, instance MihomoConfig, config mihomoConfig) (int, error) {
+	lo, hi := 0, len(config.Proxies)
+	for hi-lo > 1 {
+		mid := lo + (hi-lo)/2
+		rejected, err := rejectsSubset(ctx, instance, config, lo, mid)
+		if err != nil {
+			return 0, err
+		}
+		if rejected {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	return lo, nil
+}
+
+func rejectsSubset(ctx context.Context, instance MihomoConfig, config mihomoConfig, from, to int) (bool, error) {
+	subset := config
+	subset.Proxies = config.Proxies[from:to]
+	payload, err := marshalMihomoConfig(subset)
+	if err != nil {
+		return false, err
+	}
+	status, _, err := putConfig(ctx, instance, payload)
+	if err != nil {
+		return false, err
+	}
+	return status == http.StatusBadRequest, nil
+}
+
+// clip keeps an upstream error readable in a log line.
+func clip(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 200 {
+		return s[:200] + "..."
+	}
+	return s
 }
 
 func putConfig(ctx context.Context, instance MihomoConfig, payload []byte) (int, string, error) {

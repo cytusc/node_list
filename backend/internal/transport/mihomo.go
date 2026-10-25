@@ -30,7 +30,10 @@ func (e *ProxyConfigError) Error() string {
 	return "代理配置参数不受当前 Mihomo 支持 (HTTP 400)"
 }
 
-var proxyErrorIndex = regexp.MustCompile(`^proxy ([0-9]+):`)
+// Unanchored on purpose: the controller sometimes prefixes the message (for
+// example {"message":"proxy 12: ..."}), and the bare index is unambiguous
+// enough. Bisection in LoadVerificationProxies covers the rest.
+var proxyErrorIndex = regexp.MustCompile(`proxy ([0-9]+):`)
 
 // mihomoConfig is the document sent to PUT /configs.
 type mihomoConfig struct {

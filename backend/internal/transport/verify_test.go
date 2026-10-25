@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -146,5 +147,50 @@ func TestProxyDelayProbesDirectEgress(t *testing.T) {
 	ok, err := ProxyDelay(context.Background(), MihomoConfig{Controller: server.URL}, DirectProxy, 2*time.Second)
 	if err != nil || !ok {
 		t.Fatalf("direct egress probe: ok=%v err=%v path=%s", ok, err, seen)
+	}
+}
+
+func TestLoadVerificationProxiesBisectsWhenMessageCarriesNoIndex(t *testing.T) {
+	loads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		loads++
+		var body struct {
+			Payload string `json:"payload"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		// Deliberately no "proxy N:" in the message: the verifier must locate
+		// the offender by bisection instead of parsing the text.
+		if strings.Contains(body.Payload, "bad-node-marker") {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message":"invalid config: unsupported cipher"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	nodes := make([]domain.Node, 0, 8)
+	for i := 0; i < 8; i++ {
+		host := fmt.Sprintf("192.0.2.%d", i+1)
+		if i == 5 {
+			host = "bad-node-marker"
+		}
+		nodes = append(nodes, domain.Node{Type: "http", Server: host, Port: "8080"})
+	}
+	names, picked, err := LoadVerificationProxies(context.Background(), MihomoConfig{Controller: server.URL}, nodes)
+	if err != nil {
+		t.Fatalf("bisection did not recover: %v (loads=%d)", err, loads)
+	}
+	if len(names) != 7 || len(picked) != 7 {
+		t.Fatalf("names=%d picked=%d", len(names), len(picked))
+	}
+	for _, index := range picked {
+		if index == 5 {
+			t.Fatal("offending node survived the bisection")
+		}
+	}
+	// 1 rejected full load + log2(8)=3 halvings + 1 accepted reload.
+	if loads > 8 {
+		t.Fatalf("bisection used %d loads", loads)
 	}
 }

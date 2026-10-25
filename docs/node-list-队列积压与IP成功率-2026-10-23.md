@@ -493,3 +493,51 @@ CPU 只有 0.02%，删除率归零。看起来像卡死，其实是**没有候�
 核验器自身 CPU 0.02%。所以「提 CPU / 提并发」在这个节点上没有收益——它是在等
 候选、等对照，不是在算。真正的容量瓶颈依次是：候选池（时效）→ 出口对照
 （已修）→ 注册表 advisory 锁（已把并发降到 6）。
+
+### 真正的吞吐杀手：一个从未被创建的索引（v1.5.74）
+
+删除节奏恢复后仍只有 **1.1 个/秒**（单事务约 0.9 秒），而且时间分布极其均匀——
+不是抢锁成簇，是事务本身慢。逐条查执行计划：
+
+```
+Delete on node_explorer_work (actual time=639.9..639.9 rows=0)
+  ->  Seq Scan on node_explorer_work (actual time=639.9..639.9)
+        Filter: kind <> '{attributes,risk}' AND (payload->>'identity') = 'x'
+        Rows Removed by Filter: 107840    Buffers: read=117742
+```
+
+**每删一个节点要全表扫 10.8 万行、1.2 GB 的 work 表，670 毫秒。**
+
+两层原因，缺一不可：
+
+1. 之前加的 `node_explorer_work_identity` 是**部分索引**
+   （`WHERE state <> 'done'`），而清理用的这条 DELETE 只按 identity 过滤、
+   不带 state 条件 → 条件不匹配，索引永远用不上；
+2. 更致命的是它**从来没被创建过**——`Migrate` 只在 `schemaVersion` 变化时
+   执行 `services.sql`，而改 SQL 时忘了 bump 版本。改 SQL 不 bump 版本是
+   **静默失效**：服务照常启动，语句一行都没跑。
+
+修复：
+
+- 索引改为全量 `(payload->>'identity')`（DELETE 无 state 条件）；
+- `schemaVersion` 从函数内常量提到包级并 bump 到 11，线上用
+  `CREATE INDEX CONCURRENTLY` 立刻补齐（不锁表）；
+- 四个迁移用例原本硬编码 `version=10`，改为引用 `schemaVersion`，以后 bump
+  不必再动测试。
+
+实测（同一波、同样 400 个候选）：
+
+| | 索引前 | 索引后 |
+|---|---|---|
+| 单次 DELETE | 670 ms | **0.03 ms** |
+| 删除速率 | 1.1 个/秒 | **9–12 个/秒** |
+| 一波结果 | deleted=315（21 个 lock timeout） | deleted=392，**vetoed=0** |
+| 10 分钟删除量 | ~660 | **5405** |
+
+配合「宽限期收到 6 小时」（`NODE_CLEANUP_MIN_AGE_SECONDS` 与
+`DEAD_VERIFY_MIN_AGE_SECONDS` 必须同值，否则门禁按默认 7 天把候选全部否决——
+这个坑踩过一次），2.2 万积压从「十余小时」变成约半小时。
+
+判断「队列是否在动」的正确姿势也因此补全了：**看 attempts、published_at、
+due_at 三者的关系，而不是 state**；排查「慢」时先 `EXPLAIN (ANALYZE, BUFFERS)`
+那条真正在跑的语句，别猜锁。
