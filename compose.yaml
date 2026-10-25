@@ -71,7 +71,7 @@ services:
       # 探测链路自身的健康对照端点：全部不通就视为出口故障，整批放行。
       SOURCE_PROBE_CONTROL: ${SOURCE_PROBE_CONTROL:-1.1.1.1:443,8.8.8.8:53,223.5.5.5:443}
       # 已判定死亡的连接在这个冷却期内不再被同源重新灌入（0 关闭）。
-      SOURCE_DELETED_COOLDOWN_HOURS: ${SOURCE_DELETED_COOLDOWN_HOURS:-72}
+      SOURCE_DELETED_COOLDOWN_HOURS: ${SOURCE_DELETED_COOLDOWN_HOURS:-12}
       SUBS_CHECK_DIR: /data/sub
     volumes:
       - type: bind

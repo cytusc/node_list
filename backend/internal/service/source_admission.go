@@ -68,7 +68,11 @@ func (r *Repository) RejectConfirmedFaults(ctx context.Context, nodes []domain.N
 // first_seen_at, which also restarts the seven-day age gate. The cooldown is
 // deliberately finite so a genuinely repaired node still comes back.
 func (r *Repository) RejectRecentlyDeleted(ctx context.Context, nodes []domain.Node) (map[int]string, error) {
-	hours := EnvInt("SOURCE_DELETED_COOLDOWN_HOURS", 72, 0, 8760)
+	// The cooldown is a throttle, not a verdict: this deployment judges a node
+	// dead after fifteen minutes, so blocking it for days would delay the
+	// recovery of a repaired one far beyond the evidence. Half a day is long
+	// enough to break the import thrash and short enough to notice a fix.
+	hours := EnvInt("SOURCE_DELETED_COOLDOWN_HOURS", 12, 0, 8760)
 	if hours <= 0 {
 		return nil, nil
 	}
