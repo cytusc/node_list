@@ -93,6 +93,9 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SET LOCAL statement_timeout = '5min'`); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('source-ingest-write'))`); err != nil {
 		return err
 	}
