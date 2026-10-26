@@ -468,38 +468,86 @@ select option {
 }
 .desktop-table th:first-child,
 .desktop-table td:first-child {
-  padding-left: 24px;
-}
-.desktop-table th:last-child,
-.desktop-table td:last-child {
-  padding-right: 18px;
+  padding-left: 12px;
 }
 .desktop-table td {
-  height: 78px;
-  padding-top: 12px;
-  padding-bottom: 12px;
+  height: 82px;
+  padding: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
 }
-.desktop-table th[data-column="country"] {
-  width: 16%;
-}
-.desktop-table th[data-column="name"] {
-  width: 34%;
-}
-.desktop-table th[data-column="type"] {
-  width: 15%;
-}
-.desktop-table th[data-column="features"] {
-  width: 16%;
+.desktop-table td > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .desktop-table th[data-column="speed"] {
-  width: 15%;
   text-align: right;
-}
-.desktop-table th[data-column="actions"] {
-  width: 4%;
 }
 .desktop-table table {
   table-layout: fixed;
+}
+.desktop-table [data-column="time"],
+.desktop-table [data-column="copy"] {
+  position: sticky;
+  z-index: 1;
+  background: var(--background);
+}
+.desktop-table [data-column="time"] {
+  right: 48px;
+  border-left: 1px solid var(--border);
+}
+.desktop-table [data-column="copy"] {
+  right: 0;
+  text-align: center;
+}
+.desktop-table
+  .node-row:hover
+  td:is([data-column="time"], [data-column="copy"]) {
+  background: var(--accent);
+}
+.desktop-table td[data-column="copy"] button {
+  width: 30px;
+  height: 30px;
+}
+.desktop-table .region-cell {
+  gap: 7px;
+}
+.desktop-table .identity-cell {
+  padding-right: 0;
+}
+.desktop-table .node-name {
+  font-size: 12px;
+}
+.desktop-table .node-address {
+  font-size: 10px;
+}
+.desktop-table .speed-cell {
+  min-width: 0;
+}
+.desktop-table .speed-number {
+  font-size: 12px;
+}
+.desktop-table .speed-track {
+  width: 100%;
+  max-width: 78px;
+}
+.desktop-table .ippure-ratio-values {
+  flex-wrap: wrap;
+  gap: 2px 4px;
+  font-size: 10px;
+}
+.desktop-table .node-times {
+  gap: 5px;
+  font-size: 10px;
+}
+.desktop-table .node-times > div {
+  flex-direction: column;
+  gap: 1px;
+}
+.desktop-table .node-times span {
+  font-size: 9px;
 }
 .sort-header {
   display: inline-flex;
@@ -846,18 +894,6 @@ select option {
   }
   .summary-line .summary-note {
     margin-left: 0;
-  }
-  .desktop-table th[data-column="name"] {
-    width: 30%;
-  }
-  .desktop-table th[data-column="country"] {
-    width: 17%;
-  }
-  .desktop-table th[data-column="features"] {
-    width: 15%;
-  }
-  .desktop-table th[data-column="actions"] {
-    width: 5%;
   }
 }
 @media (max-width: 767px) {

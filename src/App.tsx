@@ -193,10 +193,19 @@ function IPPureMetric({
       </span>
     );
   if (metric === "asnOrganization")
-    return <span>{result.asnOrganization || "待补采"}</span>;
-  if (metric === "source") return <span>{result.source || "—"}</span>;
+    return (
+      <span title={result.asnOrganization}>
+        {result.asnOrganization || "待补采"}
+      </span>
+    );
+  if (metric === "source")
+    return <span title={result.source}>{result.source || "—"}</span>;
   if (metric === "attributes")
-    return <span>{result.attributes?.join(" · ") || "—"}</span>;
+    return (
+      <span title={result.attributes?.join(" · ")}>
+        {result.attributes?.join(" · ") || "—"}
+      </span>
+    );
   if (metric === "score")
     return (
       <div className="ippure-metric">
@@ -348,23 +357,24 @@ const columnLabels: Record<string, string> = {
   media: "服务解锁",
   speed: "下载速度",
   time: "时间",
+  copy: "复制",
   ...Object.fromEntries(
     ippureMetrics.map(({ column, label }) => [column, label]),
   ),
 };
 const columnWidths: Record<string, number> = {
-  country: 130,
+  country: 100,
   name: 155,
-  type: 130,
-  asnOrganization: 160,
-  ipSource: 100,
-  ipAttributes: 110,
-  ippure: 150,
-  trafficRatio: 205,
-  media: 160,
-  speed: 125,
-  time: 225,
-  actions: 44,
+  type: 98,
+  asnOrganization: 128,
+  ipSource: 80,
+  ipAttributes: 95,
+  ippure: 100,
+  trafficRatio: 120,
+  media: 120,
+  speed: 100,
+  time: 150,
+  copy: 48,
 };
 const emptyNodes: NodeRecord[] = [];
 
@@ -647,27 +657,11 @@ export default function App() {
         cell: ({ row }) => <NodeTimes node={row.original} />,
       },
       {
-        id: "actions",
-        header: "",
+        id: "copy",
+        header: "复制",
         enableSorting: false,
         enableHiding: false,
-        cell: ({ row }) => (
-          <div className="flex items-center gap-2">
-            <CopyNodeButton node={row.original} />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="detail-button"
-              aria-label={`查看 ${plainName(row.original)} 详情`}
-              onClick={(e) => {
-                e.stopPropagation();
-                setSelected(row.original);
-              }}
-            >
-              <ArrowUpRight className="size-4" />
-            </Button>
-          </div>
-        ),
+        cell: ({ row }) => <CopyNodeButton node={row.original} />,
       },
     ],
     [maxSpeed, snapshot?.speedTest, snapshot?.mediaCheck],
@@ -1071,7 +1065,12 @@ export default function App() {
                           <TableHead
                             key={h.id}
                             data-column={h.column.id}
-                            style={{ width: columnWidths[h.column.id] || 150 }}
+                            style={{
+                              width:
+                                h.column.id === "name"
+                                  ? undefined
+                                  : columnWidths[h.column.id] || 150,
+                            }}
                           >
                             {h.column.getCanSort() ? (
                               <button
