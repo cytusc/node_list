@@ -84,19 +84,29 @@ $live = new LiveResults();
 $run = static fn (array $params): array => $live->query(ResultsQueryParser::fromQuery($params));
 
 // ---------------------------------------------------------------------------
-// 1. 视图口径：退役与下线节点必须被排除
+// 1. 视图口径：只由 available 决定节点是否展示
 // ---------------------------------------------------------------------------
 
 $all = $run([]);
-same(5, $all['totalNodes'], 'live 视图只含可用且未退役的节点');
+same(5, $all['totalNodes'], 'live 视图只含 available=true 的节点');
 same(0, $all['page'], '不分页时 page=0');
 same(0, $all['limit'], '不分页时 limit=0');
 same(5, count($all['nodes']), '不分页时返回全部节点');
 same('2026-10-18T00:00:00Z', $all['checkedAt'], '批次时间透传');
 
 $names = array_column($all['nodes'], 'name');
-ok(!in_array('🇺🇸 美国 99', $names, true), '退役节点不出现在结果里');
+ok(!in_array('🇺🇸 美国 99', $names, true), '历史退役且 available=false 的节点不出现在结果里');
 ok(!in_array('🇬🇧 英国 07', $names, true), 'available=false 的节点不出现在结果里');
+
+Db::statement("UPDATE node_explorer_node_registry SET available=true WHERE identity='id-us-retired'");
+try {
+    $withRetired = $run([]);
+    same(6, $withRetired['totalNodes'], '历史退役记录不能覆盖测活维护的 available=true');
+    ok(in_array('🇺🇸 美国 99', array_column($withRetired['nodes'], 'name'), true), '测活恢复可用后可正常展示');
+} finally {
+    Db::statement("UPDATE node_explorer_node_registry SET available=false WHERE identity='id-us-retired'");
+}
+
 
 // ---------------------------------------------------------------------------
 // 2. 分页

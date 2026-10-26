@@ -345,19 +345,6 @@ export default function Services() {
       attributes: p.coverage?.attributes ?? null,
     };
   });
-  const sweep = data?.sweep;
-  const phase = sweep?.running
-    ? ({ probing: "正在检测", committing: "正在提交", loading: "准备扫描" }[
-        sweep.phase ?? ""
-      ] ?? "扫描进行中")
-    : ({
-        completed: "本轮已完成",
-        partial: "部分完成，等待补测",
-        failed: "本轮失败",
-        cancelled: "本轮已取消",
-      }[sweep?.outcome ?? ""] ?? "等待下一轮");
-  const managerHealthy =
-    data?.services.find((s) => s.id === "mihomo-manager")?.status === "healthy";
   const sampleStale =
     data?.sampleStale ||
     (data?.sampledAt != null &&
@@ -556,7 +543,7 @@ export default function Services() {
                         ) : (
                           <div className="rounded-lg bg-muted/60 px-3 py-3 text-xs text-muted-foreground">
                             {service.id === "mihomo-manager"
-                              ? `${phase} · 已加载 ${number(data.kernel.loaded)} 个节点`
+                              ? `已加载 ${number(data.kernel.loaded)} 个节点`
                               : service.id === "source-ingest"
                                 ? "持续采集 · 按各来源周期同步"
                                 : service.id === "api"
@@ -582,26 +569,21 @@ export default function Services() {
               <Card>
                 <CardHeader>
                   <div className="flex items-center justify-between gap-2">
-                    <CardTitle className="text-base">扫描与执行进度</CardTitle>
+                    <CardTitle className="text-base">测活与执行状态</CardTitle>
                     <Badge variant="secondary">
-                      {managerHealthy ? phase : "manager 状态待确认"}
+                      {data.services.find((s) => s.id === "node-liveness")?.status === "healthy" ? "测活运行中" : "测活状态待确认"}
                     </Badge>
                   </div>
                   <CardDescription>
-                    检测进度与落库状态分别显示。
+                    测活独立调度，不受共享内核重载影响。
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-6">
-                  <Meter
-                    label={
-                      sweep?.kind === "retry"
-                        ? "补测轮次"
-                        : "当前 / 最近一轮扫描"
-                    }
-                    value={sweep?.processed ?? null}
-                    total={sweep?.candidates ?? null}
-                    note={`${number(sweep?.observations)} 条有效观测 · ${number(sweep?.skipped)} 条跳过 · ${number(sweep?.pending)} 条待补测。已处理数量含跳过，提交完成前不代表已落库。`}
-                  />
+                  <div className="grid grid-cols-3 gap-4 text-sm">
+                    <div>Xray 等待<p>{number(data.liveness.xrayQueued)}</p></div>
+                    <div>Mihomo 等待<p>{number(data.liveness.mihomoQueued)}</p></div>
+                    <div>在途节点<p>{number(data.liveness.inFlight)}</p></div>
+                  </div>
                   <Meter
                     label="出口执行槽占用"
                     value={
@@ -615,7 +597,7 @@ export default function Services() {
                     note="当前出口任务占用 / 配置容量；这是并发占用率，不是积压完成率。"
                   />
                   <div className="flex flex-wrap justify-between gap-2 border-t pt-4 text-xs text-muted-foreground">
-                    <span>下一轮 {time(sweep?.next_run_at)}</span>
+                    <span>最近测活落库 {time(data.liveness.lastCompletedAt)}</span>
                     <span>
                       最近重载暂停{" "}
                       {data.kernel.reloadPauseMillis == null
@@ -742,24 +724,6 @@ export default function Services() {
                   </p>
                   <p className="mt-2 text-xl font-semibold">
                     {data.current ? duration(work.oldest_seconds) : "—"}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground">
-                    进行中的恢复评估
-                  </p>
-                  <p className="mt-2 text-xl font-semibold">
-                    {number(data.current?.recovery.active)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground">
-                    恢复评估超过 10 分钟
-                  </p>
-                  <p
-                    className={`mt-2 text-xl font-semibold ${data.current?.recovery.stalled ? "text-amber-600 dark:text-amber-300" : ""}`}
-                  >
-                    {number(data.current?.recovery.stalled)}
                   </p>
                 </div>
               </CardContent>

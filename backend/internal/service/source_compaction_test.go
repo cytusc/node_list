@@ -3,9 +3,10 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"github.com/cytusc/node_list/backend/internal/domain"
 	"testing"
 	"time"
+
+	"github.com/cytusc/node_list/backend/internal/domain"
 )
 
 func TestSourceCompactionKeepsOneOccurrenceAndPreservesFacts(t *testing.T) {

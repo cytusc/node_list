@@ -23,16 +23,12 @@ func main() {
 	}
 }
 func run() error {
-	role := flag.String("role", "", "source, exit-provision, exit-attributes, recovery, mihomo-manager")
+	role := flag.String("role", "", "source, exit-provision, exit-attributes, mihomo-manager")
 	health := flag.Bool("health", false, "check persistent service heartbeat")
 	flag.Parse()
 	service.LoadEnv(service.Root())
 	switch *role {
-	case "source", "exit-provision", "exit-attributes", "recovery", "mihomo-manager":
-	case "dead-verify":
-		if !*health {
-			return fmt.Errorf("use the dead-verify command to start this service")
-		}
+	case "source", "exit-provision", "exit-attributes", "mihomo-manager":
 	default:
 		return fmt.Errorf("unknown worker role: %s", *role)
 	}

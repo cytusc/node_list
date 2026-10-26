@@ -91,7 +91,7 @@ n6 = {
     "speed": 1048576, "country": "US", "speedTest": True, "mediaCheck": True,
     "checkedAt": "2026-10-18T00:00:00Z",
 }
-nodes.append(("id-us-retired", 2, 3, n6, None, None, None, True, False))
+nodes.append(("id-us-retired", 2, 3, n6, None, None, None, False, False))
 
 n7 = {
     "name": "\U0001F1EC\U0001F1E7 英国 07", "baseName": "英国 07", "type": "vmess",
@@ -150,7 +150,7 @@ out.append("COMMIT;")
 body = "\n".join(out)
 
 header = (
-    "-- 集成测试数据：覆盖排序、筛选、facets、优选位、退役排除、不可用排除、IPv6 出口。\n"
+    "-- 集成测试数据：覆盖排序、筛选、facets、优选位、历史退役记录、不可用排除、IPv6 出口。\n"
     "-- 由 tests/fixtures/generate_seed.py 生成，不要手工编辑。\n"
     "-- 时间占位 __NOW2M__ 由 tests/fixtures/load.sh 在导入前替换成真实时间戳\n"
     "-- （优选位判定要求连通性/出口证据在 10 分钟内，固定时间会随时间失效）。\n")

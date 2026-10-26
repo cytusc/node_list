@@ -309,19 +309,3 @@ func TestNativeRoutingHonorsProxyTLSOptions(t *testing.T) {
 type connectivityRoundTrip func(*http.Request) (*http.Response, error)
 
 func (f connectivityRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-func TestConnectivityRequiresGstatic204(t *testing.T) {
-	for _, status := range []int{200, 204, 302, 403, 503} {
-		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			client := &http.Client{Transport: connectivityRoundTrip(func(r *http.Request) (*http.Response, error) {
-				if r.URL.String() != DelayTarget {
-					t.Fatalf("unexpected connectivity target: %s", r.URL)
-				}
-				return &http.Response{StatusCode: status, Body: http.NoBody, Header: make(http.Header), Request: r}, nil
-			})}
-			ok, err := ProbeHTTP(context.Background(), client)
-			if err != nil || ok != (status == 204) {
-				t.Fatalf("status %d: ok=%v err=%v", status, ok, err)
-			}
-		})
-	}
-}

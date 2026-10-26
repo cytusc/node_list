@@ -28,7 +28,6 @@ export type MonitorData = {
   current: {
     queues: Queue[];
     coverage: Coverage;
-    recovery: { active: number; stalled: number };
   } | null;
   kernel: {
     healthy: boolean;
@@ -39,20 +38,11 @@ export type MonitorData = {
     reloadPauseMillis: number | null;
     exitCapacity: number | null;
   };
-  sweep: {
-    running: boolean;
-    candidates: number | null;
-    processed: number | null;
-    observations: number | null;
-    skipped: number | null;
-    rejected: number | null;
-    pending: number | null;
-    phase: string | null;
-    outcome: string | null;
-    kind: string | null;
-    started_at: string | null;
-    finished_at: string | null;
-    next_run_at: string | null;
+  liveness: {
+    xrayQueued: number | null;
+    mihomoQueued: number | null;
+    inFlight: number | null;
+    lastCompletedAt: string | null;
   };
   hours: number;
   hourly: {
@@ -66,10 +56,9 @@ export const queueGroups: Record<string, { label: string; kinds: string[] }> = {
   all: { label: "所有任务", kinds: [] },
   "exit-provision": {
     label: "出口检测",
-    kinds: ["exit", "fast-delay", "connectivity"],
+    kinds: ["exit"],
   },
   "exit-attributes": { label: "IP 属性", kinds: ["attributes", "risk"] },
-  recovery: { label: "节点恢复", kinds: ["recovery", "normal-recovery", "lifecycle"] },
 };
 export function totals(queues: Queue[], group = "all") {
   const kinds = queueGroups[group]?.kinds ?? [];

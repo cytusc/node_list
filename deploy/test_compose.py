@@ -24,7 +24,7 @@ if [[ "$1" == compose && "$*" == *'config --format json'* ]]; then
   echo '{"name":"test-project","services":{}}'
 elif [[ "$1" == ps ]]; then
   [[ "$*" == *'label=com.docker.compose.project=test-project'* ]]
-  [[ "$*" == *'label=com.docker.compose.service=node-cleanup'* ]]
+  [[ "$*" == *'label=com.docker.compose.service=node-cleanup'* || "$*" == *'label=com.docker.compose.service=recovery'* || "$*" == *'label=com.docker.compose.service=dead-verify'* ]]
   printf 'old-cleanup-a\\nold-cleanup-b\\n'
 fi
 ''')
@@ -37,9 +37,9 @@ fi
             return (root / 'docker.log').read_text()
 
     def test_up_removes_only_retired_service_before_start(self):
-        actions = self.invoke('up', '-d', 'dead-verify')
+        actions = self.invoke('up', '-d', 'node-liveness')
         self.assertIn('rm -f old-cleanup-a\nrm -f old-cleanup-b\n', actions)
-        self.assertLess(actions.index('rm -f'), actions.index('up -d dead-verify'))
+        self.assertLess(actions.index('rm -f'), actions.index('up -d node-liveness'))
         self.assertNotIn('--remove-orphans', actions)
 
     def test_read_only_config_never_removes_containers(self):

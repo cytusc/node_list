@@ -2,8 +2,9 @@ package service
 
 import (
 	"context"
-	"github.com/jackc/pgx/v5"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Historical batches are ingestion envelopes, not a second node history store.

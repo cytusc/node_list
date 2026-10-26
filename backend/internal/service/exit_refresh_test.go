@@ -3,11 +3,12 @@ package service
 import (
 	"context"
 	"errors"
-	"github.com/cytusc/node_list/backend/internal/domain"
-	"github.com/cytusc/node_list/backend/internal/transport"
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/cytusc/node_list/backend/internal/domain"
+	"github.com/cytusc/node_list/backend/internal/transport"
 )
 
 func TestOrdinaryExitBackoffAndFreshEvidence(t *testing.T) {
@@ -45,7 +46,8 @@ func TestExitFailureBackoffPersistsAndFreshConnectivityAdvancesQueuedWork(t *tes
 	f := setup(t)
 	ctx := context.Background()
 	f.runner.Config.Role = "exit-provision"
-	f.runner.Config.HighRouter = transport.NewRouter(cleanupEngine{&http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) { return nil, errors.New("unreachable") })}})
+	f.exec(t, `UPDATE node_explorer_node_registry SET available=true WHERE identity=$1`, f.id)
+	f.runner.Config.HighRouter = transport.NewRouter(testEngine{&http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) { return nil, errors.New("unreachable") })}})
 	for attempt := 1; attempt <= 2; attempt++ {
 		if err := f.repo.Schedule(ctx, KindExit, f.id, Payload{Identity: f.id}, 1, time.Now()); err != nil {
 			t.Fatal(err)
@@ -53,6 +55,10 @@ func TestExitFailureBackoffPersistsAndFreshConnectivityAdvancesQueuedWork(t *tes
 		j := f.claim(t, KindExit)
 		if err := f.runner.exit(ctx, j, true); err != nil {
 			t.Fatal(err)
+		}
+		var available bool
+		if err := f.repo.Pool.QueryRow(ctx, `SELECT available FROM node_explorer_node_registry WHERE identity=$1`, f.id).Scan(&available); err != nil || !available {
+			t.Fatalf("exit failure changed availability: %v", err)
 		}
 		observed, err := f.repo.Exit(ctx, f.id)
 		if err != nil || observed.FailureStreak != attempt {

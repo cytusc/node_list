@@ -32,7 +32,7 @@ WITH observed AS (
  LEFT JOIN node_explorer_connectivity c USING(identity)
  LEFT JOIN node_explorer_exits e USING(identity)
  LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
- WHERE n.available AND NOT EXISTS(SELECT 1 FROM node_explorer_retired_nodes r WHERE r.identity=n.identity)
+ WHERE n.available
 )
 SELECT observed.*,
  CASE WHEN observed_country ~ '^[a-zA-Z]{2}$' THEN

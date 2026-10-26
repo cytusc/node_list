@@ -255,48 +255,22 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
 		if e != nil {
 			return e
 		}
-		// first_seen_at is "first ever seen", not "first seen in this incarnation".
-		// A re-delivered node inherits its tombstone time, so a death that was
-		// already verified keeps its age instead of restarting the seven-day
-		// gate — otherwise a source that re-delivers a dead node every few days
-		// keeps it in the registry forever.
-		_, err = tx.Exec(ctx, `INSERT INTO node_explorer_node_registry AS current(identity,node,snapshot_id,node_index,historical_residential,source_at,connection_key,first_seen_at)
- SELECT x.identity,x.node,x.snapshot_id,x.node_index,x.historical_residential,x.source_at,x.connection_key,coalesce(tomb.deleted_at,now())
+		// Source records start untested; only node-liveness owns availability.
+		_, err = tx.Exec(ctx, `INSERT INTO node_explorer_node_registry AS current(identity,node,snapshot_id,node_index,historical_residential,source_at,connection_key,first_seen_at,available)
+ SELECT x.identity,x.node,x.snapshot_id,x.node_index,x.historical_residential,x.source_at,x.connection_key,now(),false
  FROM jsonb_to_recordset($1::jsonb) AS x(identity text,node jsonb,snapshot_id integer,node_index integer,historical_residential boolean,source_at timestamptz,connection_key text)
  LEFT JOIN node_explorer_node_registry old USING(identity)
- LEFT JOIN node_explorer_deleted_nodes tomb USING(identity)
- WHERE NOT EXISTS(SELECT 1 FROM node_explorer_deleted_nodes d WHERE d.identity=x.identity AND x.source_at<=d.deleted_at)
- AND (old.identity IS NULL OR ($2 OR x.source_at>old.source_at OR (x.source_at=old.source_at AND x.snapshot_id>=old.snapshot_id))
- AND (NOT old.available OR old.node<>x.node OR old.snapshot_id<>x.snapshot_id OR old.node_index<>x.node_index OR old.source_at<>x.source_at OR old.connection_key<>x.connection_key OR (x.historical_residential AND NOT old.historical_residential)))
+ WHERE (old.identity IS NULL OR ($2 OR x.source_at>old.source_at OR (x.source_at=old.source_at AND x.snapshot_id>=old.snapshot_id))
+ AND (old.node<>x.node OR old.snapshot_id<>x.snapshot_id OR old.node_index<>x.node_index OR old.source_at<>x.source_at OR old.connection_key<>x.connection_key OR (x.historical_residential AND NOT old.historical_residential)))
  ON CONFLICT(identity) DO UPDATE SET node=CASE
  WHEN current.connection_key<>'' AND current.connection_key=EXCLUDED.connection_key
  AND coalesce(current.node->>'rawLink','')<>'' AND coalesce(EXCLUDED.node->>'rawLink','')=''
  THEN EXCLUDED.node || jsonb_build_object('rawLink',current.node->>'rawLink')
  ELSE EXCLUDED.node END,snapshot_id=EXCLUDED.snapshot_id,node_index=EXCLUDED.node_index,
- available=true,source_at=EXCLUDED.source_at,connection_key=EXCLUDED.connection_key,historical_residential=current.historical_residential OR EXCLUDED.historical_residential`, raw, full)
+ source_at=EXCLUDED.source_at,connection_key=EXCLUDED.connection_key,historical_residential=current.historical_residential OR EXCLUDED.historical_residential`, raw, full)
 		if err != nil {
 			return err
 		}
-	}
-	if full {
-		if _, err = tx.Exec(ctx, `UPDATE node_explorer_node_registry SET available=false WHERE available AND NOT(identity=ANY($1::text[]))`, ids); err != nil {
-			return err
-		}
-	}
-	// Collapse equivalent connection variants while retaining their identities,
-	// archived configs and runtime facts. A fresh usable observation wins first.
-	if _, err = tx.Exec(ctx, `WITH ranked AS (
- SELECT n.identity,row_number() OVER(PARTITION BY n.connection_key ORDER BY
- (e.ip<>'' AND coalesce(e.payload->>'error','')='') DESC NULLS LAST,
- (c.payload->>'reachable'='true') DESC NULLS LAST,
- n.source_at DESC,n.snapshot_id DESC,n.node_index,n.identity) AS position
- FROM node_explorer_node_registry n
- LEFT JOIN node_explorer_exits e USING(identity)
- LEFT JOIN node_explorer_connectivity c USING(identity)
- WHERE n.available AND n.connection_key<>''
- ) UPDATE node_explorer_node_registry n SET available=false
- FROM ranked r WHERE n.identity=r.identity AND r.position>1`); err != nil {
-		return err
 	}
 	batch := &pgx.Batch{}
 	for _, m := range markers {

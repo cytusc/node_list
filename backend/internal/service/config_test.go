@@ -26,49 +26,6 @@ func TestProbeServicesHaveIndependentConcurrency(t *testing.T) {
 	}
 }
 
-func TestRecoveryRoleDefaultsAndIntervalOverride(t *testing.T) {
-	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
-	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
-	t.Setenv("NORMAL_RECOVERY_INTERVAL_SECONDS", "")
-	t.Setenv("NORMAL_RECOVERY_CONCURRENCY", "")
-	cfg, err := ConfigFromEnv("recovery")
-	if err != nil || cfg.NormalRecoveryInterval != 20*time.Minute {
-		t.Fatalf("normal default: %+v %v", cfg, err)
-	}
-	r := Runner{Config: cfg}
-	want := []string{KindRecovery, KindNormalRecovery, KindFast, KindLive, KindLifecycle}
-	if kinds := r.kinds(); len(kinds) != len(want) || kinds[0] != KindRecovery || kinds[1] != KindNormalRecovery {
-		t.Fatalf("wrong queue: %v", kinds)
-	}
-	if r.laneCount(KindNormalRecovery, false) != 2 || ServiceName(cfg.Role) != "recovery" {
-		t.Fatal("wrong concurrency or heartbeat")
-	}
-	t.Setenv("NORMAL_RECOVERY_INTERVAL_SECONDS", "43200")
-	cfg, err = ConfigFromEnv("recovery")
-	if err != nil || cfg.NormalRecoveryInterval != 12*time.Hour {
-		t.Fatalf("interval override: %+v %v", cfg, err)
-	}
-}
-
-func TestNormalRecoveryConcurrencyOverride(t *testing.T) {
-	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
-	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
-	for _, n := range []string{"1", "2", "4", "8"} {
-		t.Run(n, func(t *testing.T) {
-			t.Setenv("NORMAL_RECOVERY_CONCURRENCY", n)
-			cfg, err := ConfigFromEnv("recovery")
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := Runner{Config: cfg}
-			repo := Repository{NormalRecoveryConcurrency: r.laneCount(KindNormalRecovery, false)}
-			if repo.normalRecoveryLimit() != Number("NORMAL_RECOVERY_CONCURRENCY", 2) {
-				t.Fatal("consumer and repository limits differ")
-			}
-		})
-	}
-}
-
 func TestExitProbeTimeoutConfig(t *testing.T) {
 	t.Setenv("MIHOMO_MANAGER_URL", "http://manager:9080")
 	t.Setenv("MIHOMO_MANAGER_TOKEN", "test")
@@ -85,7 +42,7 @@ func TestExitProbeTimeoutConfig(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("EXIT_PROBE_TIMEOUT_SECONDS", c.value)
-			cfg, err := ConfigFromEnv("recovery")
+			cfg, err := ConfigFromEnv("exit-provision")
 			if err != nil || cfg.ExitProbeTimeout != c.want {
 				t.Fatalf("exit probe timeout: %s %v", cfg.ExitProbeTimeout, err)
 			}
@@ -114,20 +71,12 @@ func TestManagedConcurrencyHonorsConfiguration(t *testing.T) {
 	if err != nil || cfg.LaneConcurrency[KindRisk] != 1 {
 		t.Fatalf("risk override: %+v %v", cfg, err)
 	}
-	cfg, err = ConfigFromEnv("recovery")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := Runner{Config: cfg, Repo: &Repository{}}
-	r.configureAdmission()
-	if r.Repo.normalRecoveryLimit() != 4 {
-		t.Fatal("managed assessments ignore configured bound")
-	}
+
 }
 
 func TestWorkersRequireManager(t *testing.T) {
 	t.Setenv("MIHOMO_MANAGER_URL", "")
-	for _, role := range []string{"exit-provision", "exit-attributes", "recovery"} {
+	for _, role := range []string{"exit-provision", "exit-attributes", "exit-provision"} {
 		if _, err := ConfigFromEnv(role); err == nil {
 			t.Fatalf("%s accepted missing manager", role)
 		}

@@ -4,11 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/collector"
@@ -52,23 +48,6 @@ func (r *Runner) reserve(ctx context.Context, nodes []domain.Node, high bool) (m
 	return out, release, nil
 }
 
-func (r *Runner) reference(ctx context.Context, exclude string) (*domain.Node, error) {
-	var raw []byte
-	err := r.Repo.Pool.QueryRow(ctx, `SELECT n.node FROM node_explorer_node_registry n JOIN node_explorer_connectivity c USING(identity)
-	WHERE n.available AND n.identity<>$1 AND c.payload->>'reachable'='true' AND c.checked_at>now()-interval '30 minutes'
-	AND NOT EXISTS(SELECT 1 FROM node_explorer_retired_nodes t WHERE t.identity=n.identity)
-	AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id) ORDER BY c.checked_at DESC LIMIT 1`, exclude).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	n := &domain.Node{}
-	err = json.Unmarshal(raw, n)
-	return n, err
-}
-
 // carriers returns up to limit recently verified nodes, in random order.
 //
 // Risk queries do not need this node's exit address: the API scores the IP in
@@ -88,7 +67,6 @@ var errNoCarrier = errors.New("no carrier available")
 func (r *Runner) carriers(ctx context.Context, exclude string, limit int) ([]domain.Node, error) {
 	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.node FROM node_explorer_node_registry n JOIN node_explorer_connectivity c USING(identity)
 	WHERE n.available AND n.identity<>$1 AND c.payload->>'reachable'='true' AND c.checked_at>now()-interval '24 hours'
-	AND NOT EXISTS(SELECT 1 FROM node_explorer_retired_nodes t WHERE t.identity=n.identity)
 	AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
 	ORDER BY (c.checked_at>now()-interval '2 hours') DESC, random() LIMIT $2`, exclude, limit)
 	if err != nil {
@@ -132,186 +110,6 @@ func (r *Runner) reserveOne(ctx context.Context, n domain.Node, high bool) (*tra
 	return path, release, nil
 }
 
-func reachable(ctx context.Context, client *http.Client, timeout time.Duration) bool {
-	probeCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	client.CloseIdleConnections()
-	ok, err := transport.ProbeHTTP(probeCtx, client)
-	return err == nil && ok
-}
-
-func (r *Runner) live(ctx context.Context, j Job, high bool) error {
-	t, err := r.Repo.probeTarget(ctx, j.Payload)
-	if err != nil {
-		return err
-	}
-	if t == nil || (j.Payload.Action != "cleanup" && !matchesRetirement(t, j.Payload)) {
-		return r.Repo.Finish(ctx, j, nil)
-	}
-	if j.Payload.Incarnation == "" {
-		j.Payload.Incarnation = t.Incarnation
-	}
-	nodes := []domain.Node{t.Node}
-	reference, err := r.reference(ctx, t.Identity)
-	if err != nil {
-		return err
-	}
-	if reference != nil {
-		nodes = append(nodes, *reference)
-	}
-	paths, release, err := r.reserve(ctx, nodes, high)
-	if err != nil {
-		return err
-	}
-	defer release()
-	ctx, cancelLease := pathContext(ctx, paths)
-	defer cancelLease()
-	if r.Config.Manager != nil {
-		if _, err = r.Repo.Pool.Exec(ctx, `UPDATE node_explorer_work SET payload=payload||jsonb_build_object('capacityAt',to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) WHERE id=$1 AND generation=$2 AND lease_token=$3 AND NOT(payload ? 'capacityAt')`, j.ID, j.Generation, j.Token); err != nil {
-			return err
-		}
-	}
-	v := domain.ConnectivityState{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), ProbeTarget: transport.DelayTarget}
-	path := paths[t.Identity]
-	if path != nil {
-		v.KernelGeneration = path.Generation
-	}
-	if path == nil || path.Error != nil {
-		v.Error = "连接配置不支持"
-	} else {
-		v.Reachable = reachable(ctx, path.Client, r.Config.Timeout)
-		if !v.Reachable {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(r.Config.RetryDelay):
-			}
-			v.Reachable = reachable(ctx, path.Client, r.Config.Timeout)
-			if !v.Reachable {
-				direct := &http.Client{Transport: &http.Transport{Proxy: nil}}
-				defer direct.CloseIdleConnections()
-				if reference != nil {
-					control := paths[domain.AggregateIdentity(*reference)]
-					v.ConfirmedDead = control != nil && control.Error == nil && reachable(ctx, direct, r.Config.Timeout) && reachable(ctx, control.Client, r.Config.Timeout)
-				}
-				v.Error = "两次连通性检测失败"
-				if !v.ConfirmedDead {
-					v.Error = "连通性未确认，对照不足"
-				}
-			}
-		}
-	}
-	v.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	return r.Repo.Finish(ctx, j, func(tx pgx.Tx) error {
-		if err := validatePaths(ctx, tx, paths); err != nil {
-			return err
-		}
-		return r.saveConnectivity(ctx, tx, j, t, v)
-	})
-}
-
-// Both delay success and failure review persist the same fenced connectivity proof.
-func (r *Runner) saveConnectivity(ctx context.Context, tx pgx.Tx, j Job, t *Target, v domain.ConnectivityState) error {
-	if v.Reachable && v.Error == "" {
-		if err := recordAvailable(ctx, tx, t.Identity, j.Payload.Incarnation, v.CheckedAt); err != nil {
-			return err
-		}
-	}
-	ok, err := guard(ctx, tx, j.Payload)
-	if err != nil || !ok {
-		return err
-	}
-	// guard holds the registry lock, serializing streak updates with lifecycle.
-	var previous domain.ConnectivityState
-	var raw []byte
-	err = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_connectivity WHERE identity=$1`, t.Identity).Scan(&raw)
-	if err != nil && err != pgx.ErrNoRows {
-		return err
-	}
-	if len(raw) > 0 {
-		if err = json.Unmarshal(raw, &previous); err != nil {
-			return err
-		}
-		if old, e := time.Parse(time.RFC3339Nano, previous.CheckedAt); e == nil {
-			stamp, _ := time.Parse(time.RFC3339Nano, v.CheckedAt)
-			if !stamp.After(old) {
-				return nil
-			}
-		}
-	}
-	if j.Payload.Action != "cleanup" {
-		v = accumulateFailures(previous, v)
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_connectivity(identity,checked_at,payload) VALUES($1,$2,$3)
-		ON CONFLICT(identity) DO UPDATE SET checked_at=EXCLUDED.checked_at,payload=EXCLUDED.payload
-		WHERE node_explorer_connectivity.checked_at<=EXCLUDED.checked_at`, t.Identity, v.CheckedAt, b); err != nil {
-		return err
-	}
-	if err = writeProbe(ctx, tx, j.Payload.Session, KindLive, t.Identity, v); err != nil {
-		return err
-	}
-	if v.ConfirmedDead && t.Retired == nil && j.Payload.Action != "cleanup" {
-		p := j.Payload
-		p.Action = "retire"
-		p.Session = j.Ref()
-		p.CheckedAt = v.CheckedAt
-		return once(ctx, tx, KindLifecycle, "retire:"+j.Ref(), p, j.Priority)
-	}
-	return nil
-}
-
-// StrongExit requires independent HTTPS echoes and rejects host egress. It is
-// shared by first and final recovery checks; normal monitoring uses fallbacks.
-func StrongExit(ctx context.Context, tunnel, host *http.Client) (string, error) {
-	get := func(client *http.Client, route string) (string, error) {
-		observed := ""
-		for _, endpoint := range []string{"https://api.ipify.org", "https://checkip.amazonaws.com"} {
-			req, e := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-			if e != nil {
-				return "", e
-			}
-			client.CloseIdleConnections()
-			resp, e := client.Do(req)
-			if e != nil {
-				return "", fmt.Errorf("%s %s: %s", route, req.URL.Hostname(), probeFailure(e))
-			}
-			b, re := io.ReadAll(io.LimitReader(resp.Body, 128))
-			resp.Body.Close()
-			ip := net.ParseIP(strings.TrimSpace(string(b)))
-			if re != nil {
-				return "", fmt.Errorf("%s %s: response read failed (%s)", route, req.URL.Hostname(), probeFailure(re))
-			}
-			if resp.StatusCode != 200 {
-				return "", fmt.Errorf("%s %s: HTTP %d", route, req.URL.Hostname(), resp.StatusCode)
-			}
-			if ip == nil || ip.To4() == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
-				return "", fmt.Errorf("%s %s: invalid public IPv4 echo", route, req.URL.Hostname())
-			}
-			if observed != "" && observed != ip.String() {
-				return "", fmt.Errorf("%s exit echoes disagree", route)
-			}
-			observed = ip.String()
-		}
-		return observed, nil
-	}
-	ip, err := get(tunnel, "proxy")
-	if err != nil {
-		return "", err
-	}
-	direct, err := get(host, "host")
-	if err != nil {
-		return "", err
-	}
-	if direct == ip {
-		return "", fmt.Errorf("exit cannot be distinguished from host egress")
-	}
-	return ip, nil
-}
-
 // exitProbeBudget derives the probe window from the batch count and leaves a
 // fixed margin for country lookup. The cap keeps it inside the task lease.
 func exitProbeBudget(timeout time.Duration) time.Duration {
@@ -327,7 +125,7 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	if err != nil {
 		return err
 	}
-	if !matchesRetirement(t, j.Payload) {
+	if t == nil {
 		return r.Repo.Finish(ctx, j, nil)
 	}
 	if j.Payload.Incarnation == "" {
@@ -355,17 +153,6 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	}
 	if path == nil || path.Error != nil {
 		v.Error = "连接配置不支持"
-	} else if j.Payload.Session != "" {
-		probeCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		defer cancel()
-		direct := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 10 * time.Second}
-		defer direct.CloseIdleConnections()
-		ip, e := StrongExit(probeCtx, path.Client, direct)
-		if e != nil {
-			v.Error = "真实出口核验失败：" + e.Error()
-		} else {
-			v.IP, v.Source, v.Verified, v.AddressFamily = ip, "ipify+aws", true, 4
-		}
 	} else {
 		timeout := r.Config.ExitProbeTimeout
 		probeCtx, cancel := context.WithTimeout(ctx, exitProbeBudget(timeout))
@@ -383,16 +170,15 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 	}
 	v.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	v.ProbeMillis = time.Since(started).Milliseconds()
-	checkExpectedExit(&v, j.Payload.ExpectedIP)
 	// The residential quick verdict talks to ip-api and needs a second pool
 	// connection for the provider quota, so it must never run inside Finish's
 	// transaction: holding one connection while asking for another deadlocks the
 	// pool (PGPOOL_MAX=8) and every waiting task burns its two-minute lease.
 	quickResidential := false
-	if v.Error == "" && v.AddressFamily == 4 && !strings.HasPrefix(j.Payload.Session, "recovery:") {
+	if v.Error == "" && v.AddressFamily == 4 {
 		quickResidential = r.residentialQuickVerdict(ctx, v.IP)
 	}
-	if j.Payload.Session == "" && v.Error != "" {
+	if v.Error != "" {
 		v.FailureStreak = 1
 		if previous != nil && previous.Error != "" && (previous.Incarnation == "" || previous.Incarnation == t.Incarnation) {
 			v.FailureStreak = min(16, max(1, previous.FailureStreak)+1)
@@ -408,7 +194,7 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 			return e
 		}
 		// Retain the last observed address for diagnostics on failure, while
-		// clearing verification so it cannot authorize recovery or preference.
+		// clearing verification so it cannot authorize preferred sorting.
 		if v.IP == "" {
 			_ = tx.QueryRow(ctx, `SELECT ip FROM node_explorer_exits WHERE identity=$1`, t.Identity).Scan(&v.IP)
 		}
@@ -423,10 +209,7 @@ func (r *Runner) exit(ctx context.Context, j Job, high bool) error {
 		if e != nil && e != pgx.ErrNoRows {
 			return e
 		}
-		if e = writeProbe(ctx, tx, j.Payload.Session, KindExit, t.Identity, v); e != nil {
-			return e
-		}
-		if v.Error == "" && v.AddressFamily == 4 && !strings.HasPrefix(j.Payload.Session, "recovery:") {
+		if v.Error == "" && v.AddressFamily == 4 {
 			// 住宅快判：ip-api 批量端点加权结果确认住宅时跳过完整属性加权，
 			// 直接投 IPPure 风险查询；误判由 attributes() 的属性新鲜度门回补。
 			kinds := []string{KindAttributes, KindRisk}
@@ -476,9 +259,6 @@ func (r *Runner) rejectedExit(ctx context.Context, j Job, t *Target, cause error
 		ON CONFLICT(identity) DO UPDATE SET checked_at=EXCLUDED.checked_at,
 		payload=EXCLUDED.payload||jsonb_build_object('ip',node_explorer_exits.ip)
 		WHERE node_explorer_exits.checked_at<=EXCLUDED.checked_at`, t.Identity, v.CheckedAt, b); err != nil {
-			return err
-		}
-		if err = writeProbe(ctx, tx, j.Payload.Session, KindExit, t.Identity, v); err != nil {
 			return err
 		}
 		if err = recur(ctx, tx, j, 6*time.Hour); err != nil {

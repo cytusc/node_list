@@ -144,9 +144,6 @@ func TestManagerHealthProbeTimeoutStillInvalidatesKernel(t *testing.T) {
 	if err := m.Check(context.Background()); err == nil || m.Stats().Healthy {
 		t.Fatalf("unresponsive controller considered healthy: %v", err)
 	}
-	if err := m.Generation(context.Background(), m.Stats().Generation); err == nil {
-		t.Fatal("unhealthy kernel accepted as commit evidence")
-	}
 }
 
 func TestRealManagerCancellationAndRecoveryThroughHTTP(t *testing.T) {
@@ -181,7 +178,7 @@ func TestRealManagerCancellationAndRecoveryThroughHTTP(t *testing.T) {
 	if err := m.Check(ctx); err == nil || m.Stats().Healthy {
 		t.Fatal("real kernel state loss was not detected")
 	}
-	if err := client.Generation(ctx, lease.Generation); err == nil {
+	if err := client.call(ctx, http.MethodPost, "/v1/leases/"+lease.ID+"/validate", nil, nil); err == nil {
 		t.Fatal("lost kernel accepted as evidence")
 	}
 	if err := m.Sync(ctx, targets); err != nil {

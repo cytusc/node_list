@@ -83,40 +83,6 @@ func TestManagerSyncIncludesQilanECHResolverPolicy(t *testing.T) {
 	}
 }
 
-func fakeManager(t *testing.T) (*Manager, *atomic.Bool, *atomic.Int32) {
-	t.Helper()
-	failed := &atomic.Bool{}
-	reloads := &atomic.Int32{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if failed.Load() {
-			w.WriteHeader(500)
-			return
-		}
-		if r.Method == http.MethodPut {
-			reloads.Add(1)
-			var body map[string]string
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			var config mihomoConfig
-			_ = yaml.Unmarshal([]byte(body["payload"]), &config)
-			for i, p := range config.Proxies {
-				if p["type"] == "invalid" {
-					w.WriteHeader(400)
-					_ = json.NewEncoder(w).Encode(map[string]string{"message": fmt.Sprintf("proxy %d: invalid", i)})
-					return
-				}
-			}
-			w.WriteHeader(204)
-			return
-		}
-		if strings.Contains(r.URL.Path, "/delay") {
-			w.WriteHeader(503)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"name": "proxy", "extra": map[string]any{DelayTarget: map[string]any{"alive": false, "history": []map[string]any{{"time": time.Now(), "delay": 0}}}}})
-	}))
-	t.Cleanup(server.Close)
-	return NewManager(MihomoConfig{Controller: server.URL, ProxyURL: "http://localhost:7890", Secret: "controller"}), failed, reloads
-}
 func TestManagerFencesReloadExpiryAndRestart(t *testing.T) {
 	m, failed, reloads := fakeManager(t)
 	ctx := context.Background()
@@ -130,7 +96,7 @@ func TestManagerFencesReloadExpiryAndRestart(t *testing.T) {
 	if err := m.Sync(ctx, entries); err != nil || reloads.Load() != 1 {
 		t.Fatalf("unchanged config reloaded: %v", err)
 	}
-	l, err := m.Acquire(LeaseRequest{Targets: entries[:1], Kind: "strict"})
+	l, err := m.Acquire(LeaseRequest{Targets: entries[:1], Kind: "exit"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +110,7 @@ func TestManagerFencesReloadExpiryAndRestart(t *testing.T) {
 	for m.Stats().Healthy && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if _, err = m.Acquire(LeaseRequest{Targets: entries[:1], Kind: "strict"}); err == nil {
+	if _, err = m.Acquire(LeaseRequest{Targets: entries[:1], Kind: "exit"}); err == nil {
 		t.Fatal("new lease admitted while draining")
 	}
 	select {
@@ -166,7 +132,7 @@ func TestManagerFencesReloadExpiryAndRestart(t *testing.T) {
 	if m.Stats().Generation == generation {
 		t.Fatal("reload did not advance generation")
 	}
-	l, err = m.Acquire(LeaseRequest{Targets: entries[:1], Kind: "strict"})
+	l, err = m.Acquire(LeaseRequest{Targets: entries[:1], Kind: "exit"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,27 +166,6 @@ func TestManagerQuarantinesAndRestores(t *testing.T) {
 	}
 	if string(m.lastPayload) != previous || m.Stats().Healthy {
 		t.Fatal("failed update replaced valid state")
-	}
-}
-func TestManagerAPIAuthAndDelaySeparation(t *testing.T) {
-	m, _, _ := fakeManager(t)
-	e := entry("a")
-	if err := m.Sync(context.Background(), []RegistryEntry{e}); err != nil {
-		t.Fatal(err)
-	}
-	api := httptest.NewServer(m.Handler("internal"))
-	defer api.Close()
-	resp, err := http.Get(api.URL + "/v1/health")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Fatal("missing auth accepted")
-	}
-	result, err := m.Delay(context.Background(), LeaseRequest{Targets: []RegistryEntry{e}})
-	if err != nil || result.Success || result.Generation == "" {
-		t.Fatalf("node timeout must remain a fast-only failure: %+v %v", result, err)
 	}
 }
 func sparePort(t *testing.T) int {
@@ -282,7 +227,7 @@ func TestRealManagerAcceptsXHTTPShareLinkOptions(t *testing.T) {
 	if err := m.Sync(ctx, []RegistryEntry{e}); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := m.Acquire(LeaseRequest{Targets: []RegistryEntry{e}, Kind: "strict"})
+	lease, err := m.Acquire(LeaseRequest{Targets: []RegistryEntry{e}, Kind: "exit"})
 	if err != nil {
 		t.Fatalf("Mihomo rejected converted XHTTP options: %v", err)
 	}
@@ -306,7 +251,7 @@ func TestRealManagerRouteIsolation(t *testing.T) {
 	if err := m.Sync(ctx, entries); err != nil {
 		t.Fatal(err)
 	}
-	l, err := m.Acquire(LeaseRequest{Targets: entries, Kind: "strict"})
+	l, err := m.Acquire(LeaseRequest{Targets: entries, Kind: "exit"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,101 +326,6 @@ func TestRealManagerAcceptsQilanECHResolverConfig(t *testing.T) {
 	}
 }
 
-func TestRealManagerThousandTimeouts(t *testing.T) {
-	if os.Getenv("MIHOMO_TIMEOUT_BENCH") != "1" {
-		t.Skip("set MIHOMO_TIMEOUT_BENCH=1 for the 1000-node, 2-second timeout acceptance test")
-	}
-	m := realManager(t)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { time.Sleep(2200 * time.Millisecond); w.WriteHeader(502) }))
-	defer upstream.Close()
-	_, port, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
-	entries := make([]RegistryEntry, 1000)
-	for i := range entries {
-		entries[i] = entry(fmt.Sprint(i))
-		entries[i].Node.RawConfig["port"] = atoi(port)
-		entries[i].Node.Port = port
-		entries[i].Digest = ConfigDigest(entries[i].Node)
-	}
-	if err := m.Sync(context.Background(), entries); err != nil {
-		t.Fatal(err)
-	}
-	start := time.Now()
-	jobs := make(chan RegistryEntry)
-	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for e := range jobs {
-				v, err := m.Delay(context.Background(), LeaseRequest{Targets: []RegistryEntry{e}})
-				if err != nil || v.Success {
-					t.Errorf("expected node timeout: %+v %v", v, err)
-				}
-			}
-		}()
-	}
-	for _, e := range entries {
-		jobs <- e
-	}
-	close(jobs)
-	wg.Wait()
-	elapsed := time.Since(start)
-	t.Logf("1000 2-second timeouts, concurrency 32: %s", elapsed)
-	if elapsed > 90*time.Second {
-		t.Fatalf("timeout round exceeded 90 seconds: %s", elapsed)
-	}
-}
-
-func TestFastResidentialReservationAndBorrowing(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m, _, _ := fakeManager(t)
-	if err := m.Sync(ctx, []RegistryEntry{entry("a")}); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate a full ordinary lane and a queued residential call.
-	m.mu.Lock()
-	m.fast = 32
-	m.fastNormal = 32
-	m.mu.Unlock()
-	done := make(chan error, 1)
-	go func() {
-		_, err := m.Delay(ctx, LeaseRequest{Targets: []RegistryEntry{entry("a")}, High: true})
-		done <- err
-	}()
-	deadline := time.Now().Add(time.Second)
-	for {
-		m.mu.Lock()
-		waiting := m.highWaiting
-		m.mu.Unlock()
-		if waiting > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("residential did not queue")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	// One normal completion must admit the waiting residential request.
-	m.mu.Lock()
-	m.fast--
-	m.fastNormal--
-	m.mu.Unlock()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("residential starved")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.highWaiting != 0 || m.fast != 31 || m.fastNormal != 31 {
-		t.Fatalf("reserved capacity not returned: waiting=%d fast=%d normal=%d", m.highWaiting, m.fast, m.fastNormal)
-	}
-}
-
 func TestManagerBatchIsolationPreservesRegistry(t *testing.T) {
 	m, _, _ := fakeManager(t)
 	entries := make([]RegistryEntry, 300)
@@ -523,57 +373,42 @@ func TestManagerSuccessfulRollbackKeepsPriorGeneration(t *testing.T) {
 	if s := m.Stats(); !s.Healthy || s.Generation != generation {
 		t.Fatalf("rollback lost usable prior state: %+v", s)
 	}
-	if _, err := m.Acquire(LeaseRequest{Targets: []RegistryEntry{entry("a")}, Kind: "strict"}); err != nil {
+	if _, err := m.Acquire(LeaseRequest{Targets: []RegistryEntry{entry("a")}, Kind: "exit"}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestManagerPauseIsBackpressureWithoutAbnormalResult(t *testing.T) {
-	m, _, _ := fakeManager(t)
-	if err := m.Sync(context.Background(), []RegistryEntry{entry("a")}); err != nil {
-		t.Fatal(err)
-	}
-	var counted atomic.Int32
-	m.OnDelay = func(context.Context, bool, bool) { counted.Add(1) }
-	m.mu.Lock()
-	m.reloading = true
-	m.mu.Unlock()
-	api := httptest.NewServer(m.Handler("test"))
-	defer api.Close()
-	client := ManagerClient{URL: api.URL, Token: "test"}
-	_, err := client.Delay(context.Background(), entry("a").Node, "", false)
-	if !errors.Is(err, ErrManagerBusy) || counted.Load() != 0 {
-		t.Fatalf("pause became abnormal: %v count=%d", err, counted.Load())
-	}
-}
-
-func TestRealManagerDelayRequiresExpected204(t *testing.T) {
-	m := realManager(t)
-	e := entry("status-check")
-	e.Node.RawConfig["type"] = "direct"
-	e.Node.Type = "direct"
-	e.Digest = ConfigDigest(e.Node)
-	ctx := context.Background()
-	if err := m.Sync(ctx, []RegistryEntry{e}); err != nil {
-		t.Fatal(err)
-	}
-	// Zero-latency responses exercise Mihomo's 0ms rounding; a delayed response
-	// proves non-204 rejection is independent of the /delay HTTP status.
-	for _, latency := range []time.Duration{0, 5 * time.Millisecond} {
-		for _, status := range []int{200, 204, 301, 403, 500, 204} {
-			t.Run(fmt.Sprintf("status=%d/latency=%s", status, latency), func(t *testing.T) {
-				var requests atomic.Int32
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					requests.Add(1)
-					time.Sleep(latency)
-					w.WriteHeader(status)
-				}))
-				defer server.Close()
-				result, err := m.delay(ctx, LeaseRequest{Targets: []RegistryEntry{e}}, server.URL)
-				if err != nil || result.Success != (status == 204) || result.CheckedAt.IsZero() || requests.Load() == 0 {
-					t.Fatalf("HTTP %d classified incorrectly: result=%+v err=%v requests=%d", status, result, err, requests.Load())
-				}
-			})
+func fakeManager(t *testing.T) (*Manager, *atomic.Bool, *atomic.Int32) {
+	t.Helper()
+	failed := &atomic.Bool{}
+	reloads := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failed.Load() {
+			w.WriteHeader(500)
+			return
 		}
-	}
+		if r.Method == http.MethodPut {
+			reloads.Add(1)
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			var config mihomoConfig
+			_ = yaml.Unmarshal([]byte(body["payload"]), &config)
+			for i, p := range config.Proxies {
+				if p["type"] == "invalid" {
+					w.WriteHeader(400)
+					_ = json.NewEncoder(w).Encode(map[string]string{"message": fmt.Sprintf("proxy %d: invalid", i)})
+					return
+				}
+			}
+			w.WriteHeader(204)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/delay") {
+			w.WriteHeader(503)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "proxy", "extra": map[string]any{"unused": map[string]any{"alive": false, "history": []map[string]any{{"time": time.Now(), "delay": 0}}}}})
+	}))
+	t.Cleanup(server.Close)
+	return NewManager(MihomoConfig{Controller: server.URL, ProxyURL: "http://localhost:7890", Secret: "controller"}), failed, reloads
 }

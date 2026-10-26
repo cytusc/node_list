@@ -1,4 +1,4 @@
--- 集成测试数据：覆盖排序、筛选、facets、优选位、退役排除、不可用排除、IPv6 出口。
+-- 集成测试数据：覆盖排序、筛选、facets、优选位、历史退役记录、不可用排除、IPv6 出口。
 -- 由 tests/fixtures/generate_seed.py 生成，不要手工编辑。
 -- 时间占位 __NOW2M__ 由 tests/fixtures/load.sh 在导入前替换成真实时间戳
 -- （优选位判定要求连通性/出口证据在 10 分钟内，固定时间会随时间失效）。
@@ -20,7 +20,7 @@ INSERT INTO node_explorer_node_registry (identity,node,snapshot_id,node_index,hi
 INSERT INTO node_explorer_connectivity (identity,checked_at,payload) VALUES ('id-sg-hy2', now()-interval '2 minutes', $json${"reachable":false,"checkedAt":"__NOW2M__","error":"dial timeout"}$json$);
 INSERT INTO node_explorer_exits (identity,ip,version,checked_at,payload) VALUES ('id-sg-hy2','203.0.113.40',3,now()-interval '2 minutes',$json${"ip":"203.0.113.40","addressFamily":6,"country":"SG","checkedAt":"__NOW2M__","source":"ip.sb","error":""}$json$);
 INSERT INTO node_explorer_node_registry (identity,node,snapshot_id,node_index,historical_residential,available) VALUES ('id-hk-ss',$json${"name":"🇭🇰 香港 03","baseName":"香港 03","type":"ss","server":"198.51.100.10","port":8443,"tls":false,"udp":true,"network":"tcp","speed":7340032,"country":"","media":[{"platform":"Netflix","tag":"限自制剧"}],"speedTest":true,"mediaCheck":true,"checkedAt":"2026-10-18T00:00:00Z"}$json$,2,2,false,true);
-INSERT INTO node_explorer_node_registry (identity,node,snapshot_id,node_index,historical_residential,available) VALUES ('id-us-retired',$json${"name":"🇺🇸 美国 99","baseName":"美国 99","type":"ss","server":"198.51.100.99","port":443,"tls":true,"udp":true,"network":"tcp","speed":1048576,"country":"US","speedTest":true,"mediaCheck":true,"checkedAt":"2026-10-18T00:00:00Z"}$json$,2,3,false,true);
+INSERT INTO node_explorer_node_registry (identity,node,snapshot_id,node_index,historical_residential,available) VALUES ('id-us-retired',$json${"name":"🇺🇸 美国 99","baseName":"美国 99","type":"ss","server":"198.51.100.99","port":443,"tls":true,"udp":true,"network":"tcp","speed":1048576,"country":"US","speedTest":true,"mediaCheck":true,"checkedAt":"2026-10-18T00:00:00Z"}$json$,2,3,false,false);
 INSERT INTO node_explorer_node_registry (identity,node,snapshot_id,node_index,historical_residential,available) VALUES ('id-gb-unavail',$json${"name":"🇬🇧 英国 07","baseName":"英国 07","type":"vmess","server":"198.51.100.70","port":443,"tls":true,"udp":false,"network":"ws","speed":3145728,"country":"GB","speedTest":true,"mediaCheck":true,"checkedAt":"2026-10-18T00:00:00Z"}$json$,2,4,false,false);
 INSERT INTO node_explorer_retired_nodes (identity,retired_at,reason) VALUES ('id-us-retired','2026-10-17T20:00:00Z','github-unreachable');
 COMMIT;

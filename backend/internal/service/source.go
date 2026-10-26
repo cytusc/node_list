@@ -54,11 +54,7 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 	monitorDone := make(chan struct{})
 	go func() { defer close(monitorDone); r.runMonitor(monitorCtx) }()
 	defer func() { stopMonitor(); <-monitorDone }()
-	// Cheapest first: the tombstone check is one indexed lookup per identity and
-	// removes the bulk of a re-delivered dead batch, the fault check is a few
-	// SQL round trips, and the endpoint dial — by far the slowest — only sees
-	// what survived both.
-	ingestor := store.NewPersistentIngestor(st, r.RejectRecentlyDeleted, r.RejectConfirmedFaults, r.RejectUnreachableEndpoints)
+	ingestor := store.NewPersistentIngestor(st)
 	dir := Env("SUBS_CHECK_DIR", filepath.Join(Root(), "data", "sub"))
 	results := Env("RESULTS_FILE", filepath.Join(dir, "config", "cache", "config", "results.json"))
 	clash, links := filepath.Join(dir, "output", "all.yaml"), filepath.Join(dir, "output", "base64.txt")
@@ -139,9 +135,7 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 		case <-tick.C:
 			if time.Since(lastSweep) >= time.Hour {
 				// Network sessions cannot remain valid for more than three minutes.
-				_, _ = r.Pool.Exec(ctx, `DELETE FROM node_explorer_probe_results WHERE checked_at<now()-interval '2 days'`)
 				_ = r.pruneCompletedWork(ctx)
-				_, _ = r.Pool.Exec(ctx, `DELETE FROM node_explorer_lifecycle_events WHERE created_at<now()-interval '30 days'`)
 				if err := r.pruneSources(ctx, retentionDays); err != nil {
 					return err
 				}
@@ -176,32 +170,16 @@ func (r *Repository) pruneSources(ctx context.Context, days int) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_ippure_results WHERE snapshot_id IN (SELECT id FROM node_explorer_snapshots s WHERE imported_at<$1 AND NOT EXISTS(SELECT 1 FROM node_explorer_node_registry n WHERE n.snapshot_id=s.id AND n.available))`, cutoff); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_ippure_results WHERE snapshot_id IN (SELECT id FROM node_explorer_snapshots s WHERE imported_at<$1 AND NOT EXISTS(SELECT 1 FROM node_explorer_node_registry n WHERE n.snapshot_id=s.id))`, cutoff); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_snapshots s WHERE imported_at<$1 AND NOT EXISTS(SELECT 1 FROM node_explorer_node_registry n WHERE n.snapshot_id=s.id AND n.available)`, cutoff); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_snapshots s WHERE imported_at<$1 AND NOT EXISTS(SELECT 1 FROM node_explorer_node_registry n WHERE n.snapshot_id=s.id)`, cutoff); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-// Recovery rows are durable verification markers, not expiring probe sessions.
-// Normal-recovery markers are the one exception: a completed assessment whose
-// result is older than the retention window no longer gates anything - either
-// its retirement still qualifies and schedule starts a fresh assessment, or the
-// marker is residue from a restoration. Fresh markers stay because the staged
-// cadence reads their last result into the next attempt (config-rejected ones
-// are always fresher than six hours, so they survive every pass).
-//
-// Rows with no checkedAt keep the legacy due_at bucket as their timestamp.
 func (r *Repository) pruneCompletedWork(ctx context.Context) error {
-	if _, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_recovery_events WHERE checked_at<now()-interval '2 hours'`); err != nil {
-		return err
-	}
-	if _, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_work w WHERE w.kind='normal-recovery' AND w.state='done'
-	AND (CASE WHEN w.payload ? 'checkedAt' THEN (w.payload->>'checkedAt')::timestamptz ELSE w.due_at END)<now()-interval '30 days'`); err != nil {
-		return err
-	}
-	_, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_work WHERE state='done' AND kind NOT IN ('recovery','normal-recovery') AND due_at<now()-interval '2 days'`)
+	_, err := r.Pool.Exec(ctx, `DELETE FROM node_explorer_work WHERE state='done' AND due_at<now()-interval '2 days'`)
 	return err
 }

@@ -3,10 +3,11 @@ package service
 import (
 	"context"
 	"errors"
-	"github.com/cytusc/node_list/backend/internal/transport"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cytusc/node_list/backend/internal/transport"
 )
 
 type admissionQueue struct {

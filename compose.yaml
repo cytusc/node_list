@@ -1,4 +1,4 @@
-# Seven independently restartable application services. PostgreSQL is an existing external service.
+# Six independently restartable application services. PostgreSQL is an existing external service.
 x-environment: &environment
   PGHOST: ${PGHOST:?Set PGHOST in .env}
   PGPORT: ${PGPORT:-5432}
@@ -13,8 +13,6 @@ x-environment: &environment
   MIHOMO_RISK_CONCURRENCY: ${MIHOMO_RISK_CONCURRENCY:-2}
   MIHOMO_MANAGER_URL: http://mihomo-manager:9080
   MIHOMO_MANAGER_TOKEN: ${MIHOMO_MANAGER_TOKEN:?Set MIHOMO_MANAGER_TOKEN in .env}
-  # Validation mode suppresses automatic retirement, restore and physical deletion.
-  LIFECYCLE_DRY_RUN: ${LIFECYCLE_DRY_RUN:-true}
 x-app: &app
   image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-latest}
   restart: unless-stopped
@@ -68,15 +66,6 @@ services:
       <<: *environment
       SOURCE_PROVIDERS: ${SOURCE_PROVIDERS:-subs-check,proxio-all,Jakee-http,xyzs996-all}
       PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS: ${PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS:-1800}
-      # 入库前的端点拨号（0 关闭）。端口完全不通的节点直接不入库，趁它们是
-      # 垃圾而不是等它们进注册表再删。UDP 传输不参与。
-      SOURCE_PROBE_SECONDS: ${SOURCE_PROBE_SECONDS:-3}
-      SOURCE_PROBE_CONCURRENCY: ${SOURCE_PROBE_CONCURRENCY:-256}
-      SOURCE_PROBE_BUDGET_SECONDS: ${SOURCE_PROBE_BUDGET_SECONDS:-120}
-      # 探测链路自身的健康对照端点：全部不通就视为出口故障，整批放行。
-      SOURCE_PROBE_CONTROL: ${SOURCE_PROBE_CONTROL:-1.1.1.1:443,8.8.8.8:53,223.5.5.5:443}
-      # 已判定死亡的连接在这个冷却期内不再被同源重新灌入（0 关闭）。
-      SOURCE_DELETED_COOLDOWN_HOURS: ${SOURCE_DELETED_COOLDOWN_HOURS:-12}
       SUBS_CHECK_DIR: /data/sub
     volumes:
       - type: bind
@@ -133,50 +122,25 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 60s
-  recovery:
-    <<: *worker
-    command: [node-worker, -role, recovery]
+  node-liveness:
+    <<: *app
+    command: [node-liveness]
     environment:
-      <<: *environment
-      NORMAL_RECOVERY_CONCURRENCY: ${NORMAL_RECOVERY_CONCURRENCY:-8}
-      NORMAL_RECOVERY_INTERVAL_SECONDS: ${NORMAL_RECOVERY_INTERVAL_SECONDS:-1200}
-      RECOVERY_RECOVERY_CONCURRENCY: ${RECOVERY_RECOVERY_CONCURRENCY:-2}
-      RECOVERY_LIFECYCLE_CONCURRENCY: ${RECOVERY_LIFECYCLE_CONCURRENCY:-1}
-      # 二验探针 lane：退役与恢复评估的受控连通性探针走这里，
-      # 此处控制恢复探针并发，不影响 dead-verify 的核验并发。
-      RECOVERY_LIVE_CONCURRENCY: ${RECOVERY_LIVE_CONCURRENCY:-2}
-    depends_on:
-      task-redis: { condition: service_healthy }
-      mihomo-manager: { condition: service_healthy }
+      PGHOST: ${PGHOST:?Set PGHOST in .env}
+      PGPORT: ${PGPORT:-5432}
+      PGDATABASE: ${PGDATABASE:?Set PGDATABASE in .env}
+      PGUSER: ${PGUSER:?Set PGUSER in .env}
+      PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+      PGSSLMODE: ${PGSSLMODE:-prefer}
+      LIVENESS_XRAY_WORKERS: ${LIVENESS_XRAY_WORKERS:-4}
+      LIVENESS_MIHOMO_WORKERS: ${LIVENESS_MIHOMO_WORKERS:-4}
+      LIVENESS_TIMEOUT_SECONDS: ${LIVENESS_TIMEOUT_SECONDS:-12}
+      LIVENESS_INTERVAL_SECONDS: ${LIVENESS_INTERVAL_SECONDS:-1800}
+      LIVENESS_RETRY_SECONDS: ${LIVENESS_RETRY_SECONDS:-60}
     healthcheck:
-      test: [CMD, node-worker, -role, recovery, -health]
-      interval: 30s
-      timeout: 10s
-      start_period: 60s
-  # 死节点批量核验：本服务自带一个独立 mihomo，装载候选节点后逐个做真实握手
-  # （/proxies/<name>/delay）。共享内核的 strict lane 只有 8 路、单节点约 60 秒，
-  # 四万积压要 90 小时；而且 Cloudflare 前置的节点 TCP 永远连得上，只有完整
-  # 握手才能判死。每批判定仍交给 deleteUnavailable 的全部门禁，从不自行删除。
-  dead-verify:
-    <<: *worker
-    command: [dead-verify]
-    environment:
-      <<: *environment
-      DEAD_VERIFY_LIMIT: ${DEAD_VERIFY_LIMIT:-400}
-      DEAD_VERIFY_WORKERS: ${DEAD_VERIFY_WORKERS:-96}
-      DEAD_VERIFY_DELETERS: ${DEAD_VERIFY_DELETERS:-8}
-      DEAD_VERIFY_TIMEOUT_SECONDS: ${DEAD_VERIFY_TIMEOUT_SECONDS:-6}
-      DEAD_VERIFY_RECHECK_SECONDS: ${DEAD_VERIFY_RECHECK_SECONDS:-21600}
-      # 候选筛选与最终删除门禁共用年龄配置。
-      NODE_CLEANUP_MIN_AGE_SECONDS: ${NODE_CLEANUP_MIN_AGE_SECONDS:-604800}
-      # 生存集下限：可用节点少于这个数就停止删除，防止源断供或出口故障时
-      # 把注册表删空。0 关闭。
-      NODE_CLEANUP_MIN_POOL: ${NODE_CLEANUP_MIN_POOL:-500}
-    cpus: ${DEAD_VERIFY_CPUS:-1}
-    healthcheck:
-      test: [CMD, node-worker, -role, dead-verify, -health]
-      interval: 30s
-      timeout: 10s
+      test: [CMD, node-liveness, -health]
+      interval: 10s
+      timeout: 6s
       start_period: 60s
   mihomo-manager:
     <<: *worker
@@ -188,8 +152,6 @@ services:
       MIHOMO_PROXY_URL: http://shared-mihomo:7890
       MIHOMO_CONTROLLER_SECRET: ${MIHOMO_CONTROLLER_SECRET:?Set MIHOMO_CONTROLLER_SECRET in .env}
       MIHOMO_REGISTRY_POLL_SECONDS: ${MIHOMO_REGISTRY_POLL_SECONDS:-30}
-      SWEEP_INTERVAL_SECONDS: ${SWEEP_INTERVAL_SECONDS:-1800}
-      SWEEP_CONCURRENCY: ${SWEEP_CONCURRENCY:-32}
     depends_on:
       shared-mihomo: { condition: service_started }
     healthcheck:

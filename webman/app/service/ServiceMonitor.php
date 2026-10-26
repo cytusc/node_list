@@ -13,13 +13,12 @@ final class ServiceMonitor
     public const SERVICES = [
         'api' => ['节点 API', '提供节点列表与监控接口'],
         'source-ingest' => ['数据采集', '导入订阅与 Qilan 节点'],
-        'mihomo-manager' => ['Mihomo manager', '管理共享内核与连通性扫描'],
+        'mihomo-manager' => ['Mihomo manager', '管理出口与风险查询的共享内核'],
         'exit-provision' => ['出口检测', '核验节点实际出口 IP'],
         'exit-attributes' => ['IP 属性', '更新 IP 分类与风险信息'],
-        'recovery' => ['节点恢复', '评估退役节点并补充检测'],
-        'dead-verify' => ['数据维护', '复核长期失活节点并清理'],
+        'node-liveness' => ['节点测活', '独立使用 Xray / Mihomo 更新节点可用状态'],
     ];
-    public const KINDS = ['exit', 'attributes', 'risk', 'fast-delay', 'connectivity', 'recovery', 'normal-recovery', 'lifecycle'];
+    public const KINDS = ['exit', 'attributes', 'risk'];
 
     public static function hours(mixed $value): int
     {
@@ -70,20 +69,13 @@ final class ServiceMonitor
             $services[] = self::service($id, $rows[$id] ?? null, $now);
         }
         $manager = json_decode((string)($rows['mihomo-manager']['payload'] ?? '{}'), true) ?: [];
-        $sweep = $manager['sweep'] ?? [];
-        $safeSweep = [];
-        foreach (['candidates', 'processed', 'observations', 'skipped', 'rejected', 'pending'] as $key) {
-            // Missing processed on older workers must not look like a measured zero.
-            $safeSweep[$key] = isset($sweep[$key]) ? max(0, (int)$sweep[$key]) : null;
+        $liveness = json_decode((string)($rows['node-liveness']['payload'] ?? '{}'), true) ?: [];
+        $safeLiveness = [];
+        foreach (['xrayQueued', 'mihomoQueued', 'inFlight'] as $key) {
+            $safeLiveness[$key] = isset($liveness[$key]) ? max(0, (int)$liveness[$key]) : null;
         }
-        foreach (['started_at', 'finished_at', 'next_run_at'] as $key) {
-            $stamp = (string)($sweep[$key] ?? '');
-            $safeSweep[$key] = $stamp !== '' && !str_starts_with($stamp, '0001-') && strtotime($stamp) !== false ? gmdate('c', strtotime($stamp)) : null;
-        }
-        $safeSweep['running'] = ($sweep['running'] ?? false) === true;
-        foreach (['phase' => ['loading','probing','committing','finished'], 'outcome' => ['completed','partial','failed','cancelled'], 'kind' => ['full','retry']] as $key => $allowed) {
-            $safeSweep[$key] = in_array($sweep[$key] ?? '', $allowed, true) ? $sweep[$key] : null;
-        }
+        $stamp = (string)($liveness['lastCompletedAt'] ?? '');
+        $safeLiveness['lastCompletedAt'] = $stamp !== '' && !str_starts_with($stamp, '0001-') && strtotime($stamp) !== false ? gmdate('c', strtotime($stamp)) : null;
         $kernel = $manager['kernel'] ?? [];
         $safeKernel = ['healthy' => ($kernel['healthy'] ?? false) === true];
         foreach (['loaded','quarantined','reloadMillis','reloadDrainMillis','reloadPauseMillis'] as $key) {
@@ -135,7 +127,7 @@ final class ServiceMonitor
         }
         return ['generatedAt' => gmdate('c', $now), 'sampledAt' => $sampledAt,
             'sampleStale' => $sampledAt === null || $now - strtotime($sampledAt) > 180,
-            'services' => $services, 'sweep' => $safeSweep, 'kernel' => $safeKernel,
+            'services' => $services, 'liveness' => $safeLiveness, 'kernel' => $safeKernel,
             'current' => $sample, 'hours' => $hours, 'hourly' => array_values($history)];
     }
 }

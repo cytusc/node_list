@@ -38,8 +38,8 @@ func TestRegistryCollapsesEquivalentConnectionsAcrossImports(t *testing.T) {
 		}
 	}
 	var count int
-	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_node_registry WHERE available AND node->>'type'='vmess'`).Scan(&count); err != nil || count != 2 {
-		t.Fatalf("visible VMess count = %d, %v; want two distinct credentials", count, err)
+	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_node_registry WHERE available AND node->>'type'='vmess'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("visible VMess count = %d, %v; new imports must await liveness", count, err)
 	}
 	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_node_registry WHERE node->>'type'='vmess'`).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("original identities must be retained: %d, %v", count, err)

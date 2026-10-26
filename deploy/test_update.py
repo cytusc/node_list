@@ -19,7 +19,7 @@ class UpdateTests(unittest.TestCase):
             (root / '.env').write_text('NODE_EXPLORER_AUTO_UPDATE=true\n')
             (root / 'release.env').write_text(f'IMAGE_TAG={current}\nSUBS_CHECK_TAG=1.6.5\n')
             services = ['node-explorer', 'source-ingest', 'mihomo-manager',
-                        'exit-provision', 'exit-attributes', 'recovery', 'dead-verify']
+                        'exit-provision', 'exit-attributes', 'node-liveness']
             config = {'services': {name: {'image': 'ghcr.io/cytusc/node_list:' + current}
                                    for name in services}}
             config['services']['task-redis'] = {'image': 'redis:7-alpine'}

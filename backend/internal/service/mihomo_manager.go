@@ -14,8 +14,7 @@ import (
 
 // RunMihomoManager owns a dedicated session lock for the controller, including
 // while reloads drain requests. Losing that session cancels the HTTP server.
-// The sweeper round shares this process: one owner, one kernel, no double
-// write controller (REFACTOR_PLAN §2).
+// Shared kernel ownership is limited to exit and risk requests.
 func (r *Repository) RunMihomoManager(parent context.Context) error {
 	return r.withServiceLock(parent, "mihomo-manager", func(ctx context.Context) error {
 		return r.runMihomoManager(ctx)
@@ -51,8 +50,6 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 	m := transport.NewManager(instance)
 	m.ExitConcurrency = Number("MIHOMO_EXIT_CONCURRENCY", 8)
 	m.RiskConcurrency = Number("MIHOMO_RISK_CONCURRENCY", 2)
-	sweeps := newSweepRunner(Seconds("SWEEP_INTERVAL_SECONDS", 1800))
-	defer sweeps.stop()
 	server := &http.Server{Addr: Env("MIHOMO_MANAGER_LISTEN", ":9080"), Handler: m.Handler(apiToken), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
@@ -98,7 +95,7 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 				if !s.Healthy {
 					message = "内核未就绪或正在重载"
 				}
-				payload, _ := json.Marshal(map[string]any{"error": message, "running": true, "kernel": s, "sweep": sweeps.status(), "exitCapacity": m.ExitConcurrency})
+				payload, _ := json.Marshal(map[string]any{"error": message, "running": true, "kernel": s, "exitCapacity": m.ExitConcurrency})
 				_, _ = r.Pool.Exec(ctx, `INSERT INTO node_explorer_service_status(service,updated_at,payload) VALUES('mihomo-manager',now(),$1) ON CONFLICT(service) DO UPDATE SET updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload`, payload)
 			}
 		}
@@ -107,7 +104,6 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 	defer ticker.Stop()
 	// A round holds the process mutex through commit; pending changes are
 	// coalesced here and reloaded only after that round releases the kernel.
-	sweepConcurrency := Number("SWEEP_CONCURRENCY", 32)
 	var pending []transport.RegistryEntry
 	lastFingerprint := ""
 	changedAt := time.Time{}
@@ -139,48 +135,12 @@ func (r *Repository) runMihomoManager(parent context.Context) error {
 				defer stop()
 				return m.Sync(reload, pending)
 			}
-			reload := sweeps.withReload
-			if !m.Stats().Healthy {
-				reload = sweeps.withRecovery
+			if err := reloadKernel(); err == nil {
+				changedAt = time.Time{}
+			} else {
+				nextAttempt = time.Now().Add(5 * time.Second)
 			}
-			attempted, reloadErr := reload(reloadKernel)
-			if attempted {
-				if reloadErr == nil {
-					changedAt = time.Time{}
-				} else {
-					nextAttempt = time.Now().Add(5 * time.Second)
-				}
-			}
-		}
-		if m.Stats().Healthy && changedAt.IsZero() {
-			sweeps.start(ctx, func(round context.Context) error {
-				live, e := r.sweepEntries(round)
-				if e != nil {
-					return e
-				}
-				live = sweeps.selectEntries(live)
-				sweeps.progress(func(s *sweepStatus) { s.Phase = "probing"; s.Candidates = len(live) })
-				started := time.Now()
-				results := r.sweepAll(round, m, live, sweepConcurrency, func() {
-					sweeps.progress(func(s *sweepStatus) { s.Processed++ })
-				})
-				probeMillis := time.Since(started).Milliseconds()
-				pending := sweeps.observations(live, results)
-				sweeps.progress(func(s *sweepStatus) {
-					s.Phase = "committing"
-					s.ProbeMillis = probeMillis
-				})
-				if e = round.Err(); e != nil {
-					return e
-				}
-				started = time.Now()
-				e = r.sweepCommit(round, m, results)
-				if e == nil {
-					sweeps.commitPending(pending)
-				}
-				sweeps.progress(func(s *sweepStatus) { s.CommitMillis = time.Since(started).Milliseconds() })
-				return e
-			})
+
 		}
 
 		select {

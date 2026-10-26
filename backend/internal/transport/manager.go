@@ -22,13 +22,7 @@ import (
 	"github.com/cytusc/node_list/backend/internal/domain"
 )
 
-const DelayTarget = "https://www.gstatic.com/generate_204"
 const LeaseTTL = 150 * time.Second
-
-// Delay owns the whole budget, including capacity wait and proof validation.
-// Callers should pass their lifecycle context rather than a shorter probe timer.
-const delayControllerTimeout = 12 * time.Second
-const delayValidationTimeout = 3 * time.Second
 
 var ErrManagerBusy = errors.New("Mihomo capacity paused or busy")
 var ErrConfigRejected = errors.New("node configuration rejected or unsupported")
@@ -103,12 +97,6 @@ type LeaseRequest struct {
 	Kind    string          `json:"kind"`
 	High    bool            `json:"high"`
 }
-type DelayResult struct {
-	Success    bool      `json:"success"`
-	Delay      int       `json:"delay"`
-	Generation string    `json:"generation"`
-	CheckedAt  time.Time `json:"checkedAt"`
-}
 type ManagerStats struct {
 	Generation        string `json:"generation"`
 	Loaded            int    `json:"loaded"`
@@ -118,7 +106,6 @@ type ManagerStats struct {
 	ReloadPauseMillis int64  `json:"reloadPauseMillis"`
 	ReloadDrainMillis int64  `json:"reloadDrainMillis"`
 	ConfigLoads       int    `json:"configLoads"`
-	FastRunning       int    `json:"fastRunning"`
 	Healthy           bool   `json:"healthy"`
 }
 
@@ -141,7 +128,6 @@ type Manager struct {
 	rejected                             map[string]string
 	credentials                          map[string]string
 	leases                               map[string]Lease
-	delaying                             map[string]bool
 	generation, epoch                    string
 	sequence                             int
 	reloading, healthy                   bool
@@ -151,12 +137,10 @@ type Manager struct {
 	configLoads                          int
 	fingerprint                          string
 	lastPayload                          []byte
-	fast, fastNormal, highWaiting        int
-	OnDelay                              func(context.Context, bool, bool)
 }
 
 func NewManager(instance MihomoConfig) *Manager {
-	return &Manager{Instance: instance, ExitConcurrency: 8, RiskConcurrency: 2, epoch: token(), entries: map[string]RegistryEntry{}, rejected: map[string]string{}, credentials: map[string]string{}, leases: map[string]Lease{}, delaying: map[string]bool{}}
+	return &Manager{Instance: instance, ExitConcurrency: 8, RiskConcurrency: 2, epoch: token(), entries: map[string]RegistryEntry{}, rejected: map[string]string{}, credentials: map[string]string{}, leases: map[string]Lease{}}
 }
 func (m *Manager) prune() {
 	for id, l := range m.leases {
@@ -168,20 +152,9 @@ func (m *Manager) prune() {
 func (m *Manager) Stats() ManagerStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return ManagerStats{Generation: m.generation, Loaded: len(m.entries) - len(m.rejected), Quarantined: len(m.rejected), Reloads: m.reloads, ReloadMillis: m.reloadMillis, ReloadPauseMillis: m.reloadPauseMillis, ReloadDrainMillis: m.reloadDrainMillis, ConfigLoads: m.configLoads, FastRunning: m.fast, Healthy: m.healthy && !m.reloading}
+	return ManagerStats{Generation: m.generation, Loaded: len(m.entries) - len(m.rejected), Quarantined: len(m.rejected), Reloads: m.reloads, ReloadMillis: m.reloadMillis, ReloadPauseMillis: m.reloadPauseMillis, ReloadDrainMillis: m.reloadDrainMillis, ConfigLoads: m.configLoads, Healthy: m.healthy && !m.reloading}
 }
 
-// Generation fences follow-up work against a kernel reload since the given
-// generation; the in-process sweeper relies on it before retirement evidence
-// is committed.
-func (m *Manager) Generation(ctx context.Context, generation string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if generation == "" || generation != m.generation || !m.healthy || m.reloading {
-		return errors.New("kernel generation changed")
-	}
-	return nil
-}
 func (m *Manager) controller(ctx context.Context, method, path string, body []byte) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(m.Instance.Controller, "/")+path, bytes.NewReader(body))
 	if err != nil {
@@ -476,7 +449,7 @@ func (m *Manager) Acquire(req LeaseRequest) (Lease, error) {
 	if !m.healthy {
 		return Lease{}, errors.New("manager unavailable")
 	}
-	limit := map[string]int{"strict": 8, "exit": 8, "risk": 2, "delay": 32, "proof": 128}[req.Kind]
+	limit := map[string]int{"exit": 8, "risk": 2}[req.Kind]
 	if req.Kind == "exit" && m.ExitConcurrency > 0 {
 		limit = m.ExitConcurrency
 	}
@@ -635,171 +608,6 @@ func (m *Manager) validate(ctx context.Context, id string, inspect func([]byte))
 	}
 	return nil
 }
-func (m *Manager) Delay(ctx context.Context, req LeaseRequest) (result DelayResult, err error) {
-	return m.delay(ctx, req, DelayTarget)
-}
-
-func (m *Manager) delay(ctx context.Context, req LeaseRequest, target string) (result DelayResult, err error) {
-	ctx, cancel := context.WithTimeout(ctx, delayControllerTimeout+delayValidationTimeout)
-	defer cancel()
-	if len(req.Targets) != 1 {
-		return result, errors.New("one delay target required")
-	}
-	if err := ctx.Err(); err != nil {
-		return result, err
-	}
-	// URL-test history belongs to the proxy, not the HTTP request. Serialize
-	// each identity through evidence collection so another caller cannot replace it.
-	identity := req.Targets[0].Identity
-	m.mu.Lock()
-	if m.delaying[identity] {
-		m.mu.Unlock()
-		return result, ErrManagerBusy
-	}
-	m.delaying[identity] = true
-	m.mu.Unlock()
-	releaseIdentity := func() { m.mu.Lock(); delete(m.delaying, identity); m.mu.Unlock() }
-	var draining <-chan struct{}
-	defer func() {
-		if draining == nil {
-			releaseIdentity()
-		} else {
-			go func() { <-draining; releaseIdentity() }()
-		}
-	}()
-	// Idle reserved capacity may be borrowed. Waiting residential calls get the next completion.
-	waitingHigh := req.High
-	m.mu.Lock()
-	if waitingHigh {
-		m.highWaiting++
-	}
-	m.mu.Unlock()
-	defer func() {
-		if waitingHigh {
-			m.mu.Lock()
-			m.highWaiting--
-			m.mu.Unlock()
-		}
-	}()
-	for {
-		m.mu.Lock()
-		allowed := m.fast < 32 && (req.High || m.highWaiting == 0 || m.fastNormal < 24)
-		if allowed {
-			if waitingHigh {
-				m.highWaiting--
-				waitingHigh = false
-			}
-			m.fast++
-			if !req.High {
-				m.fastNormal++
-			}
-		}
-		m.mu.Unlock()
-		if allowed {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return result, ctx.Err()
-		case <-time.After(time.Millisecond * 5):
-		}
-	}
-	defer func() {
-		m.mu.Lock()
-		m.fast--
-		if !req.High {
-			m.fastNormal--
-		}
-		m.mu.Unlock()
-		if m.OnDelay != nil && !errors.Is(err, ErrManagerBusy) {
-			m.OnDelay(context.WithoutCancel(ctx), result.Success, err != nil)
-		}
-	}()
-	req.Kind = "delay"
-	l, e := m.Acquire(req)
-	if e != nil {
-		return result, e
-	}
-	defer m.Release(l.ID)
-	// Mihomo's DNS/dial setup can exceed its requested 2s delay timeout.
-	// Allow its explicit 503/504 response to arrive; a transport timeout remains
-	// an infrastructure error, never evidence that a node is dead.
-	path := "/proxies/" + url.PathEscape(proxyName(identity)) + "/delay?timeout=2000&expected=204&url=" + url.QueryEscape(target)
-	started := time.Now()
-	status, drain, e := m.delayController(ctx, path)
-	draining = drain
-	if e != nil {
-		return result, e
-	}
-	if status != 200 && status != 503 && status != 504 {
-		return result, errors.New("Mihomo delay infrastructure error")
-	}
-	validation, finish := context.WithTimeout(ctx, delayValidationTimeout)
-	defer finish()
-	var raw []byte
-	if e = m.validate(validation, l.ID, func(body []byte) { raw = body }); e != nil {
-		return result, e
-	}
-	success, delay, e := delayEvidence(raw, target, started)
-	if e != nil {
-		return result, e
-	}
-	result.Generation = l.Generation
-	result.CheckedAt = time.Now().UTC()
-	result.Success = success
-	result.Delay = delay
-	return result, nil
-}
-
-// Mihomo's URLTest outlives a cancelled HTTP caller. Drain its bounded response
-// in the background before allowing the same identity to write history again.
-// Cancellation still releases the caller/round immediately for recovery.
-func (m *Manager) delayController(ctx context.Context, path string) (int, <-chan struct{}, error) {
-	probe, stop := context.WithTimeout(context.WithoutCancel(ctx), delayControllerTimeout)
-	type response struct {
-		status int
-		err    error
-	}
-	result := make(chan response, 1)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		defer stop()
-		_, status, err := m.controller(probe, http.MethodGet, path, nil)
-		result <- response{status, err}
-	}()
-	select {
-	case <-ctx.Done():
-		return 0, done, ctx.Err()
-	case response := <-result:
-		return response.status, nil, response.err
-	}
-}
-
-// Mihomo v1.19.27's /delay status ignores `expected`, and treats a rounded 0ms
-// as an error. Only extra[target].alive applies the expected HTTP status.
-// Missing or old history is infrastructure uncertainty, never node evidence.
-func delayEvidence(raw []byte, target string, started time.Time) (bool, int, error) {
-	var proxy struct {
-		Extra map[string]struct {
-			Alive   *bool `json:"alive"`
-			History []struct {
-				Time  time.Time `json:"time"`
-				Delay int       `json:"delay"`
-			} `json:"history"`
-		} `json:"extra"`
-	}
-	if json.Unmarshal(raw, &proxy) == nil {
-		state, ok := proxy.Extra[target]
-		if ok && state.Alive != nil && len(state.History) > 0 {
-			latest := state.History[len(state.History)-1]
-			if !latest.Time.Before(started) && latest.Delay >= 0 {
-				return *state.Alive, latest.Delay, nil
-			}
-		}
-	}
-	return false, 0, errors.New("missing or stale Mihomo delay evidence")
-}
 func (m *Manager) Handler(secret string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
@@ -830,19 +638,6 @@ func (m *Manager) Handler(secret string) http.Handler {
 		w.WriteHeader(204)
 	})
 	mux.HandleFunc("DELETE /v1/leases/{id}", func(w http.ResponseWriter, r *http.Request) { m.Release(r.PathValue("id")); w.WriteHeader(204) })
-	mux.HandleFunc("POST /v1/delay", func(w http.ResponseWriter, r *http.Request) {
-		var req LeaseRequest
-		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil || len(req.Targets) != 1 {
-			http.Error(w, "invalid request", 400)
-			return
-		}
-		v, err := m.Delay(r.Context(), req)
-		if err != nil {
-			writeManagerError(w, err)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(v)
-	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if secret == "" || r.Header.Get("Authorization") != "Bearer "+secret {
 			http.Error(w, "unauthorized", 401)

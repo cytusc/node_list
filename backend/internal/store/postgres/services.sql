@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS node_explorer_service_migrations (
 CREATE TABLE IF NOT EXISTS node_explorer_node_registry (
   identity text PRIMARY KEY, node jsonb NOT NULL, snapshot_id integer NOT NULL,
   node_index integer NOT NULL, historical_residential boolean NOT NULL DEFAULT false,
-  available boolean NOT NULL DEFAULT true
+  available boolean NOT NULL DEFAULT false
 );
 CREATE TABLE IF NOT EXISTS node_explorer_connectivity (
   identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity),
@@ -181,3 +181,10 @@ CREATE TABLE IF NOT EXISTS node_explorer_node_links (
 );
 CREATE INDEX IF NOT EXISTS node_explorer_node_links_connection
  ON node_explorer_node_links(connection_key,origin,first_seen_at,id);
+
+-- Version 15: availability belongs only to the standalone liveness service.
+ALTER TABLE node_explorer_node_registry ALTER COLUMN available SET DEFAULT false;
+-- Fence outstanding legacy work, including recovery-specific exit dependencies.
+UPDATE node_explorer_work SET state='done',generation=generation+1,lease_token=NULL,lease_until=NULL,error=''
+ WHERE (kind IN ('fast-delay','connectivity','recovery','normal-recovery','lifecycle','node-cleanup')
+ OR payload->>'session' LIKE 'recovery:%') AND state<>'done';

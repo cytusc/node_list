@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/cytusc/node_list/backend/internal/transport"
 )
 
 func TestMonitorSamplesSeparateDueScheduledAndRunning(t *testing.T) {
 	f := setup(t)
 	f.exec(t, `DELETE FROM node_explorer_work`)
+	f.exec(t, `UPDATE node_explorer_node_registry SET available=true WHERE identity=$1`, f.id)
 	f.exec(t, `INSERT INTO node_explorer_work(kind,key,due_at,state,lease_until,payload) VALUES
  ('exit','due',now()-interval '5 minutes','queued',NULL,'{"password":"never-export"}'),
  ('exit','future',now()+interval '1 hour','queued',NULL,'{}'),
@@ -43,10 +41,10 @@ func TestMonitorSamplesSeparateDueScheduledAndRunning(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Queues) != 2 || got.Queues[0].Kind != "exit" || got.Queues[0].Due != 1 || got.Queues[0].Scheduled != 1 || got.Queues[0].Running != 1 || got.Queues[0].Expired != 1 || got.Queues[0].Oldest < 300 {
+	if len(got.Queues) != 1 || got.Queues[0].Kind != "exit" || got.Queues[0].Due != 1 || got.Queues[0].Scheduled != 1 || got.Queues[0].Running != 1 || got.Queues[0].Expired != 1 || got.Queues[0].Oldest < 300 {
 		t.Fatalf("queues: %+v", got.Queues)
 	}
-	if got.Coverage.Total != 1 || got.Coverage.Connectivity != 1 || got.Coverage.Exit != 1 || got.Coverage.Attributes != 1 || got.Recovery.Stalled != 1 {
+	if got.Coverage.Total != 1 || got.Coverage.Connectivity != 1 || got.Coverage.Exit != 1 || got.Coverage.Attributes != 1 {
 		t.Fatalf("coverage/recovery: %+v", got)
 	}
 	if strings.Contains(string(raw), "never-export") || strings.Contains(string(raw), f.id) {
@@ -59,34 +57,5 @@ func TestMonitorSamplesSeparateDueScheduledAndRunning(t *testing.T) {
 	var count int
 	if err := f.repo.Pool.QueryRow(ctx, `SELECT count(*) FROM node_explorer_monitor_samples`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("retention/dedup: count=%d err=%v", count, err)
-	}
-}
-
-func TestSweepProgressIsVisibleBeforeRoundFinishes(t *testing.T) {
-	s := newSweepRunner(time.Hour)
-	release := make(chan struct{})
-	entered := make(chan struct{})
-	done := make(chan struct{})
-	r := &Repository{}
-	kernel := testSweepKernel{probe: func(ctx context.Context, req transport.LeaseRequest) (transport.DelayResult, error) {
-		if req.Targets[0].Identity == "second" {
-			close(entered)
-			<-release
-		}
-		return transport.DelayResult{CheckedAt: time.Now(), Generation: "test-generation"}, nil
-	}}
-	go func() {
-		defer close(done)
-		r.sweepAll(context.Background(), kernel, []transport.RegistryEntry{{Identity: "first"}, {Identity: "second"}}, 1, func() { s.progress(func(p *sweepStatus) { p.Processed++ }) })
-	}()
-	awaitSweep(t, entered)
-	before := s.status().Processed
-	close(release)
-	awaitSweep(t, done)
-	if before != 1 || s.status().Processed != 2 {
-		t.Fatalf("live progress: before=%d after=%d", before, s.status().Processed)
-	}
-	if s.status().Observations != 0 {
-		t.Fatal("attempts were incorrectly presented as committed observations")
 	}
 }

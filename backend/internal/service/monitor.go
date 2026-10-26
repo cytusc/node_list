@@ -36,7 +36,7 @@ func (r *Repository) sampleMonitor(ctx context.Context) error {
  count(*) FILTER (WHERE state='running') AS running,
  count(*) FILTER (WHERE state='running' AND lease_until<now()) AS expired,
  coalesce(max(greatest(0,extract(epoch FROM now()-due_at))) FILTER (WHERE state='queued' AND due_at<=now()),0)::bigint AS oldest_seconds
- FROM node_explorer_work WHERE state<>'done' GROUP BY kind
+ FROM node_explorer_work WHERE state<>'done' AND kind IN ('exit','attributes','risk') GROUP BY kind
 ), coverage AS (
  SELECT count(*) AS total,
  count(*) FILTER (WHERE c.identity IS NOT NULL) AS connectivity,
@@ -48,17 +48,11 @@ func (r *Repository) sampleMonitor(ctx context.Context) error {
  LEFT JOIN node_explorer_exits e USING(identity)
  LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
  WHERE n.available
-), recovery AS (
- SELECT count(*) AS active,
- count(*) FILTER (WHERE (payload->>'startedAt')::timestamptz<now()-interval '10 minutes') AS stalled
- FROM node_explorer_work WHERE kind IN ('recovery','normal-recovery') AND state<>'done'
- AND payload ? 'startedAt' AND payload->>'startedAt' NOT LIKE '0001-%'
 )
 INSERT INTO node_explorer_monitor_samples(sampled_at,payload)
 SELECT date_trunc('minute',now()),jsonb_build_object(
  'queues',coalesce((SELECT jsonb_agg(to_jsonb(q) ORDER BY kind) FROM queues q),'[]'::jsonb),
- 'coverage',(SELECT to_jsonb(c) FROM coverage c),
- 'recovery',(SELECT to_jsonb(r) FROM recovery r))
+ 'coverage',(SELECT to_jsonb(c) FROM coverage c))
 ON CONFLICT(sampled_at) DO NOTHING`)
 	if err != nil {
 		return err

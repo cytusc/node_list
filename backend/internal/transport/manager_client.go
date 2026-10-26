@@ -132,9 +132,6 @@ func (c *ManagerClient) call(ctx context.Context, method, path string, in, out a
 	// validate and finish so that capacity becomes available.
 	capacityKind := ""
 	if method == http.MethodPost {
-		if path == "/v1/delay" {
-			capacityKind = "delay"
-		}
 		if path == "/v1/leases" {
 			if lease, ok := in.(LeaseRequest); ok {
 				capacityKind = lease.Kind
@@ -191,21 +188,6 @@ func (c *ManagerClient) call(ctx context.Context, method, path string, in, out a
 	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
-	}
-	return nil
-}
-func (c *ManagerClient) Delay(ctx context.Context, n domain.Node, incarnation string, high bool) (DelayResult, error) {
-	var v DelayResult
-	err := c.call(ctx, http.MethodPost, "/v1/delay", LeaseRequest{Targets: []RegistryEntry{{Identity: domain.AggregateIdentity(n), Incarnation: incarnation, Digest: ConfigDigest(n)}}, High: high}, &v)
-	return v, err
-}
-func (c *ManagerClient) Generation(ctx context.Context, generation string) error {
-	var s ManagerStats
-	if err := c.call(ctx, http.MethodGet, "/v1/health", nil, &s); err != nil {
-		return err
-	}
-	if generation == "" || generation != s.Generation {
-		return errors.New("kernel generation changed")
 	}
 	return nil
 }

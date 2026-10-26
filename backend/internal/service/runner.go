@@ -27,7 +27,6 @@ type Runner struct {
 	Classification *ipcheck.Client
 	asnCache       *collector.ASNCache
 	exitSlots      *semaphore.Weighted
-	recoveryExits  [2]recoveryExitAdmission
 }
 
 func (r *Runner) kinds() []string {
@@ -36,11 +35,7 @@ func (r *Runner) kinds() []string {
 		return []string{KindExit}
 	case "exit-attributes":
 		return []string{KindAttributes, KindRisk}
-	// The recovery role absorbs the former residential, normal-recovery and
-	// lifecycle workers (REFACTOR_PLAN §2). Strict sessions re-use fast/live
-	// and exit probes as dependencies, so the role consumes those kinds too.
-	case "recovery":
-		return []string{KindRecovery, KindNormalRecovery, KindFast, KindLive, KindLifecycle}
+
 	}
 	return nil
 }
@@ -49,12 +44,6 @@ func (r *Runner) kinds() []string {
 // lanes carry an explicit per-kind count (Config.LaneConcurrency); probe lanes
 // use the shared lane concurrency.
 func (r *Runner) laneCount(kind string, high bool) int {
-	if kind == KindFast {
-		if high {
-			return 8
-		}
-		return 32
-	}
 	if n, ok := r.Config.LaneConcurrency[kind]; ok && n > 0 {
 		return n
 	}
@@ -91,9 +80,6 @@ func (r *Runner) run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	for _, kind := range kinds {
 		for _, high := range []bool{true, false} {
-			if kind == KindNormalRecovery && high {
-				continue
-			}
 			count := r.laneCount(kind, high)
 			for i := 0; i < count; i++ {
 				wg.Add(1)
@@ -254,20 +240,12 @@ func (r *Runner) executeJob(ctx context.Context, j Job, high bool, release func(
 
 func (r *Runner) handle(ctx context.Context, j Job, high bool) error {
 	switch j.Kind {
-	case KindFast:
-		return r.fast(ctx, j, high)
-	case KindLive:
-		return r.live(ctx, j, high)
 	case KindExit:
 		return r.exit(ctx, j, high)
 	case KindAttributes:
 		return r.attributes(ctx, j)
 	case KindRisk:
 		return r.risk(ctx, j, high)
-	case KindRecovery, KindNormalRecovery:
-		return r.recovery(ctx, j)
-	case KindLifecycle:
-		return r.lifecycle(ctx, j)
 	}
 	return r.Repo.Finish(ctx, j, nil)
 }

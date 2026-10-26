@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -516,22 +515,4 @@ func proxyFingerprint(p domain.ProxyConfig) string {
 		return ""
 	}
 	return string(raw)
-}
-
-// ProbeHTTP requires the same 204 endpoint used by the fast delay API.
-func ProbeHTTP(ctx context.Context, client *http.Client) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, DelayTarget, nil)
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("User-Agent", "node-explorer-connectivity")
-	response, err := client.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer func() {
-		io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		response.Body.Close()
-	}()
-	return response.StatusCode == http.StatusNoContent, nil
 }

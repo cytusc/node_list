@@ -102,10 +102,7 @@ func Root() string {
 
 type Config struct {
 	Role                                string
-	NormalRecoveryInterval              time.Duration
 	ResidentialInterval, NormalInterval time.Duration
-	FastInterval                        time.Duration
-	Timeout, RetryDelay                 time.Duration
 	// ExitProbeTimeout bounds one echo batch. Slow exits routinely need more
 	// than the old fixed five seconds, so it stays tunable per deployment.
 	ExitProbeTimeout time.Duration
@@ -116,13 +113,12 @@ type Config struct {
 	HighConcurrency, NormalConcurrency int
 	ExitConcurrency                    int
 	// LaneConcurrency overrides the consumer count per work kind. Slow lanes
-	// (risk, attributes, lifecycle, recovery) default to one so raising a
+	// (risk, attributes) default to one so raising a
 	// count stays an explicit operational choice.
 	LaneConcurrency          map[string]int
 	APIOrigin                string
 	HighRouter, NormalRouter *transport.Router
 	Manager                  *transport.ManagerClient
-	DryRun                   bool
 }
 
 // laneConcurrency reads per-kind consumer counts. The role prefix wins over
@@ -139,11 +135,9 @@ func laneConcurrency(role string) map[string]int {
 	switch role {
 	case "exit-provision", "exit-attributes":
 		prefix = "IP_SERVICE"
-	case "recovery":
-		prefix = "RECOVERY"
 	}
 	out := map[string]int{}
-	for _, kind := range []string{KindRisk, KindAttributes, KindLifecycle, KindRecovery} {
+	for _, kind := range []string{KindRisk, KindAttributes} {
 		name := strings.ToUpper(strings.ReplaceAll(kind, "-", "_"))
 		fallback := 1
 		if kind == KindAttributes {
@@ -151,31 +145,23 @@ func laneConcurrency(role string) map[string]int {
 		}
 		out[kind] = Number(prefix+"_"+name+"_CONCURRENCY", Number(name+"_CONCURRENCY", fallback))
 	}
-	out[KindNormalRecovery] = Number("NORMAL_RECOVERY_CONCURRENCY", 2)
-	// The connectivity lane carries the sweeper's retirement evidence, the
-	// recovery assessments. It
-	// defaulted to the normal-lane count; naming it lets an operator raise the
-	// verification rate without touching assessment admission.
-	out[KindLive] = Number(prefix+"_LIVE_CONCURRENCY", Number("LIVE_CONCURRENCY", 2))
 	return out
 }
 
 func ConfigFromEnv(role string) (Config, error) {
-	c := Config{Role: role, NormalRecoveryInterval: Seconds("NORMAL_RECOVERY_INTERVAL_SECONDS", 1200), ResidentialInterval: Seconds("RESIDENTIAL_INTERVAL_SECONDS", 300), NormalInterval: Seconds("NORMAL_INTERVAL_SECONDS", 1800),
-		Timeout: Seconds("PROBE_TIMEOUT_SECONDS", 12), RetryDelay: Seconds("PROBE_RETRY_SECONDS", 10),
+	c := Config{Role: role, ResidentialInterval: Seconds("RESIDENTIAL_INTERVAL_SECONDS", 300), NormalInterval: Seconds("NORMAL_INTERVAL_SECONDS", 1800),
 		ExitProbeTimeout:    BoundedSeconds("EXIT_PROBE_TIMEOUT_SECONDS", defaultExitProbeTimeout, exitProbeTimeoutMin, exitProbeTimeoutMax),
 		RiskRefreshInterval: Seconds("RISK_REFRESH_INTERVAL_SECONDS", 21600),
 		ScheduleInterval:    Seconds("SCHEDULE_INTERVAL_SECONDS", 5),
-		FastInterval:        Seconds("FAST_INTERVAL_SECONDS", 1200),
 		HighConcurrency:     Number("RESIDENTIAL_CONCURRENCY", 2), NormalConcurrency: Number("NORMAL_CONCURRENCY", 2),
 		LaneConcurrency: laneConcurrency(role),
-		APIOrigin:       Env("IPPURE_API_ORIGIN", "https://api.123169.xyz"), DryRun: Env("LIFECYCLE_DRY_RUN", "false") == "true"}
+		APIOrigin:       Env("IPPURE_API_ORIGIN", "https://api.123169.xyz")}
 	if address := os.Getenv("MIHOMO_MANAGER_URL"); address != "" {
 		if os.Getenv("MIHOMO_MANAGER_TOKEN") == "" {
 			return c, fmt.Errorf("MIHOMO_MANAGER_TOKEN is required")
 		}
 		c.Manager = &transport.ManagerClient{URL: address, Token: os.Getenv("MIHOMO_MANAGER_TOKEN")}
-		kind := "strict"
+		kind := "risk"
 		if role == "exit-provision" {
 			kind = "exit"
 		}

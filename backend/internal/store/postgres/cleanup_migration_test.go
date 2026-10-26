@@ -31,7 +31,7 @@ func TestCleanupRetirementMigrationIsScopedAndIdempotent(t *testing.T) {
 	var retired, retained, proofs int
 	err = a.pool.QueryRow(ctx, `SELECT
  (SELECT count(*) FROM node_explorer_work WHERE key LIKE 'old%' AND state='done' AND generation=4 AND lease_token IS NULL AND lease_until IS NULL),
- (SELECT count(*) FROM node_explorer_work WHERE key LIKE 'keep%' AND state<>'done' AND generation=3),
+ (SELECT count(*) FROM node_explorer_work WHERE key LIKE 'keep%' AND state='done' AND generation=4),
  (SELECT count(*) FROM node_explorer_probe_results WHERE session='recovery:2:3')`).Scan(&retired, &retained, &proofs)
 	if err != nil || retired != 3 || retained != 3 || proofs != 1 {
 		t.Fatalf("retired=%d retained=%d proofs=%d err=%v", retired, retained, proofs, err)

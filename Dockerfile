@@ -22,12 +22,10 @@ ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
       go build -trimpath -ldflags "-s -w" -o /out/node-worker ./cmd/node-worker \
  && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-      go build -trimpath -ldflags "-s -w" -o /out/dead-verify ./cmd/dead-verify
+      go build -trimpath -ldflags "-s -w" -o /out/node-liveness ./cmd/node-liveness
 
-# The batch verifier needs its own Mihomo to perform real handshakes: the shared
-# kernel's strict lane is a fixed eight leases and Cloudflare-fronted nodes only
-# fail a full handshake. Only the binary is taken; the verifier renders its own
-# minimal config (no geo database, no listeners).
+# Standalone liveness starts a private kernel for each probe.
+FROM ghcr.io/xtls/xray-core:26.10.21 AS xray
 FROM metacubex/mihomo:v1.19.27 AS mihomo
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS probe-bin
 COPY --from=mihomo /mihomo /out/mihomo
@@ -57,7 +55,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers oniguruma-dev postgresql-dev t
  && docker-php-ext-install -j"$(nproc)" pcntl sockets pdo_pgsql mbstring \
  && docker-php-ext-enable opcache \
  && apk del $PHPIZE_DEPS linux-headers oniguruma-dev postgresql-dev \
- && apk add --no-cache postgresql-libs oniguruma \
+ && apk add --no-cache postgresql-libs oniguruma ca-certificates \
  && adduser -D -u 1000 -h /home/node node \
  && mkdir -p /app/webman/runtime /app/webman/public \
  && chown -R node:node /app
@@ -82,8 +80,9 @@ COPY --chown=node:node webman/docker-entrypoint.sh ./docker-entrypoint.sh
 # Frontend build output is the static root (config/static.php).
 COPY --from=frontend --chown=node:node /app/dist ./public
 COPY --from=backend --chown=node:node /out/node-worker /usr/local/bin/node-worker
-COPY --from=backend --chown=node:node /out/dead-verify /usr/local/bin/dead-verify
+COPY --from=backend --chown=node:node /out/node-liveness /usr/local/bin/node-liveness
 COPY --from=probe-bin --chown=node:node /out/mihomo /usr/local/bin/mihomo
+COPY --from=xray --chown=node:node /usr/local/bin/xray /usr/local/bin/xray
 USER node
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

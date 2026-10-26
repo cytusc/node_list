@@ -7,7 +7,7 @@ import (
 
 // Risk queries must not depend on the scored node's own tunnel: any recently
 // verified node can carry them, and the pool has to exclude the node itself,
-// retired nodes and anything whose last reachability probe failed.
+// anything whose last reachability probe failed.
 func TestCarriersOnlyReturnsVerifiedLiveNodes(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
@@ -36,12 +36,12 @@ func TestCarriersOnlyReturnsVerifiedLiveNodes(t *testing.T) {
 		t.Fatalf("excluded identity still returned %d carriers", len(got))
 	}
 
-	// A retired node is not a valid carrier even while it stays reachable.
-	f.exec(t, `INSERT INTO node_explorer_retired_nodes(identity,retired_at,reason) VALUES($1,now()::text,'probe') ON CONFLICT DO NOTHING`, f.id)
+	// Availability is authoritative; legacy retirement rows cannot override it.
+	f.exec(t, `UPDATE node_explorer_node_registry SET available=false WHERE identity=$1`, f.id)
 	if got, err = f.runner.carriers(ctx, "", 3); err != nil {
 		t.Fatal(err)
 	} else if len(got) != 0 {
-		t.Fatalf("retired node returned as carrier: %d", len(got))
+		t.Fatalf("unavailable node returned as carrier: %d", len(got))
 	}
 }
 

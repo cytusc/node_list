@@ -94,14 +94,13 @@ func TestManagerClientBusyCooldownIsSharedAndPoolScoped(t *testing.T) {
 	}{
 		{http.MethodDelete, "/v1/leases/active", nil},
 		{http.MethodPost, "/v1/leases/active/validate", nil},
-		{http.MethodPost, "/v1/leases", LeaseRequest{Kind: "proof"}},
 		{http.MethodPost, "/v1/leases", LeaseRequest{Kind: "risk"}},
 	} {
 		if err := client.call(ctx2, check.method, check.path, check.in, nil); err != nil {
 			t.Fatalf("busy exit blocked %s: %v", check.path, err)
 		}
 	}
-	if calls.Load() != 5 {
+	if calls.Load() != 4 {
 		t.Fatalf("unexpected traffic: %d", calls.Load())
 	}
 }

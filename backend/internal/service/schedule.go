@@ -7,7 +7,6 @@ import (
 
 	"github.com/cytusc/node_list/backend/internal/domain"
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
-	"github.com/cytusc/node_list/backend/internal/store"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -58,7 +57,7 @@ func scheduleMany(ctx context.Context, tx pgx.Tx, work []scheduledWork) error {
 		priority=CASE WHEN EXCLUDED.kind='risk' AND node_explorer_work.state='queued' THEN greatest(node_explorer_work.priority,EXCLUDED.priority) ELSE EXCLUDED.priority END,
 		due_at=CASE WHEN EXCLUDED.kind='risk' AND node_explorer_work.state='queued' THEN least(node_explorer_work.due_at,EXCLUDED.due_at) ELSE EXCLUDED.due_at END,
 		state='queued',generation=node_explorer_work.generation+1,attempts=0,error=''
-		 WHERE EXCLUDED.kind NOT IN ('recovery','normal-recovery') AND (node_explorer_work.state='done' OR
+		 WHERE (node_explorer_work.state='done' OR
 			 (node_explorer_work.state='queued' AND NOT (node_explorer_work.error LIKE $2 AND node_explorer_work.due_at>now())
 		 AND (EXCLUDED.due_at<node_explorer_work.due_at OR
 		 (EXCLUDED.kind IN ('risk','exit') AND EXCLUDED.priority>node_explorer_work.priority))))`, b, configRejectedPattern())
@@ -84,35 +83,21 @@ func onceDue(ctx context.Context, tx pgx.Tx, kind, key string, p Payload, due ti
 
 func (r *Runner) schedule(ctx context.Context) error {
 	switch r.Config.Role {
-	case "recovery":
-		// Strict recovery upkeep moves here with the merged role: requeue
-		// finished markers on their backoff, skip hosting-gone candidates, and
-		// advance freshly failed normal-recovery rows.
-		if err := r.Repo.retryResidentialRecovery(ctx); err != nil {
-			return err
-		}
-		if err := r.Repo.skipHostingRecovery(ctx); err != nil {
-			return err
-		}
-		return r.scheduleNormalRecovery(ctx)
 	case "exit-attributes":
 		// 属性/风险任务由 exit 结果投递与 recur 自续期产生，本服务无需周期扫描。
 		return nil
 	case "exit-provision":
 	default:
-		// Per-node liveness scheduling moved into the sweeper round (§3.3);
-		// retired recoveries are promoted by the round commit.
+		// Node availability is owned exclusively by node-liveness.
 		return nil
 	}
 	// exit-provision keeps re-deriving exit checks and risk top-ups for the
-	// unretired set ahead of their due time; completed rows refresh so repeated
+	// available set ahead of their due time; completed rows refresh so repeated
 	// scans stay a no-op for unchanged state.
 	rows, err := r.Repo.Pool.Query(ctx, `SELECT n.identity,n.incarnation,c.payload,e.payload,a.payload
 	FROM node_explorer_node_registry n LEFT JOIN node_explorer_connectivity c USING(identity)
 	LEFT JOIN node_explorer_exits e USING(identity) LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
-	LEFT JOIN node_explorer_retired_nodes t USING(identity)
-	WHERE n.available AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)
-	AND t.identity IS NULL`)
+	WHERE n.available AND EXISTS(SELECT 1 FROM node_explorer_snapshots s WHERE s.id=n.snapshot_id)`)
 	if err != nil {
 		return err
 	}
@@ -178,8 +163,8 @@ func (r *Runner) schedule(ctx context.Context) error {
 	return tx.Commit(ctx)
 }
 
-// Repeated ordinary exit failures back off without slowing independent recovery
-// proofs. A new incarnation or a newer successful connectivity proof retries now.
+// Ordinary exit failures back off. A new incarnation or a newer successful
+// connectivity observation retries now.
 func ordinaryExitDue(exit domain.ExitState, live domain.ConnectivityState, incarnation string, base time.Duration, now time.Time) time.Time {
 	if exit.Incarnation != "" && exit.Incarnation != incarnation {
 		return now
@@ -212,8 +197,8 @@ func nextDue(stamp string, interval time.Duration) time.Time {
 	return t.Add(interval)
 }
 
-// guard rechecks retirement after the network requests and serializes against
-// lifecycle transitions. Manual disable always wins over in-flight probes.
+// guard reads current availability after the network request. Exit and attribute
+// workers cannot publish facts for a node that liveness has made unavailable.
 func guard(ctx context.Context, tx pgx.Tx, p Payload) (bool, error) {
 	var id string
 	err := tx.QueryRow(ctx, `SELECT identity FROM node_explorer_node_registry WHERE identity=$1 AND available AND ($2::text='' OR incarnation=$2)
@@ -224,15 +209,7 @@ func guard(ctx context.Context, tx pgx.Tx, p Payload) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	var row store.RetiredRow
-	err = tx.QueryRow(ctx, `SELECT retired_at,reason FROM node_explorer_retired_nodes WHERE identity=$1`, p.Identity).Scan(&row.RetiredAt, &row.Reason)
-	if err == pgx.ErrNoRows {
-		return p.RetiredAt == "", nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return p.RetiredAt != "" && row.RetiredAt == p.RetiredAt && row.Reason == p.Reason && automatic(row.Reason), nil
+	return true, nil
 }
 
 func scheduleIP(ctx context.Context, tx pgx.Tx, ip, id string, priority int) error {
