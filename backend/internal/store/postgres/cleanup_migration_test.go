@@ -9,7 +9,7 @@ func TestCleanupRetirementMigrationIsScopedAndIdempotent(t *testing.T) {
 	a := testAdapter(t)
 	ctx := context.Background()
 	// Simulate the deployed schema, including an older version-8 marker.
-	_, err := a.pool.Exec(ctx, `DELETE FROM node_explorer_service_migrations WHERE version=13;
+	_, err := a.pool.Exec(ctx, `DELETE FROM node_explorer_service_migrations WHERE version>=13;
  INSERT INTO node_explorer_service_migrations(version) VALUES(8) ON CONFLICT DO NOTHING;
  INSERT INTO node_explorer_work(kind,key,due_at,state,generation,lease_token,lease_until,payload) VALUES
  ('node-cleanup','old',now(),'running',3,'old-token',now()+interval '1 minute','{}'),

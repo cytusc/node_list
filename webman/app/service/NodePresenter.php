@@ -158,7 +158,7 @@ final class NodePresenter
     /**
      * 剥离凭证字段，对应 Go 的 Node.ClearCredentials + api.publicSnapshot。
      *
-     * 纵深防御：live 视图在 SQL 里已经 `- 'rawLink' - 'rawConfig'`，这里再兜一次，
+     * 纵深防御：live 视图在 SQL 里已经 `- 'rawLink' - 'generatedLink' - 'rawConfig'`，这里再兜一次，
      * 避免将来视图改动或换数据源时把订阅链接/完整配置漏给浏览器。
      * 原始链接等于账号凭证，泄露面比「少一个字段」严重得多。
      *
@@ -167,7 +167,7 @@ final class NodePresenter
      */
     private static function publicNode(array $node): array
     {
-        unset($node['rawLink'], $node['rawConfig']);
+        unset($node['rawLink'], $node['generatedLink'], $node['rawConfig']);
         return $node;
     }
 

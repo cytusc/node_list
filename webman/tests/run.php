@@ -168,6 +168,7 @@ $node = NodePresenter::node([
     'details' => [['k' => '加密', 'v' => 'aes', 'extra' => 'ignored']],
     'lifecycle' => ['status' => 'active'],
     'rawLink' => 'ss://secret',   // 必须被剥离
+    'generatedLink' => 'http://generated-secret:password@example.com:80',
     'rawConfig' => ['server' => 'x'],
     'addedAt' => '2026-10-17T00:00:00Z',
     'checkedAt' => '2026-10-18T00:00:00Z',
@@ -185,6 +186,7 @@ ok(array_key_exists('media', $nullMedia) && $nullMedia['media'] === null, 'media
 same([['k' => '加密', 'v' => 'aes']], $node['details'] ?? null, 'details 只保留 k/v');
 same(['status' => 'active'], $node['lifecycle'] ?? null, 'lifecycle 原样输出');
 ok(!array_key_exists('rawLink', $node), 'rawLink 被剥离');
+ok(!array_key_exists('generatedLink', $node), '生成链接凭据被剥离');
 ok(!array_key_exists('rawConfig', $node), 'rawConfig 被剥离');
 
 // 键顺序必须与 Go 的结构体声明顺序一致（前端不依赖，但快照指纹依赖）
@@ -299,7 +301,7 @@ function nl_fact(array $p): stdClass
 
 $raw = [
     nl_fact([
-        'identity' => 'id-us', 'snapshot_id' => 10, 'node_index' => 0, 'country' => 'US', 'region' => 'US',
+        'identity' => 'id-us', 'has_original_link' => true, 'snapshot_id' => 10, 'node_index' => 0, 'country' => 'US', 'region' => 'US',
         'name' => '美国 01', 'base_name' => '美国 01', 'server' => 's', 'sni' => '', 'node_type' => 'ss',
         'protocol' => 'ss', 'network' => 'tcp', 'speed' => 1048576, 'tls' => true, 'reality' => true, 'udp' => true,
         'speed_test' => true, 'media_check' => true, 'checked_at' => '2026-10-18T00:00:00Z',
@@ -312,7 +314,7 @@ $raw = [
         'media' => json_encode(['Netflix']),
     ]),
     nl_fact([
-        'identity' => 'id-jp', 'snapshot_id' => 10, 'node_index' => 1, 'country' => 'JP', 'region' => 'JP',
+        'identity' => 'id-jp', 'has_original_link' => 'f', 'snapshot_id' => 10, 'node_index' => 1, 'country' => 'JP', 'region' => 'JP',
         'name' => '日本 10', 'base_name' => '日本 10', 'server' => 's', 'sni' => '', 'node_type' => 'ss',
         'protocol' => 'ss', 'network' => 'tcp', 'speed' => 2097152, 'tls' => true, 'reality' => true, 'udp' => false,
         'speed_test' => true, 'media_check' => true, 'checked_at' => '2026-10-18T00:00:00Z',
@@ -400,6 +402,9 @@ same('德国 02', $bySpeedAsc[0]['name'], 'speed asc 第一条是速度 0 的节
 
 // facets / summary（基于全量，不受筛选影响）
 $body = $live->buildBody($rows, $rows, $payloads, count($rows), 0, 0, $now);
+same(true, $body['nodes'][0]['hasOriginalLink'], '数据库有原始链接时允许复制');
+same(false, $body['nodes'][1]['hasOriginalLink'], '数据库无原始链接时禁用复制');
+same(false, $body['nodes'][2]['hasOriginalLink'], '缺失原始链接状态时禁用复制');
 same(5, $body['totalNodes'], 'summary.totalNodes 是全量节点数');
 same(5, $body['summary']['countries'], 'summary.countries 计不重复非空地区');
 same(2097152, $body['summary']['maxSpeed'], 'summary.maxSpeed');

@@ -16,6 +16,7 @@ test("copies the exact stored link and never substitutes a missing link with con
         nodes: [
           {
             identity: "stored-node",
+            hasOriginalLink: true,
             name: "Stored node",
             type: "vless",
             server: "example.org",
@@ -52,4 +53,51 @@ test("copies the exact stored link and never substitutes a missing link with con
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
     original,
   );
+});
+
+test("disables copying when the database has no original link", async ({
+  page,
+}) => {
+  await page.route("**/api/results?**", (route) =>
+    fulfillRoute(route, {
+      json: {
+        speedTest: false,
+        mediaCheck: false,
+        nodes: [
+          {
+            identity: "config-only",
+            hasOriginalLink: false,
+            name: "Config only",
+            type: "http",
+            server: "51.159.225.197",
+            port: "19362",
+            network: "tcp",
+            tls: true,
+            udp: false,
+            speed: 0,
+          },
+        ],
+      },
+    }),
+  );
+  let requests = 0;
+  await page.route("**/api/nodes/link", (route) => {
+    requests++;
+    return route.abort();
+  });
+  await page.goto("/");
+  const button = page.getByRole("button", {
+    name: "复制 Config only 节点链接",
+  });
+  await expect(button).toBeDisabled();
+  await expect(button).toHaveAttribute(
+    "title",
+    "数据库暂无可用的节点链接，无法复制",
+  );
+  await page.getByRole("button", { name: "Config only", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "复制 Config only 节点链接" }).last(),
+  ).toBeDisabled();
+  await expect(page.getByText("无可用链接", { exact: true })).toBeVisible();
+  expect(requests).toBe(0);
 });

@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"log"
 	"sort"
 	"time"
 
@@ -68,6 +71,46 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
 	if _, err = tx.Exec(ctx, `LOCK TABLE node_explorer_snapshots,node_explorer_ippure_results IN EXCLUSIVE MODE`); err != nil {
 		return err
 	}
+	// Read originals before folding/compacting. A later config-only round
+	// must not erase an earlier source URI for the same complete connection.
+	originals := map[string]string{}
+	oldRows, e := tx.Query(ctx, `SELECT connection_key,node->>'rawLink' FROM node_explorer_node_registry
+     WHERE connection_key<>'' AND coalesce(node->>'rawLink','')<>''
+     UNION ALL SELECT connection_key,link FROM node_explorer_node_links WHERE origin='original' ORDER BY 1,2`)
+	if e != nil {
+		return e
+	}
+	for oldRows.Next() {
+		var key, link string
+		if e = oldRows.Scan(&key, &link); e != nil {
+			oldRows.Close()
+			return e
+		}
+		if _, ok := originals[key]; !ok {
+			originals[key] = link
+		}
+	}
+	oldRows.Close()
+	if e = oldRows.Err(); e != nil {
+		return e
+	}
+	type linkRecord struct {
+		ID     string `json:"id"`
+		Key    string `json:"connection_key"`
+		Link   string `json:"link"`
+		Origin string `json:"origin"`
+	}
+	records := map[string]linkRecord{}
+	remember := func(key, link, origin string) {
+		if key == "" || link == "" {
+			return
+		}
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(key+"\x00"+origin+"\x00"+link)))
+		records[digest] = linkRecord{digest, key, link, origin}
+	}
+	for key, link := range originals {
+		remember(key, link, "original")
+	}
 	rows, err := tx.Query(ctx, `SELECT s.id,s.imported_at,s.payload,coalesce(c.revision,0)
  FROM node_explorer_snapshots s LEFT JOIN node_explorer_results_changes c ON c.snapshot_id=s.id
  LEFT JOIN node_explorer_registry_batches b ON b.snapshot_id=s.id
@@ -109,7 +152,24 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
 			}
 		}
 		for index, n := range snap.Nodes {
+			// Identity is calculated from the unchanged upstream record.
 			identity := domain.AggregateIdentity(n)
+			key := domain.ConnectionKey(n)
+			if n.RawLink != "" {
+				archiveKey := key
+				if archiveKey == "" {
+					archiveKey = "identity:" + identity
+				}
+				remember(archiveKey, n.RawLink, "original")
+				originals[key] = n.RawLink
+			}
+			if n.RawLink == "" && key != "" {
+				n.RawLink = originals[key]
+			}
+			if e := domain.EnsureNodeLink(&n); e != nil {
+				log.Printf("registry: share-link export unavailable: %v", e)
+			}
+			remember(key, n.GeneratedLink, "generated")
 			if identity == "" {
 				continue
 			}
@@ -140,6 +200,26 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
 	rows.Close()
 	if err = rows.Err(); err != nil {
 		return err
+	}
+
+	// Older batches may hold the original while the newest winning record
+	// carries only a generated fallback. Finish reconciliation after the scan.
+	for id, entry := range nodes {
+		if entry.Node.RawLink == "" && entry.ConnectionKey != "" {
+			entry.Node.RawLink = originals[entry.ConnectionKey]
+			nodes[id] = entry
+		}
+	}
+	// Archive every encountered URI before selecting winners or deleting old
+	// snapshot members. This table is the durable provenance record.
+	archive := &pgx.Batch{}
+	for _, record := range records {
+		archive.Queue(`INSERT INTO node_explorer_node_links(id,connection_key,link,origin) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`, record.ID, record.Key, record.Link, record.Origin)
+	}
+	if archive.Len() > 0 {
+		if err = tx.SendBatch(ctx, archive).Close(); err != nil {
+			return err
+		}
 	}
 
 	memberIDs := make([]int, len(markers))
@@ -188,7 +268,11 @@ func (r *Repository) syncRegistry(ctx context.Context) error {
  WHERE NOT EXISTS(SELECT 1 FROM node_explorer_deleted_nodes d WHERE d.identity=x.identity AND x.source_at<=d.deleted_at)
  AND (old.identity IS NULL OR ($2 OR x.source_at>old.source_at OR (x.source_at=old.source_at AND x.snapshot_id>=old.snapshot_id))
  AND (NOT old.available OR old.node<>x.node OR old.snapshot_id<>x.snapshot_id OR old.node_index<>x.node_index OR old.source_at<>x.source_at OR old.connection_key<>x.connection_key OR (x.historical_residential AND NOT old.historical_residential)))
- ON CONFLICT(identity) DO UPDATE SET node=EXCLUDED.node,snapshot_id=EXCLUDED.snapshot_id,node_index=EXCLUDED.node_index,
+ ON CONFLICT(identity) DO UPDATE SET node=CASE
+ WHEN current.connection_key<>'' AND current.connection_key=EXCLUDED.connection_key
+ AND coalesce(current.node->>'rawLink','')<>'' AND coalesce(EXCLUDED.node->>'rawLink','')=''
+ THEN EXCLUDED.node || jsonb_build_object('rawLink',current.node->>'rawLink')
+ ELSE EXCLUDED.node END,snapshot_id=EXCLUDED.snapshot_id,node_index=EXCLUDED.node_index,
  available=true,source_at=EXCLUDED.source_at,connection_key=EXCLUDED.connection_key,historical_residential=current.historical_residential OR EXCLUDED.historical_residential`, raw, full)
 		if err != nil {
 			return err

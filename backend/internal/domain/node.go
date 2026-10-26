@@ -136,20 +136,22 @@ type Node struct {
 	SNI      string `json:"sni,omitempty"`
 	// Programmatically created nodes render TLS/UDP/Speed by default. Decoded
 	// nodes additionally preserve the source's absent/zero/null distinctions.
-	TLS            bool        `json:"tls"`
-	Reality        bool        `json:"reality,omitempty"`
-	UDP            bool        `json:"udp"`
-	Network        string      `json:"network,omitempty"`
-	Speed          float64     `json:"speed"`
-	Country        string      `json:"country,omitempty"`
-	ClaimedCountry string      `json:"claimedCountry,omitempty"`
-	IP             string      `json:"ip,omitempty"`
-	IPRisk         string      `json:"ipRisk,omitempty"`
-	Media          []Media     `json:"media,omitempty"`
-	SubTag         string      `json:"subTag,omitempty"`
-	Details        []Detail    `json:"details,omitempty"`
-	RawLink        string      `json:"rawLink,omitempty"`
-	RawConfig      ProxyConfig `json:"rawConfig,omitempty"`
+	TLS            bool     `json:"tls"`
+	Reality        bool     `json:"reality,omitempty"`
+	UDP            bool     `json:"udp"`
+	Network        string   `json:"network,omitempty"`
+	Speed          float64  `json:"speed"`
+	Country        string   `json:"country,omitempty"`
+	ClaimedCountry string   `json:"claimedCountry,omitempty"`
+	IP             string   `json:"ip,omitempty"`
+	IPRisk         string   `json:"ipRisk,omitempty"`
+	Media          []Media  `json:"media,omitempty"`
+	SubTag         string   `json:"subTag,omitempty"`
+	Details        []Detail `json:"details,omitempty"`
+	RawLink        string   `json:"rawLink,omitempty"`
+	// GeneratedLink is converted from config only when no upstream URI exists.
+	GeneratedLink string      `json:"generatedLink,omitempty"`
+	RawConfig     ProxyConfig `json:"rawConfig,omitempty"`
 
 	// Enrichment and presentation state. Never part of a snapshot fingerprint.
 	IPPure       *IPPureResult      `json:"ippure,omitempty"`
@@ -235,9 +237,10 @@ func (n Node) MarshalJSON() ([]byte, error) {
 // responses and snapshot identities must exclude even empty credential fields.
 func (n *Node) ClearCredentials() {
 	n.RawLink = ""
+	n.GeneratedLink = ""
 	n.RawConfig = nil
 	for i, f := range nodeJSONFields {
-		if f.name == "rawLink" || f.name == "rawConfig" {
+		if f.name == "rawLink" || f.name == "rawConfig" || f.name == "generatedLink" {
 			bit := uint64(1) << i
 			n.shape.present &^= bit
 			n.shape.nulls &^= bit
@@ -308,7 +311,7 @@ func (s Snapshot) Clone() Snapshot {
 var Fields = []string{
 	"name", "baseName", "type", "server", "port", "sni", "tls", "reality",
 	"udp", "network", "speed", "country", "ip", "ipRisk", "media", "subTag",
-	"details", "rawLink", "rawConfig",
+	"details", "rawLink", "generatedLink", "rawConfig",
 }
 
 // MediaPlatform mirrors the upstream accessor that tolerates both key casings.

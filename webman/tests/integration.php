@@ -198,6 +198,21 @@ foreach ($all['nodes'] as $node) {
 ok($us !== null, '找到美国节点');
 ok(!array_key_exists('rawLink', $us ?? []), '节点的 rawLink 不出现在响应里');
 ok(!array_key_exists('rawConfig', $us ?? []), '节点的 rawConfig 不出现在响应里');
+ok(!array_key_exists('generatedLink', $us ?? []), '生成链接不出现在列表响应里');
+same(true, $us['hasOriginalLink'] ?? null, '原始链接存在时可复制');
+foreach ($all['nodes'] as $node) {
+    if ($node['identity'] !== 'id-us-ss') same(false, $node['hasOriginalLink'] ?? null, '无原始链接的节点不可复制');
+}
+Db::statement("UPDATE node_explorer_node_registry SET node=node || jsonb_build_object('generatedLink','http://generated:test@198.51.100.20:8443') WHERE identity='id-jp-vmess'");
+$generatedPage = $run(['page' => '1', 'limit' => '50']);
+foreach ($generatedPage['nodes'] as $item) {
+    if ($item['identity'] === 'id-jp-vmess') {
+        same(true, $item['hasOriginalLink'] ?? null, '已保存生成链接的节点可复制');
+        ok(!array_key_exists('generatedLink', $item), '生成链接凭据不通过列表泄露');
+    }
+}
+Db::statement("UPDATE node_explorer_node_registry SET node=node-'generatedLink' WHERE identity='id-jp-vmess'");
+
 same('443', $us['port'] ?? null, 'port 统一为字符串');
 same(['status' => 'active'], $us['lifecycle'] ?? null, 'lifecycle 固定 active');
 same('residential', $us['ippure']['classification']['state'] ?? null, 'ippure.classification 透出住宅判定');

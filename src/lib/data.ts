@@ -45,6 +45,7 @@ export type IPPureResult = {
 };
 export type NodeRecord = {
   identity?: string;
+  hasOriginalLink?: boolean;
   addedAt?: string;
   connectivity?: { checkedAt: string; reachable: boolean; error?: string };
   exit?: {

@@ -83,7 +83,8 @@ try {
     support\Db::statement('CREATE TABLE node_explorer_live_facts (identity TEXT PRIMARY KEY, node TEXT)');
     $original = 'vless://stored@example.org:443?path=%2Fa#%E8%8A%82%E7%82%B9';
     support\Db::table('node_explorer_live_facts')->insert([
-        ['identity' => 'with-link', 'node' => json_encode(['rawLink' => $original, 'rawConfig' => ['password' => 'never-export-this']])],
+        ['identity' => 'with-link', 'node' => json_encode(['rawLink' => $original, 'generatedLink' => 'http://fallback.invalid:80', 'rawConfig' => ['password' => 'never-export-this']])],
+        ['identity' => 'generated', 'node' => json_encode(['generatedLink' => 'http://127.0.0.1:8080#generated'])],
         ['identity' => 'config-only', 'node' => json_encode(['rawConfig' => ['type' => 'vless', 'uuid' => 'do-not-build-a-link']])],
     ]);
     $links = new app\controller\NodeLinkController();
@@ -91,6 +92,7 @@ try {
     verify(json_decode($copied->rawBody(), true)['content'] === $original, 'Original database link returned byte for byte');
     verify(!str_contains($copied->rawBody(), 'never-export-this'), 'No rawConfig in link response');
     verify($copied->getHeader('Cache-Control') === 'no-store', 'Link response cannot be cached');
+    verify(json_decode($links->index(authRequest('/api/nodes/link', ['identity' => 'generated']))->rawBody(), true)['content'] === 'http://127.0.0.1:8080#generated', 'Stored generated fallback returned when original is absent');
     verify($links->index(authRequest('/api/nodes/link', ['identity' => 'config-only']))->getStatusCode() === 422, 'Configuration-only node never produces a link');
     verify($links->index(authRequest('/api/nodes/link', ['identity' => 'absent']))->getStatusCode() === 404, 'Unavailable node cannot be copied');
     verify($links->index(authRequest('/api/nodes/link', ['identity' => []]))->getStatusCode() === 400, 'Invalid identifier rejected');

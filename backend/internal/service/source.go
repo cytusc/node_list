@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cytusc/node_list/backend/internal/domain"
 	"github.com/cytusc/node_list/backend/internal/publicproxy"
 	"github.com/cytusc/node_list/backend/internal/qilan"
 	"github.com/cytusc/node_list/backend/internal/source"
@@ -69,6 +70,24 @@ func (r *Repository) runSource(ctx context.Context, st *store.Store) error {
 		if writeErr != nil {
 			return writeErr
 		}
+		// Read the original subscription again for historical config-only
+		// records. A regenerated URI is never treated as recovered provenance.
+		if raw, readErr := os.ReadFile(links); readErr == nil {
+			originals, parseErr := domain.ParseShareLinks(string(raw))
+			if parseErr != nil {
+				return parseErr
+			}
+			restored, recoverErr := r.recoverSourceLinks(ctx, &domain.Sources{Links: originals})
+			if recoverErr != nil {
+				return recoverErr
+			}
+			if restored > 0 {
+				log.Printf("source-ingest: restored %d original node links", restored)
+			}
+		} else if !os.IsNotExist(readErr) {
+			return readErr
+		}
+
 		return r.SyncRegistry(ctx, st)
 	}
 	enabled := map[string]bool{}

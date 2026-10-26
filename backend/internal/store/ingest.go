@@ -118,7 +118,7 @@ func (i *Ingestor) importLocked(ctx context.Context, snap domain.Snapshot, sourc
 		MediaCheck: snap.MediaCheck,
 		Nodes:      make([]domain.Node, 0, len(snap.Nodes)),
 	}
-	seen := make(map[string]bool, len(snap.Nodes))
+	seen := make(map[string]int, len(snap.Nodes))
 	i.admissionRejected = false
 	duplicates := 0
 	rejected := make(map[string]int)
@@ -132,13 +132,18 @@ func (i *Ingestor) importLocked(ctx context.Context, snap domain.Snapshot, sourc
 				return errors.New("results and node sources do not match; retry after upstream finishes publishing")
 			}
 			if source != nil {
-				if len(source.RawConfig) > 0 {
+				if len(node.RawConfig) == 0 && len(source.RawConfig) > 0 {
 					node.RawConfig = source.RawConfig
 				}
-				if source.RawLink != "" {
+				if node.RawLink == "" && source.RawLink != "" {
 					node.RawLink = source.RawLink
 				}
 			}
+		}
+		// Persist a usable fallback only when the source has no original URI.
+		// Never overwrite rawLink with a normalized/generated spelling.
+		if err := domain.EnsureNodeLink(&node); err != nil {
+			log.Printf("ingest: share-link export unavailable: %v", err)
 		}
 		if err := domain.NodeAdmissionError(node); err != nil {
 			var detail *domain.ShareLinkError
@@ -150,11 +155,19 @@ func (i *Ingestor) importLocked(ctx context.Context, snap domain.Snapshot, sourc
 			continue
 		}
 		id := domain.AggregateIdentity(node)
-		if seen[id] {
+		if index, exists := seen[id]; exists {
+			// Duplicate observations may arrive config-first, URI-second.
+			// Preserve the richer provenance instead of dropping that URI.
+			if normalized.Nodes[index].RawLink == "" {
+				normalized.Nodes[index].RawLink = node.RawLink
+			}
+			if normalized.Nodes[index].GeneratedLink == "" {
+				normalized.Nodes[index].GeneratedLink = node.GeneratedLink
+			}
 			duplicates++
 			continue
 		}
-		seen[id] = true
+		seen[id] = len(normalized.Nodes)
 		normalized.Nodes = append(normalized.Nodes, node)
 	}
 	for _, filter := range i.filters {

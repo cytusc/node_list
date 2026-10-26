@@ -89,18 +89,40 @@ func (a *Adapter) initSchema() error {
 
 // Insert stores a detection batch, ignoring duplicates by fingerprint.
 func (a *Adapter) Insert(ctx context.Context, fingerprint string, payload []byte, checkedAt string, nodeCount int) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var existing []byte
+	lookupErr := tx.QueryRowContext(ctx, `SELECT payload FROM snapshots WHERE fingerprint=?`, fingerprint).Scan(&existing)
+	if lookupErr != nil && lookupErr != sql.ErrNoRows {
+		return lookupErr
+	}
+	if lookupErr == nil {
+		merged, changed, e := domain.MergeSnapshotLinks(existing, payload)
+		if e != nil {
+			return e
+		}
+		if changed {
+			if _, e = tx.ExecContext(ctx, `UPDATE snapshots SET payload=? WHERE fingerprint=?`, string(merged), fingerprint); e != nil {
+				return e
+			}
+		}
+		return tx.Commit()
+	}
 	var checked any
 	if checkedAt != "" {
 		checked = checkedAt
 	}
-	_, err := a.db.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO snapshots
 		(fingerprint, checked_at, imported_at, node_count, payload) VALUES (?, ?, ?, ?, ?)`,
 		fingerprint, checked, store.NowTimestamp(), nodeCount, string(payload))
 	if err != nil {
 		return fmt.Errorf("insert snapshot: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // Get returns one batch, or the newest when id is nil.

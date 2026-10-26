@@ -91,7 +91,7 @@ func quoteConnValue(value string) string {
 // schemaVersion bumps whenever base tables, service SQL or live views change.
 // Forgetting to bump it is silent: the new statements simply never run against
 // an existing database (that is how node_explorer_work_identity went missing).
-const schemaVersion = 13
+const schemaVersion = 14
 
 type Adapter struct {
 	pool *pgxpool.Pool
@@ -195,6 +195,10 @@ func (a *Adapter) initSchema(ctx context.Context) error {
 	if err = createServicesSchema(ctx, tx); err != nil {
 		return err
 	}
+	// v14 must revisit retained config-only batches once for link recovery.
+	if _, err = tx.Exec(ctx, `DELETE FROM node_explorer_registry_batches`); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_service_migrations(version) VALUES($1)`, schemaVersion); err != nil {
 		return err
 	}
@@ -223,15 +227,47 @@ func (a *Adapter) Insert(ctx context.Context, fingerprint string, payload []byte
 	if err != nil {
 		return err
 	}
+	if err = archiveNodeLinks(ctx, tx, payload); err != nil {
+		return err
+	}
 	if checkedAt != "" {
 		var existing []byte
-		e := tx.QueryRow(ctx, `SELECT payload FROM node_explorer_snapshots WHERE checked_at=$1 AND node_count=$2 ORDER BY id DESC LIMIT 1`, checkedAt, nodeCount).Scan(&existing)
+		var existingID int
+		e := tx.QueryRow(ctx, `SELECT id,payload FROM node_explorer_snapshots WHERE checked_at=$1 AND node_count=$2 ORDER BY id DESC LIMIT 1`, checkedAt, nodeCount).Scan(&existingID, &existing)
 		if e != nil && e != pgx.ErrNoRows {
 			return e
 		}
 		if e == nil && sameSnapshotContent(existing, payload) {
+			merged, changed, mergeErr := domain.MergeSnapshotLinks(existing, payload)
+			if mergeErr != nil {
+				return mergeErr
+			}
+			if changed {
+				if _, err = tx.Exec(ctx, `UPDATE node_explorer_snapshots SET payload=$2 WHERE id=$1`, existingID, string(merged)); err != nil {
+					return err
+				}
+			}
 			return tx.Commit(ctx)
 		}
+	}
+	// Fingerprints exclude credentials. Enrich a duplicate instead of losing
+	// its original URL; keep its ID and observation timestamps stable.
+	var prior []byte
+	lookupErr := tx.QueryRow(ctx, `SELECT payload FROM node_explorer_snapshots WHERE fingerprint=$1`, fingerprint).Scan(&prior)
+	if lookupErr != nil && lookupErr != pgx.ErrNoRows {
+		return lookupErr
+	}
+	if lookupErr == nil {
+		merged, changed, e := domain.MergeSnapshotLinks(prior, payload)
+		if e != nil {
+			return e
+		}
+		if changed {
+			if _, err = tx.Exec(ctx, `UPDATE node_explorer_snapshots SET payload=$2 WHERE fingerprint=$1`, fingerprint, string(merged)); err != nil {
+				return err
+			}
+		}
+		return tx.Commit(ctx)
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO node_explorer_snapshots(fingerprint,checked_at,imported_at,node_count,payload)
  VALUES($1,$2,$3,$4,$5) ON CONFLICT(fingerprint) DO NOTHING`, fingerprint, nullIfEmpty(checkedAt), store.NowTimestamp(), nodeCount, string(payload))

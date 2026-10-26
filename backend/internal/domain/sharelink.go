@@ -547,7 +547,7 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 		}
 	case "https":
 		proxy["type"] = "http"
-		proxy["tls"] = true
+		applyTLSSettings(proxy, get, true)
 		if user != "" {
 			proxy["username"] = user
 		}

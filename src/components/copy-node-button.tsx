@@ -13,6 +13,7 @@ export function CopyNodeButton({
   node: NodeRecord;
   showLabel?: boolean;
 }) {
+  const missingLink = node.hasOriginalLink === false;
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   async function copy(source: HTMLElement) {
@@ -43,11 +44,13 @@ export function CopyNodeButton({
     <Button
       variant="outline"
       size={showLabel ? "sm" : "icon"}
-      disabled={busy || !node.identity}
+      disabled={busy || !node.identity || missingLink}
       title={
-        node.identity
-          ? "复制数据库保存的原始节点链接"
-          : "此节点暂无可复制的连接信息"
+        missingLink
+          ? "数据库暂无可用的节点链接，无法复制"
+          : node.identity
+            ? "复制数据库保存的原始节点链接"
+            : "此节点暂无可复制的连接信息"
       }
       aria-label={`复制 ${plainName(node)} 节点链接`}
       onClick={(event) => {
@@ -62,7 +65,14 @@ export function CopyNodeButton({
       ) : (
         <Copy className="size-4" />
       )}
-      {showLabel && (busy ? "正在复制…" : copied ? "已复制" : "复制节点链接")}
+      {showLabel &&
+        (missingLink
+          ? "无可用链接"
+          : busy
+            ? "正在复制…"
+            : copied
+              ? "已复制"
+              : "复制节点链接")}
     </Button>
   );
 }

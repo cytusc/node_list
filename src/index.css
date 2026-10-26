@@ -488,24 +488,8 @@ select option {
 .desktop-table table {
   table-layout: fixed;
 }
-.desktop-table [data-column="time"],
 .desktop-table [data-column="copy"] {
-  position: sticky;
-  z-index: 1;
-  background: var(--background);
-}
-.desktop-table [data-column="time"] {
-  right: 48px;
-  border-left: 1px solid var(--border);
-}
-.desktop-table [data-column="copy"] {
-  right: 0;
   text-align: center;
-}
-.desktop-table
-  .node-row:hover
-  td:is([data-column="time"], [data-column="copy"]) {
-  background: var(--accent);
 }
 .desktop-table td[data-column="copy"] button {
   width: 30px;

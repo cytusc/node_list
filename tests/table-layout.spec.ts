@@ -2,7 +2,7 @@ import { test, expect } from "./authenticated-fixture";
 import { fulfillRoute } from "./results-fixture";
 
 for (const width of [1440, 1366, 1024]) {
-  test(`table contains long ASN text and keeps time and copy visible at ${width}px`, async ({
+  test(`table contains long ASN text and scrolls time and copy with the table at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 1000 });
@@ -63,13 +63,17 @@ for (const width of [1440, 1366, 1024]) {
     const container = page.locator(
       '.desktop-table [data-slot="table-container"]',
     );
-    const bounds = (await container.boundingBox())!;
     for (const column of ["time", "copy"]) {
       const cell = row.locator(`[data-column="${column}"]`);
-      const box = (await cell.boundingBox())!;
-      expect(box.x).toBeGreaterThanOrEqual(bounds.x);
-      expect(box.x + box.width).toBeLessThanOrEqual(
-        bounds.x + bounds.width + 1,
+      expect(await cell.evaluate((el) => getComputedStyle(el).position)).toBe(
+        "static",
+      );
+      expect(
+        await cell.evaluate((el) => getComputedStyle(el).backgroundColor),
+      ).toBe(
+        await row
+          .locator('[data-column="speed"]')
+          .evaluate((el) => getComputedStyle(el).backgroundColor),
       );
     }
     for (const time of await row.locator("time").all()) {

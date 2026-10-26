@@ -93,6 +93,7 @@ final class LiveResults
     {
         return Db::table(self::factsTable())->select([
             'identity', 'snapshot_id', 'node_index', 'country', 'ip_status',
+            Db::raw("coalesce(nullif(btrim(node->>'rawLink'),''),btrim(node->>'generatedLink'),'')<>'' AS has_original_link"),
             Db::raw("coalesce(nullif(country,''),'unknown') AS region"),
             Db::raw("node->>'name' AS name"),
             Db::raw("node->>'baseName' AS base_name"),
@@ -149,6 +150,7 @@ final class LiveResults
             ]);
             $rows[] = [
                 'identity' => $f->identity,
+                'has_original_link' => self::toBool($f->has_original_link ?? false),
                 'snapshot_id' => (int)$f->snapshot_id,
                 'node_index' => (int)$f->node_index,
                 'country' => $f->country ?? '',
@@ -267,6 +269,7 @@ final class LiveResults
         $nodes = NodePresenter::nodes($pagePayloads);
         foreach ($nodes as $index => &$node) {
             $node['identity'] = $pageRows[$index]['identity'];
+            $node['hasOriginalLink'] = $pageRows[$index]['has_original_link'] ?? false;
         }
         unset($node);
 

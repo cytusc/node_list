@@ -141,8 +141,8 @@ func SummarizeProxy(proxy ProxyConfig) Node {
 	}
 }
 
-// ParseShareLinks decodes a subscription text file into name -> link. A name
-// with more than one distinct link cannot establish provenance and is dropped.
+// ParseShareLinks preserves subscription URI strings verbatim. Matching uses
+// decoded connection credentials, never a name alone.
 func ParseShareLinks(raw string) (map[string]string, error) {
 	text := raw
 	if !strings.Contains(text, "://") {
@@ -157,35 +157,53 @@ func ParseShareLinks(raw string) (map[string]string, error) {
 		}
 		text = string(decoded)
 	}
-	grouped := make(map[string]map[string]struct{})
+	// Keep every original URI, including unnamed and duplicate-name entries.
+	// Display names are metadata, never a safe join key for credentials.
+	links := make(map[string]string)
 	for _, line := range strings.Split(text, "\n") {
 		value := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
 		if value == "" || !strings.Contains(value, "://") {
 			continue
 		}
-		u, err := url.Parse(value)
-		if err != nil {
-			continue
+		name := shareLinkName(value)
+		key := name
+		if key == "" {
+			key = value
 		}
-		name, err := url.QueryUnescape(strings.TrimPrefix(u.Fragment, "#"))
-		if err != nil || name == "" {
-			continue
+		if old, ok := links[key]; ok && old != value {
+			delete(links, key)
+			links[old] = old
+			key = value
 		}
-		if grouped[name] == nil {
-			grouped[name] = make(map[string]struct{})
-		}
-		grouped[name][value] = struct{}{}
+		links[key] = value
 	}
-	links := make(map[string]string, len(grouped))
-	for name, values := range grouped {
-		if len(values) != 1 {
-			continue
-		}
-		for v := range values {
-			links[name] = v
-		}
-	}
+
 	return links, nil
+}
+
+func shareLinkName(link string) string {
+	if strings.HasPrefix(link, "vmess://") {
+		raw, err := decodeBase64(strings.TrimPrefix(link, "vmess://"))
+		if err == nil {
+			var v map[string]any
+			if json.Unmarshal([]byte(raw), &v) == nil {
+				return str(v["ps"])
+			}
+		}
+	}
+	if strings.HasPrefix(link, "ssr://") {
+		raw, err := decodeBase64(strings.TrimPrefix(link, "ssr://"))
+		if err == nil {
+			_, q, _ := strings.Cut(raw, "/?")
+			v, _ := url.ParseQuery(q)
+			name, _ := decodeBase64(v.Get("remarks"))
+			return name
+		}
+	}
+	if u, err := url.Parse(link); err == nil {
+		return u.Fragment
+	}
+	return ""
 }
 
 // Sources holds the raw material used to attach credentials to archived nodes.
@@ -207,10 +225,16 @@ func ReadNodeSources(clashFile, linksFile string) (*Sources, error) {
 	}
 	links := make(map[string]string)
 	if linksFile != "" {
-		if raw, err := os.ReadFile(linksFile); err == nil {
-			if parsed, err := ParseShareLinks(string(raw)); err == nil {
-				links = parsed
+		raw, readErr := os.ReadFile(linksFile)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return nil, fmt.Errorf("read share sources: %w", readErr)
+		}
+		if readErr == nil {
+			parsed, err := ParseShareLinks(string(raw))
+			if err != nil {
+				return nil, fmt.Errorf("parse share sources: %w", err)
 			}
+			links = parsed
 		}
 	}
 	configs := make(map[string][]ProxyConfig, len(proxies))
@@ -271,11 +295,24 @@ func SourceForNode(n Node, sources *Sources, exactNames bool) *Source {
 		return nil
 	}
 	if sources.Configs == nil {
-		rawLink := sources.Links[n.Name]
-		if rawLink == "" || !LinkMatchesConfig(rawLink, n) {
+		var candidates []string
+		for _, link := range sources.Links {
+			proxy, err := ShareLinkProxy(link, n.Name)
+			if err != nil {
+				continue
+			}
+			summary := SummarizeProxy(proxy)
+			want, _ := NodeIdentity(n)
+			got, _ := NodeIdentity(summary)
+			if want == got && (shareLinkName(link) == n.Name || shareLinkName(link) == "") {
+				candidates = append(candidates, link)
+			}
+		}
+		// Without a config, distinct credentials cannot be disambiguated.
+		if len(candidates) != 1 {
 			return nil
 		}
-		return &Source{RawLink: rawLink}
+		return &Source{RawLink: candidates[0]}
 	}
 	key, err := NodeIdentity(n)
 	if err != nil {
@@ -310,8 +347,15 @@ func SourceForNode(n Node, sources *Sources, exactNames bool) *Source {
 	}
 	rawConfig := variants[order[0]]
 	source := &Source{RawConfig: rawConfig}
-	if candidate, ok := sources.Links[str(rawConfig["name"])]; ok && LinkMatchesConfig(candidate, rawConfig) {
-		source.RawLink = candidate
+	var candidates []string
+	for _, candidate := range sources.Links {
+		if LinkMatchesConfig(candidate, rawConfig) {
+			candidates = append(candidates, candidate)
+		}
+	}
+	sort.Strings(candidates)
+	if len(candidates) > 0 {
+		source.RawLink = candidates[0]
 	}
 	return source
 }
@@ -319,61 +363,12 @@ func SourceForNode(n Node, sources *Sources, exactNames bool) *Source {
 // LinkMatchesConfig verifies that a share link describes the same endpoint and
 // credentials as a Clash configuration before the link is stored as provenance.
 func LinkMatchesConfig(link string, config any) bool {
-	u, err := url.Parse(link)
-	if err != nil {
-		return false
-	}
 	proxy, ok := config.(ProxyConfig)
 	if !ok {
 		return false
 	}
-	nodeType := strings.ToLower(strings.TrimSuffix(u.Scheme, ":"))
-	if nodeType == "hy2" {
-		nodeType = "hysteria2"
-	}
-	if nodeType != str(proxy["type"]) {
-		return false
-	}
-	if strings.ToLower(strings.Trim(u.Hostname(), "[]")) != strings.ToLower(str(proxy["server"])) {
-		return false
-	}
-	port := u.Port()
-	if port == "" && u.Scheme == "https" {
-		port = "443"
-	}
-	if port != fmt.Sprintf("%v", proxy["port"]) {
-		return false
-	}
-	user, _ := url.QueryUnescape(u.User.Username())
-	secret, _ := u.User.Password()
-	password, _ := url.QueryUnescape(secret)
-	if str(proxy["type"]) == "vless" && str(proxy["uuid"]) != "" {
-		return user == str(proxy["uuid"])
-	}
-	switch str(proxy["type"]) {
-	case "trojan", "hysteria2", "anytls":
-		if str(proxy["password"]) != "" {
-			expected := user
-			if password != "" {
-				expected = user + ":" + password
-			}
-			return expected == str(proxy["password"])
-		}
-	case "ss":
-		if str(proxy["cipher"]) != "" && str(proxy["password"]) != "" {
-			auth := user
-			if password != "" {
-				auth = user + ":" + password
-			} else if decoded, err := decodeBase64(user); err == nil {
-				auth = decoded
-			}
-			return auth == str(proxy["cipher"])+":"+str(proxy["password"])
-		}
-	}
-	if str(proxy["password"]) == "" {
-		return true
-	}
-	return password == str(proxy["password"])
+	decoded, err := ShareLinkProxy(link, str(proxy["name"]))
+	return err == nil && equivalentShareConfig(proxy, decoded)
 }
 
 // ReconcileResult is the outcome of attaching provenance to one snapshot.
@@ -393,9 +388,11 @@ func ReconcileSnapshot(s Snapshot, linked map[string]Source, prune bool) Reconci
 	changed := false
 	for oldIndex, node := range s.Nodes {
 		updated := node
-		if node.RawConfig == nil && node.RawLink == "" {
-			if source, ok := linked[SourceKey(node)]; ok {
-				updated.RawConfig = source.RawConfig
+		if node.RawLink == "" {
+			if source, ok := linked[SourceKey(node)]; ok && (len(updated.RawConfig) == 0 || LinkMatchesConfig(source.RawLink, updated.RawConfig)) {
+				if updated.RawConfig == nil {
+					updated.RawConfig = source.RawConfig
+				}
 				updated.RawLink = source.RawLink
 			}
 		}

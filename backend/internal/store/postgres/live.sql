@@ -61,7 +61,7 @@ WITH facts AS (
  JOIN node_explorer_node_registry n USING(identity)
 )
 SELECT identity,snapshot_id,node_index,country,
- node - 'rawLink' - 'rawConfig' - 'ippure' - 'connectivity' - 'exit' - 'lifecycle'
+ node - 'rawLink' - 'generatedLink' - 'rawConfig' - 'ippure' - 'connectivity' - 'exit' - 'lifecycle'
  || jsonb_build_object('addedAt',first_seen_at,'lifecycle',jsonb_build_object('status','active'))
  || CASE WHEN connectivity IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('connectivity',connectivity) END
  || CASE WHEN exit IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('exit',exit,'ippure',ippure) END

@@ -169,3 +169,15 @@ BEGIN
   DELETE FROM node_explorer_service_status WHERE service IN ('node-cleanup','lifecycle');
  END IF;
 END $$;
+INSERT INTO node_explorer_service_migrations(version) VALUES(13) ON CONFLICT DO NOTHING;
+
+-- Link provenance is independent of compacted snapshots and node lifecycles.
+-- Never cascade-delete it when a source, snapshot or registry node is pruned.
+-- origin distinguishes upstream bytes from config-derived fallbacks.
+CREATE TABLE IF NOT EXISTS node_explorer_node_links (
+ id text PRIMARY KEY, connection_key text NOT NULL, link text NOT NULL,
+ origin text NOT NULL CHECK(origin IN ('original','generated')),
+ first_seen_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS node_explorer_node_links_connection
+ ON node_explorer_node_links(connection_key,origin,first_seen_at,id);
