@@ -265,6 +265,10 @@ final class LiveResults
             $pagePayloads[] = $payloads[$r['identity']] ?? new stdClass();
         }
         $nodes = NodePresenter::nodes($pagePayloads);
+        foreach ($nodes as $index => &$node) {
+            $node['identity'] = $pageRows[$index]['identity'];
+        }
+        unset($node);
 
         // 字段顺序与 Go 的 resultsResponse 一致：CheckedAt 带 omitempty（空值不输出），
         // 其后依次 speedTest / mediaCheck / totalNodes / summary / facets / nodes / total / page / limit。

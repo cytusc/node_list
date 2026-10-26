@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./authenticated-fixture";
 import { fulfillRoute } from "./results-fixture";
 
 test("refreshes results without closing node details", async ({

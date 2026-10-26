@@ -49,6 +49,11 @@ services:
   # 用 tmpfs 兜；容器重建即丢，无状态。
   node-explorer:
     <<: *app
+    environment:
+      <<: *environment
+      AUTH_USERNAME: ${AUTH_USERNAME:-}
+      AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:-}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3001}:3001"
     tmpfs:

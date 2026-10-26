@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./authenticated-fixture";
 import type { MonitorData } from "../src/lib/monitor";
 
 // The global analytics script is outside this feature; never let its network

@@ -77,13 +77,14 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: "8.4"
-          extensions: mbstring, pdo_pgsql, pcntl, sockets
+          extensions: mbstring, pdo_pgsql, pdo_sqlite, pcntl, sockets
           coverage: none
           tools: composer
       - name: Test the webman API (offline + integration)
         run: |
           composer install --working-dir=webman --no-interaction --no-progress --quiet
           php webman/tests/run.php
+          php webman/tests/auth.php
           # 独立库：集成夹具会 TRUNCATE 相关表，不能和 Go 测试/冒烟共用 node_explorer_test
           psql "postgresql://postgres:test_password@127.0.0.1:5432/postgres" \
             -c "DROP DATABASE IF EXISTS node_explorer_webman_test" \
@@ -191,7 +192,9 @@ jobs:
           done
           # read_only 下 PHP 的 runtime/（pid/status/log/缓存）必须是 tmpfs，
           # 否则 Workerman 起不来——这正是 compose 里 node-explorer 的 tmpfs 段。
+          AUTH_PASSWORD_HASH=$(docker run --rm --entrypoint php "$IMAGE_NAME@$IMAGE_DIGEST" -r "echo password_hash('smoke-test-password', PASSWORD_DEFAULT);")
           docker run -d --read-only --tmpfs /tmp --tmpfs /app/webman/runtime:mode=0777 --network host \
+            -e AUTH_USERNAME=smoke -e AUTH_PASSWORD_HASH="$AUTH_PASSWORD_HASH" -e AUTH_COOKIE_SECURE=false \
             -e PGHOST=127.0.0.1 -e PGPORT=5432 -e PGDATABASE=node_explorer_test \
             -e PGUSER=postgres -e PGPASSWORD=test_password --name node-explorer-smoke "$IMAGE_NAME@$IMAGE_DIGEST"
           trap 'docker logs node-explorer-smoke; docker rm -f node-explorer-smoke' EXIT
@@ -200,7 +203,10 @@ jobs:
             sleep 2
           done
           curl --fail http://127.0.0.1:3001/api/health
-          curl --fail 'http://127.0.0.1:3001/api/results?page=1&limit=50' -o /tmp/results.json
+          test "$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/api/results)" = 401
+          curl --fail -c /tmp/node-explorer-smoke.cookies -H 'X-Node-Explorer: 1' -H 'Content-Type: application/json' \
+            --data '{"username":"smoke","password":"smoke-test-password"}' http://127.0.0.1:3001/api/auth/login
+          curl --fail -b /tmp/node-explorer-smoke.cookies 'http://127.0.0.1:3001/api/results?page=1&limit=50' -o /tmp/results.json
           node -e "const r = JSON.parse(require('fs').readFileSync('/tmp/results.json')); if (r.total !== 0 || r.nodes.length !== 0) process.exit(1)"
           curl --fail http://127.0.0.1:3001/ -o /tmp/index.html
           grep -q 'id="root"' /tmp/index.html

@@ -8,9 +8,9 @@
     "build": "tsc -b && vite build",
     "build:worker": "go -C backend build -o node-worker ./cmd/node-worker",
     "start": "php webman/start.php start",
-    "test": "php webman/tests/run.php",
+    "test": "php webman/tests/run.php && php webman/tests/auth.php",
     "test:backend": "go -C backend vet ./... && go -C backend test -race ./...",
-    "test:api": "php webman/composer.phar install --working-dir=webman --no-interaction && php webman/tests/run.php",
+    "test:api": "php webman/composer.phar install --working-dir=webman --no-interaction && php webman/tests/run.php && php webman/tests/auth.php",
     "test:e2e": "playwright test",
     "dev:worker": "go -C backend run ./cmd/node-worker"
   },

@@ -1,3 +1,4 @@
+import { apiFetch } from "@/lib/api";
 import { useEffect, useState } from "react";
 import {
   Activity,
@@ -277,7 +278,7 @@ export default function Services() {
       controller = new AbortController();
       const timeout = window.setTimeout(() => controller?.abort(), 12000);
       try {
-        const response = await fetch(`/api/services?hours=${hours}`, {
+        const response = await apiFetch(`/api/services?hours=${hours}`, {
           signal: controller.signal,
           cache: "no-store",
         });

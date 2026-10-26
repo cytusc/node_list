@@ -27,8 +27,12 @@ Route::disableDefaultRoute();
 
 Route::group('/api', function () {
     Route::get('/health', [HealthController::class, 'index'])->name('api.health');
-    Route::get('/services', [ServicesController::class, 'index'])->name('api.services');
-    Route::get('/results', [ResultsController::class, 'index'])->name('api.results');
+    Route::get('/auth/session', [app\controller\AuthController::class, 'status']);
+    Route::post('/auth/login', [app\controller\AuthController::class, 'login']);
+    Route::post('/auth/logout', [app\controller\AuthController::class, 'logout']);
+    Route::get('/services', [ServicesController::class, 'index'])->name('api.services')->middleware([app\middleware\Authenticate::class]);
+    Route::get('/results', [ResultsController::class, 'index'])->name('api.results')->middleware([app\middleware\Authenticate::class]);
+    Route::post('/nodes/link', [app\controller\NodeLinkController::class, 'index'])->middleware([app\middleware\Authenticate::class]);
 
     // 订阅下载是显式 404 占位（"订阅下载暂不可用。"），语义是「功能未开」
     // 而不是「路径写错」，所以必须保留具名路由、不能交给兜底。
@@ -44,6 +48,7 @@ Route::group('/api', function () {
 // 否则 GET / 会落到下面的 fallback 变成 404（Go 的 http.FileServer 会自动补）。
 Route::get('/', [StaticController::class, 'root'])->name('static.root');
 Route::get('/services', [StaticController::class, 'root'])->name('static.services');
+Route::get('/login', [StaticController::class, 'root']);
 
 // 前端静态资源由 public/ + 框架的 findFile 先处理，未命中的路径落到这里。
 // 不挂在 /api 组上，避免静态资源也走访问日志。

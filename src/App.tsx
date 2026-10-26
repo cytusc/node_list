@@ -1,3 +1,4 @@
+import { apiFetch } from "@/lib/api";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
@@ -37,6 +38,7 @@ import {
   type PaginationState,
 } from "@tanstack/react-table";
 import { toast, Toaster } from "sonner";
+import { CopyNodeButton } from "@/components/copy-node-button";
 import { copyText } from "@/lib/clipboard";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -454,7 +456,7 @@ export default function App() {
       activeRequest.current = controller;
       if (!background) setLoading(true);
       try {
-        const response = await fetch(resultsUrl, {
+        const response = await apiFetch(resultsUrl, {
           signal: controller.signal,
         });
         const body = await response.json();
@@ -650,18 +652,21 @@ export default function App() {
         enableSorting: false,
         enableHiding: false,
         cell: ({ row }) => (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="detail-button"
-            aria-label={`查看 ${plainName(row.original)} 详情`}
-            onClick={(e) => {
-              e.stopPropagation();
-              setSelected(row.original);
-            }}
-          >
-            <ArrowUpRight className="size-4" />
-          </Button>
+          <div className="flex items-center gap-2">
+            <CopyNodeButton node={row.original} />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="detail-button"
+              aria-label={`查看 ${plainName(row.original)} 详情`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setSelected(row.original);
+              }}
+            >
+              <ArrowUpRight className="size-4" />
+            </Button>
+          </div>
         ),
       },
     ],
@@ -1276,6 +1281,7 @@ export default function App() {
                     <Speed value={selected.speed} max={maxSpeed} />
                   )}
                 </div>
+                <CopyNodeButton node={selected} showLabel />
                 <h3>连接信息</h3>
                 <dl>
                   {[

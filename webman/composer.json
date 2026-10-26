@@ -26,7 +26,7 @@
     }
   },
   "scripts": {
-    "test": "@php tests/run.php",
+    "test": ["@php tests/run.php", "@php tests/auth.php"],
     "test:integration": "@php tests/integration.php"
   },
   "minimum-stability": "stable",

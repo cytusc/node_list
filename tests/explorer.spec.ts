@@ -1,5 +1,5 @@
 import { fulfillRoute } from "./results-fixture";
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./authenticated-fixture";
 
 const snapshot = {
   checkedAt: "2026-10-11T08:06:01+08:00",

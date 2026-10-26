@@ -27,7 +27,7 @@ go -C backend run ./cmd/node-worker -role recovery
 go -C backend run ./cmd/dead-verify
 ```
 
-生产构建使用 `npm run build && npm run build:worker`；接口用 `npm start`（= `php webman/start.php start`），工作进程用 `node-worker -role <角色>` 独立启动。运行时必须接入 PostgreSQL，不再使用 SQLite。测试夹具仍保留 SQLite，用于验证旧行为。接口测试：`npm run test:api`（离线断言）+ `php webman/tests/integration.php`（连库契约，见 `webman/README.md`）。
+生产构建使用 `npm run build && npm run build:worker`；接口用 `npm start`（= `php webman/start.php start`），工作进程用 `node-worker -role <角色>` 独立启动。运行时必须接入 PostgreSQL，不再使用 SQLite。测试夹具仍保留 SQLite，用于验证旧行为。接口测试：`npm run test:api`（离线断言，测试另需 pdo_sqlite 扩展）+ `php webman/tests/integration.php`（连库契约，见 `webman/README.md`）。
 
 ## 容器部署
 
@@ -149,3 +149,19 @@ manager 的控制器健康检查仍每 5 秒执行，全量注册表读取改为
 自动更新使用 ETag 条件查询，并在 GitHub 返回 403 配额耗尽或 429 时，将额度重置时间/Retry-After 写入 `.update-state`，之后的定时检查会在冷却期内跳过请求并明确报告延后。临时网络错误和 5xx 也会延后；失败响应不会进入版本 JSON 解析，更不会改写当前版本或触发降级。正常更新、完整服务清单和失败回滚规则保持不变。
 
 健康检查遇到瞬时超时或非 200 响应时，会再用独立的 3 秒预算复核；注册代理返回 404 仍立即判定内核状态丢失，连续失败才触发全局失效和恢复。并发健康复核串行化且等待可取消，避免扫描高峰时放大控制器请求。manager 的启动宽限调整为 120 秒，更新命令等待上限为 180 秒，以容纳初次全量配置加载；运行中的真实故障判定不受启动宽限影响。
+
+## 登录与复制节点
+
+节点列表和服务监控需要登录；对应 API 同样校验会话，未登录返回 401。未配置账号时默认关闭数据访问，健康检查仍公开。使用 shadcn/ui 登录表单，支持错误提示、退出及会话过期重新登录。
+
+在 Compose 使用的 `.env`（直接运行 webman 时为 `webman/.env`）配置 `AUTH_USERNAME`、`AUTH_PASSWORD_HASH`。先用以下命令生成密码哈希，输入至少 12 字节密码后按回车、Ctrl-D：
+
+```bash
+php webman/tools/hash-password.php
+```
+
+将结果用**单引号**包围后填入，例如 `AUTH_PASSWORD_HASH='$2y$…'`，避免 dotenv / Compose 对 `$` 插值。不要提交实际密码或哈希。生产通过 HTTPS 访问并保持 `AUTH_COOKIE_SECURE=true`；本地 HTTP 开发需设为 `false`。配置后重启 API（Compose 需重建 `node-explorer` 容器）。账号配置只传给 API，不进入前端构建。
+
+会话为 HttpOnly、SameSite=Strict Cookie，固定 8 小时有效，容器重建或修改账号 / 密码哈希后失效。每个直连来源 IP 每 15 分钟最多尝试 10 次登录；反向代理下同一代理连接共享额度，不信任客户端提供的转发头。多副本部署需共享会话和限流存储；当前适用于单 API 容器、多 worker 部署。登录阻止匿名读取，不能阻止拥有有效账号的人采集。
+
+列表每行和详情均提供「复制节点链接」。`POST /api/nodes/link` 在登录校验后按节点 identity 读取单个有效节点，仅复制数据库保存的原始分享链接，不从配置拼接链接；未保存原始链接时明确提示。普通列表响应继续剥离 `rawLink` / `rawConfig`，复制响应禁止缓存。
