@@ -83,7 +83,10 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 		}
 		positions[rejected.Index] = true
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Public source lists can contain tens of thousands of nodes. Saving their
+	// records is intentionally transactional, so allow enough time for the full
+	// batch instead of rolling it back while the per-node rows are persisted.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
