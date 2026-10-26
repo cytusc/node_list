@@ -103,10 +103,10 @@ nodes.append(("id-gb-unavail", 2, 4, n7, None, None, None, False, False))
 
 out = ["BEGIN;"]
 out.append(
-    "TRUNCATE node_explorer_snapshots, node_explorer_retired_nodes, "
-    "node_explorer_ippure_results, node_explorer_node_registry, "
+    "TRUNCATE node_explorer_snapshots, "
+    "node_explorer_node_registry, "
     "node_explorer_connectivity, node_explorer_exits, node_explorer_ip_attributes, "
-    "node_explorer_work, node_explorer_recovery_events, node_explorer_recovery_totals, node_explorer_service_status, node_explorer_lifecycle_events "
+    "node_explorer_service_status "
     "RESTART IDENTITY CASCADE;")
 
 for sid, fp, ca in [(1, "fixture-1", "2026-10-17T23:00:00Z"),
@@ -120,9 +120,9 @@ out.append("SELECT setval('node_explorer_snapshots_id_seq', 2, true);")
 for (ident, sid, idx, node, conn, exitp, attr, avail, hist) in nodes:
     out.append(
         "INSERT INTO node_explorer_node_registry "
-        "(identity,node,snapshot_id,node_index,historical_residential,available) VALUES "
-        "('%s',%s,%d,%d,%s,%s);"
-        % (ident, j(node), sid, idx, str(hist).lower(), str(avail).lower()))
+        "(identity,node,snapshot_id,node_index,available) VALUES "
+        "('%s',%s,%d,%d,%s);"
+        % (ident, j(node), sid, idx, str(avail).lower()))
     if conn:
         out.append(
             "INSERT INTO node_explorer_connectivity (identity,checked_at,payload) VALUES "
@@ -142,9 +142,6 @@ for (ident, sid, idx, node, conn, exitp, attr, avail, hist) in nodes:
             "INSERT INTO node_explorer_ip_attributes (ip,checked_at,payload) VALUES "
             "('%s',now()-interval '2 minutes',%s);" % (attr["ip"], j(attr)))
 
-out.append(
-    "INSERT INTO node_explorer_retired_nodes (identity,retired_at,reason) VALUES "
-    "('id-us-retired','2026-10-17T20:00:00Z','github-unreachable');")
 out.append("COMMIT;")
 
 body = "\n".join(out)

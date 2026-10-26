@@ -60,7 +60,8 @@ func Parse(def Definition, raw []byte) ([]domain.Node, error) {
 	unique := map[string]domain.Node{}
 	add := func(host string, port int, protocol, country string) {
 		if n := node(def.Name, host, port, protocol, country); n != nil {
-			unique[domain.AggregateIdentity(*n)] = *n
+			raw, _ := json.Marshal(n.RawConfig)
+			unique[string(raw)] = *n
 		}
 	}
 	switch def.Format {
@@ -132,10 +133,11 @@ func Parse(def Definition, raw []byte) ([]domain.Node, error) {
 }
 
 type Ingestor interface {
-	Import(context.Context, domain.Snapshot, *domain.Sources) error
+	Import(context.Context, domain.Snapshot) error
 }
 
 type Source struct {
+	OnResult func(error)
 	def      Definition
 	ingestor Ingestor
 	client   *http.Client
@@ -155,7 +157,12 @@ func (s *Source) Name() string { return s.def.Name }
 
 // Refresh publishes only complete, nonempty responses, without importing any
 // upstream connectivity, exit or classification evidence. Workers verify them.
-func (s *Source) Refresh(ctx context.Context) error {
+func (s *Source) Refresh(ctx context.Context) (result error) {
+	defer func() {
+		if s.OnResult != nil {
+			s.OnResult(result)
+		}
+	}()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.def.URL, nil)
 	if err != nil {
 		return err
@@ -181,7 +188,7 @@ func (s *Source) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := s.ingestor.Import(ctx, domain.Snapshot{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Nodes: nodes}, nil); err != nil {
+	if err := s.ingestor.Import(ctx, domain.Snapshot{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Nodes: nodes}); err != nil {
 		return err
 	}
 	log.Printf("public proxy source %s: imported %d nodes", s.Name(), len(nodes))

@@ -1,14 +1,10 @@
-// Package domain holds the node model, the stable connection identities and the
-// shared result metadata. It mirrors the semantics of the previous JavaScript
-// server exactly: identities are persisted across deployments, so any change in
-// hashing or ordering would orphan the existing enrichment and retirement rows.
+// Package domain contains shared node JSON models and legacy share-link decoding.
 package domain
 
 import (
 	"encoding/json"
+
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
-	"sort"
-	"strings"
 )
 
 // Detail is one upstream key/value summary row.
@@ -170,24 +166,7 @@ type Node struct {
 	MediaCheck *bool  `json:"mediaCheck,omitempty"`
 }
 
-// Batch reports the originating snapshot id, or 0 outside the aggregate view.
-func (n Node) Batch() int {
-	if n.SnapshotID == nil {
-		return 0
-	}
-	return *n.SnapshotID
-}
-
-// SpeedTested reports whether the originating batch ran a speed test. Outside
-// the aggregate view the flag is unknown and reported as false.
-func (n Node) SpeedTested() bool { return n.SpeedTest != nil && *n.SpeedTest }
-
-// MediaChecked reports whether the originating batch ran a media check.
-func (n Node) MediaChecked() bool { return n.MediaCheck != nil && *n.MediaCheck }
-
-// ProxyConfig is a Mihomo outbound definition. Keeping it as an ordered-free
-// map is deliberate: Go marshals map keys sorted, which reproduces the
-// canonicalisation the JavaScript identity used.
+// ProxyConfig is the upstream proxy configuration.
 type ProxyConfig map[string]any
 
 // UnmarshalJSON accepts a port published as either a string or a number.
@@ -234,20 +213,6 @@ func (n Node) MarshalJSON() ([]byte, error) {
 }
 
 // ClearCredentials removes both the values and their JSON presence. Public
-// responses and snapshot identities must exclude even empty credential fields.
-func (n *Node) ClearCredentials() {
-	n.RawLink = ""
-	n.GeneratedLink = ""
-	n.RawConfig = nil
-	for i, f := range nodeJSONFields {
-		if f.name == "rawLink" || f.name == "rawConfig" || f.name == "generatedLink" {
-			bit := uint64(1) << i
-			n.shape.present &^= bit
-			n.shape.nulls &^= bit
-		}
-	}
-}
-
 func (r *IPPureResult) UnmarshalJSON(data []byte) error {
 	type plain IPPureResult
 	var decoded plain
@@ -293,96 +258,4 @@ type Snapshot struct {
 
 	// SourceWarning is surfaced to the UI when the upstream files were unreadable.
 	SourceWarning string `json:"sourceWarning,omitempty"`
-	// BatchCount is filled by the aggregate projection.
-	BatchCount int `json:"batchCount,omitempty"`
-}
-
-// Clone returns a shallow copy with independent node backing storage so callers
-// can attach enrichment without mutating a shared cache.
-func (s Snapshot) Clone() Snapshot {
-	out := s
-	out.Nodes = make([]Node, len(s.Nodes))
-	copy(out.Nodes, s.Nodes)
-	return out
-}
-
-// Fields is the archived field whitelist: results files carry extra upstream
-// columns that must not become part of a stored snapshot.
-var Fields = []string{
-	"name", "baseName", "type", "server", "port", "sni", "tls", "reality",
-	"udp", "network", "speed", "country", "ip", "ipRisk", "media", "subTag",
-	"details", "rawLink", "generatedLink", "rawConfig",
-}
-
-// MediaPlatform mirrors the upstream accessor that tolerates both key casings.
-func MediaPlatform(m Media) string {
-	if m.Platform != "" {
-		return m.Platform
-	}
-	return m.Tag
-}
-
-func MediaValue(m Media) string {
-	if m.Tag != "" {
-		return m.Tag
-	}
-	return m.Platform
-}
-
-// MediaPlatforms lists the distinct platforms with at least one successful tag.
-func MediaPlatforms(n Node) []string {
-	seen := make(map[string]struct{}, len(n.Media))
-	out := make([]string, 0, len(n.Media))
-	for _, m := range n.Media {
-		p := MediaPlatform(m)
-		if p == "" || MediaValue(m) == "" {
-			continue
-		}
-		if _, ok := seen[p]; ok {
-			continue
-		}
-		seen[p] = struct{}{}
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// HasMedia reports whether the node unlocked the given platform.
-func HasMedia(n Node, platform string) bool {
-	for _, m := range n.Media {
-		if MediaPlatform(m) == platform && MediaValue(m) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// ApplyExitCountry replaces the source-claimed region with the verified exit
-// country, preserving the original claim for the mismatch badge.
-func ApplyExitCountry(n *Node) {
-	country := ""
-	if n.IPPure != nil {
-		country = n.IPPure.Country
-	}
-	if country == "" || len(country) != 2 || !isAlpha(country) {
-		return
-	}
-	verified := strings.ToUpper(country)
-	if n.Country != "" && strings.ToUpper(n.Country) != verified {
-		n.ClaimedCountry = n.Country
-		n.Country = verified
-	} else if n.Country == "" {
-		n.Country = verified
-	}
-}
-
-func isAlpha(s string) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
-			return false
-		}
-	}
-	return true
 }

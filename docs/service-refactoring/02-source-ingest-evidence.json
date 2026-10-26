@@ -1,0 +1,751 @@
+{
+  "scope": "Read-only production snapshot; sanitized counts only; not a migration plan or connectivity test",
+  "baseline": {
+    "capturedAt": "2026-10-26 12:20:05.732398+00",
+    "columns": [
+      {
+        "column_name": "identity",
+        "data_type": "text",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "column_name": "node",
+        "data_type": "jsonb",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "column_name": "snapshot_id",
+        "data_type": "integer",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "column_name": "node_index",
+        "data_type": "integer",
+        "is_nullable": "NO",
+        "column_default": null
+      },
+      {
+        "column_name": "historical_residential",
+        "data_type": "boolean",
+        "is_nullable": "NO",
+        "column_default": "false"
+      },
+      {
+        "column_name": "available",
+        "data_type": "boolean",
+        "is_nullable": "NO",
+        "column_default": "true"
+      },
+      {
+        "column_name": "source_at",
+        "data_type": "timestamp with time zone",
+        "is_nullable": "NO",
+        "column_default": "'-infinity'::timestamp with time zone"
+      },
+      {
+        "column_name": "first_seen_at",
+        "data_type": "timestamp with time zone",
+        "is_nullable": "NO",
+        "column_default": "now()"
+      },
+      {
+        "column_name": "last_available_at",
+        "data_type": "timestamp with time zone",
+        "is_nullable": "YES",
+        "column_default": null
+      },
+      {
+        "column_name": "incarnation",
+        "data_type": "text",
+        "is_nullable": "NO",
+        "column_default": "md5(((random())::text || (clock_timestamp())::text))"
+      },
+      {
+        "column_name": "connection_key",
+        "data_type": "text",
+        "is_nullable": "NO",
+        "column_default": "''::text"
+      }
+    ],
+    "snapshots": {
+      "batches": 1334,
+      "declared_nodes": 1069
+    },
+    "members": {
+      "occurrences": 1069,
+      "identities": 1069
+    },
+    "all": {
+      "records": 8942,
+      "available": 916,
+      "protocols": {
+        "http": 6174,
+        "vless": 1276,
+        "socks5": 577,
+        "hysteria2": 202,
+        "trojan": 151,
+        "vmess": 283,
+        "ss": 254,
+        "tuic": 16,
+        "anytls": 7,
+        "hysteria": 2
+      },
+      "link_presence": {
+        "neither": 3347,
+        "generated_only": 3400,
+        "original": 2195
+      },
+      "config_records": 6963,
+      "connection_key_present": 8446,
+      "connection_key_unique": 8244,
+      "connection_key_duplicate_groups": 132,
+      "connection_key_excess": 202,
+      "config_exact_excess": 1,
+      "endpoints": 8033,
+      "endpoint_excess": 909,
+      "endpoint_multi_key_groups": 253,
+      "link_by_type": {
+        "anytls": {
+          "count": 7,
+          "original": 6,
+          "generated_only": 1,
+          "neither": 0
+        },
+        "http": {
+          "count": 6174,
+          "original": 0,
+          "generated_only": 3117,
+          "neither": 3057
+        },
+        "hysteria": {
+          "count": 2,
+          "original": 2,
+          "generated_only": 0,
+          "neither": 0
+        },
+        "hysteria2": {
+          "count": 202,
+          "original": 202,
+          "generated_only": 0,
+          "neither": 0
+        },
+        "socks5": {
+          "count": 577,
+          "original": 15,
+          "generated_only": 275,
+          "neither": 287
+        },
+        "ss": {
+          "count": 254,
+          "original": 252,
+          "generated_only": 2,
+          "neither": 0
+        },
+        "trojan": {
+          "count": 151,
+          "original": 149,
+          "generated_only": 2,
+          "neither": 0
+        },
+        "tuic": {
+          "count": 16,
+          "original": 16,
+          "generated_only": 0,
+          "neither": 0
+        },
+        "vless": {
+          "count": 1276,
+          "original": 1272,
+          "generated_only": 2,
+          "neither": 2
+        },
+        "vmess": {
+          "count": 283,
+          "original": 281,
+          "generated_only": 1,
+          "neither": 1
+        }
+      }
+    },
+    "source_members": {
+      "records": 1069,
+      "available": 916,
+      "protocols": {
+        "http": 262,
+        "socks5": 16,
+        "vless": 425,
+        "hysteria2": 82,
+        "ss": 166,
+        "tuic": 2,
+        "vmess": 57,
+        "anytls": 6,
+        "trojan": 51,
+        "hysteria": 2
+      },
+      "link_presence": {
+        "generated_only": 278,
+        "original": 785,
+        "neither": 6
+      },
+      "config_records": 451,
+      "connection_key_present": 1033,
+      "connection_key_unique": 880,
+      "connection_key_duplicate_groups": 115,
+      "connection_key_excess": 153,
+      "config_exact_excess": 1,
+      "endpoints": 555,
+      "endpoint_excess": 514,
+      "endpoint_multi_key_groups": 217,
+      "link_by_type": {
+        "anytls": {
+          "count": 6,
+          "original": 5,
+          "generated_only": 1,
+          "neither": 0
+        },
+        "http": {
+          "count": 262,
+          "original": 0,
+          "generated_only": 258,
+          "neither": 4
+        },
+        "hysteria": {
+          "count": 2,
+          "original": 2,
+          "generated_only": 0,
+          "neither": 0
+        },
+        "hysteria2": {
+          "count": 82,
+          "original": 82,
+          "generated_only": 0,
+          "neither": 0
+        },
+        "socks5": {
+          "count": 16,
+          "original": 2,
+          "generated_only": 12,
+          "neither": 2
+        },
+        "ss": {
+          "count": 166,
+          "original": 164,
+          "generated_only": 2,
+          "neither": 0
+        },
+        "trojan": {
+          "count": 51,
+          "original": 49,
+          "generated_only": 2,
+          "neither": 0
+        },
+        "tuic": {
+          "count": 2,
+          "original": 2,
+          "generated_only": 0,
+          "neither": 0
+        },
+        "vless": {
+          "count": 425,
+          "original": 423,
+          "generated_only": 2,
+          "neither": 0
+        },
+        "vmess": {
+          "count": 57,
+          "original": 56,
+          "generated_only": 1,
+          "neither": 0
+        }
+      }
+    }
+  },
+  "direct_conversion": {
+    "library": "Sub-Store 2.44.2 official ESM artifact",
+    "capturedAt": "2026-10-26 12:20:05.732398+00",
+    "all": {
+      "http": {
+        "rows": 6174,
+        "has_config": 6174,
+        "no_uri": 6174
+      },
+      "socks5": {
+        "rows": 562,
+        "has_config": 562,
+        "uri_produced": 562,
+        "parseback_one": 562,
+        "strict_changed": 562,
+        "changed_fields": {
+          "username": 560,
+          "password": 560,
+          "udp": 562,
+          "skip-cert-verify": 3
+        }
+      },
+      "vmess": {
+        "rows": 2,
+        "has_config": 2,
+        "uri_produced": 2,
+        "parseback_one": 2,
+        "strict_changed": 2,
+        "changed_fields": {
+          "skip-cert-verify": 2,
+          "sni": 2,
+          "servername": 1
+        }
+      },
+      "anytls": {
+        "rows": 1,
+        "has_config": 1,
+        "uri_produced": 1,
+        "parseback_one": 1,
+        "strict_changed": 1,
+        "changed_fields": {
+          "tls": 1,
+          "packet-encoding": 1,
+          "packetEncoding": 1,
+          "allowInsecure": 1
+        }
+      },
+      "ss": {
+        "rows": 2,
+        "has_config": 2,
+        "uri_produced": 2,
+        "parseback_one": 2,
+        "strict_changed": 2,
+        "changed_fields": {
+          "skip-cert-verify": 2,
+          "udp": 2
+        }
+      },
+      "trojan": {
+        "rows": 2,
+        "has_config": 2,
+        "uri_produced": 2,
+        "parseback_one": 2,
+        "strict_changed": 2,
+        "changed_fields": {
+          "network": 2,
+          "tls": 2,
+          "sni": 1,
+          "udp": 1
+        }
+      },
+      "vless": {
+        "rows": 4,
+        "has_config": 4,
+        "uri_produced": 4,
+        "parseback_one": 4,
+        "strict_changed": 4,
+        "changed_fields": {
+          "servername": 3,
+          "udp": 3,
+          "sni": 3,
+          "packet-encoding": 4,
+          "skip-cert-verify": 3
+        }
+      }
+    },
+    "source_members": {
+      "http": {
+        "rows": 262,
+        "has_config": 262,
+        "no_uri": 262
+      },
+      "socks5": {
+        "rows": 14,
+        "has_config": 14,
+        "uri_produced": 14,
+        "parseback_one": 14,
+        "strict_changed": 14,
+        "changed_fields": {
+          "username": 12,
+          "password": 12,
+          "udp": 14,
+          "skip-cert-verify": 2
+        }
+      },
+      "anytls": {
+        "rows": 1,
+        "has_config": 1,
+        "uri_produced": 1,
+        "parseback_one": 1,
+        "strict_changed": 1,
+        "changed_fields": {
+          "tls": 1,
+          "packet-encoding": 1,
+          "packetEncoding": 1,
+          "allowInsecure": 1
+        }
+      },
+      "ss": {
+        "rows": 2,
+        "has_config": 2,
+        "uri_produced": 2,
+        "parseback_one": 2,
+        "strict_changed": 2,
+        "changed_fields": {
+          "skip-cert-verify": 2,
+          "udp": 2
+        }
+      },
+      "vmess": {
+        "rows": 1,
+        "has_config": 1,
+        "uri_produced": 1,
+        "parseback_one": 1,
+        "strict_changed": 1,
+        "changed_fields": {
+          "servername": 1,
+          "skip-cert-verify": 1,
+          "sni": 1
+        }
+      },
+      "trojan": {
+        "rows": 2,
+        "has_config": 2,
+        "uri_produced": 2,
+        "parseback_one": 2,
+        "strict_changed": 2,
+        "changed_fields": {
+          "network": 2,
+          "tls": 2,
+          "sni": 1,
+          "udp": 1
+        }
+      },
+      "vless": {
+        "rows": 2,
+        "has_config": 2,
+        "uri_produced": 2,
+        "parseback_one": 2,
+        "strict_changed": 2,
+        "changed_fields": {
+          "servername": 2,
+          "udp": 2,
+          "sni": 2,
+          "packet-encoding": 2,
+          "skip-cert-verify": 1
+        }
+      }
+    },
+    "raw_link_parse": {
+      "vless": {
+        "total": 1272,
+        "one": 1272,
+        "zero": 0,
+        "multiple": 0,
+        "errors": 0
+      },
+      "hysteria2": {
+        "total": 202,
+        "one": 202,
+        "zero": 0,
+        "multiple": 0,
+        "errors": 0
+      },
+      "trojan": {
+        "total": 149,
+        "one": 126,
+        "zero": 23,
+        "multiple": 0,
+        "errors": 0
+      },
+      "vmess": {
+        "total": 281,
+        "one": 280,
+        "zero": 1,
+        "multiple": 0,
+        "errors": 0
+      },
+      "socks5": {
+        "total": 15,
+        "one": 15,
+        "zero": 0,
+        "multiple": 0,
+        "errors": 0
+      },
+      "ss": {
+        "total": 252,
+        "one": 252,
+        "zero": 0,
+        "multiple": 0,
+        "errors": 0
+      },
+      "tuic": {
+        "total": 16,
+        "one": 16,
+        "zero": 0,
+        "multiple": 0,
+        "errors": 0
+      },
+      "anytls": {
+        "total": 6,
+        "one": 6,
+        "zero": 0,
+        "multiple": 0,
+        "errors": 0
+      },
+      "hysteria": {
+        "total": 2,
+        "one": 2,
+        "zero": 0,
+        "multiple": 0,
+        "errors": 0
+      }
+    },
+    "archive_recovery": {
+      "candidates": 2,
+      "original_candidates": 0,
+      "generated_candidates": 2
+    }
+  },
+  "normalized_conversion": {
+    "all": {
+      "http": {
+        "rows": 6174,
+        "fields": {},
+        "no_uri": 6174
+      },
+      "socks5": {
+        "rows": 562,
+        "fields": {
+          "username": 560,
+          "password": 560,
+          "skip-cert-verify": 3
+        },
+        "changed": 561,
+        "same": 1
+      },
+      "vmess": {
+        "rows": 2,
+        "fields": {
+          "skip-cert-verify": 2
+        },
+        "changed": 2
+      },
+      "anytls": {
+        "rows": 1,
+        "fields": {
+          "packet-encoding": 1,
+          "packetEncoding": 1,
+          "allowInsecure": 1
+        },
+        "changed": 1
+      },
+      "ss": {
+        "rows": 2,
+        "fields": {
+          "skip-cert-verify": 2
+        },
+        "changed": 2
+      },
+      "trojan": {
+        "rows": 2,
+        "fields": {
+          "sni": 1
+        },
+        "same": 1,
+        "changed": 1
+      },
+      "vless": {
+        "rows": 4,
+        "fields": {
+          "packet-encoding": 4,
+          "skip-cert-verify": 3
+        },
+        "changed": 4
+      }
+    },
+    "source_members": {
+      "http": {
+        "rows": 262,
+        "fields": {},
+        "no_uri": 262
+      },
+      "socks5": {
+        "rows": 14,
+        "fields": {
+          "username": 12,
+          "password": 12,
+          "skip-cert-verify": 2
+        },
+        "changed": 13,
+        "same": 1
+      },
+      "anytls": {
+        "rows": 1,
+        "fields": {
+          "packet-encoding": 1,
+          "packetEncoding": 1,
+          "allowInsecure": 1
+        },
+        "changed": 1
+      },
+      "ss": {
+        "rows": 2,
+        "fields": {
+          "skip-cert-verify": 2
+        },
+        "changed": 2
+      },
+      "vmess": {
+        "rows": 1,
+        "fields": {
+          "skip-cert-verify": 1
+        },
+        "changed": 1
+      },
+      "trojan": {
+        "rows": 2,
+        "fields": {
+          "sni": 1
+        },
+        "same": 1,
+        "changed": 1
+      },
+      "vless": {
+        "rows": 2,
+        "fields": {
+          "packet-encoding": 2,
+          "skip-cert-verify": 1
+        },
+        "changed": 2
+      }
+    },
+    "source_link_failures": {
+      "trojan": 23,
+      "vmess": 1
+    },
+    "http_options": {
+      "tls": 291,
+      "password": 146,
+      "skip-cert-verify": 291,
+      "tls_true": 291,
+      "username": 56,
+      "udp": 93,
+      "sni": 37
+    },
+    "config_parse": {
+      "one": 6963
+    },
+    "normalized_config_groups": {
+      "all": {
+        "rows": 6963,
+        "unique": 6902,
+        "duplicate_groups": 60,
+        "excess": 61
+      },
+      "source_members": {
+        "rows": 451,
+        "unique": 395,
+        "duplicate_groups": 55,
+        "excess": 56
+      }
+    },
+    "uri_config_comparison": {
+      "vless": {
+        "rows": 106,
+        "same": 0,
+        "changed": 106,
+        "errors": 0,
+        "fields": {
+          "skip-cert-verify": 88,
+          "packet-encoding": 105,
+          "ws-opts": 4,
+          "xudp": 1,
+          "servername": 2,
+          "encryption": 2,
+          "grpc-opts": 1
+        }
+      },
+      "hysteria2": {
+        "rows": 25,
+        "same": 0,
+        "changed": 25,
+        "errors": 0,
+        "fields": {
+          "tfo": 25,
+          "skip-cert-verify": 7,
+          "auth": 5,
+          "up": 1,
+          "down": 1,
+          "obfs": 1,
+          "fingerprint": 1,
+          "obfs-password": 1
+        }
+      },
+      "ss": {
+        "rows": 54,
+        "same": 0,
+        "changed": 54,
+        "errors": 0,
+        "fields": {
+          "skip-cert-verify": 54
+        }
+      },
+      "trojan": {
+        "rows": 26,
+        "same": 12,
+        "changed": 14,
+        "errors": 0,
+        "fields": {
+          "skip-cert-verify": 11,
+          "sni": 3
+        }
+      },
+      "anytls": {
+        "rows": 4,
+        "same": 0,
+        "changed": 4,
+        "errors": 0,
+        "fields": {
+          "packet-encoding": 4,
+          "packetEncoding": 4,
+          "allowInsecure": 4
+        }
+      },
+      "hysteria": {
+        "rows": 1,
+        "same": 1,
+        "changed": 0,
+        "errors": 0,
+        "fields": {}
+      }
+    }
+  },
+  "strict_config_dedup": {
+    "all": {
+      "rows": 6963,
+      "unique": 6962,
+      "duplicate_groups": 1,
+      "excess": 1
+    },
+    "source_members": {
+      "rows": 451,
+      "unique": 450,
+      "duplicate_groups": 1,
+      "excess": 1
+    }
+  },
+  "tooling": {
+    "substore": "2.44.2",
+    "commit": "c1018115a7eee4cdcb9042cce5e94afda41e48ba",
+    "artifact_sha256": "ed870a8728056663acee57629472261a83d0277ba7ff3b8ec8b8f0fe98d52847",
+    "node": "22.14.0",
+    "canonicalize": "2.1.0",
+    "dotenv": "16.4.7"
+  },
+  "http_basic_url_candidate": {
+    "all": 5879,
+    "source_members": 17,
+    "note": "Field-set screening only; not a tested URL export count"
+  },
+  "http_tls_true": {
+    "all": 291,
+    "source_members": 244
+  }
+}

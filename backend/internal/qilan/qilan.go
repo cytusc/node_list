@@ -3,7 +3,6 @@ package qilan
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,8 +16,6 @@ import (
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
-	"github.com/cytusc/node_list/backend/internal/notify"
-	"github.com/cytusc/node_list/backend/internal/store"
 )
 
 const (
@@ -62,258 +59,13 @@ type qilanNode struct {
 	FailCount    any    `json:"fail_count"`
 }
 
-func linkSettings(link string) (tls bool, sni string) {
-	if strings.HasPrefix(link, "vmess://") {
-		raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(link, "vmess://"))
-		if err != nil {
-			return false, ""
-		}
-		var config map[string]any
-		if err := json.Unmarshal(raw, &config); err != nil {
-			return false, ""
-		}
-		sni, _ := config["sni"].(string)
-		if sni == "" {
-			sni, _ = config["host"].(string)
-		}
-		return truthy(config["tls"]), sni
-	}
-	u, err := url.Parse(link)
-	if err != nil {
-		return false, ""
-	}
-	nodeType := strings.TrimSuffix(u.Scheme, ":")
-	security := u.Query().Get("security")
-	tls = nodeType == "trojan" || nodeType == "hy2" || nodeType == "hysteria2" ||
-		nodeType == "anytls" || security == "tls" || security == "reality"
-	sni = u.Query().Get("sni")
-	if sni == "" {
-		sni = u.Query().Get("serverName")
-	}
-	return tls, sni
-}
-
-func truthy(v any) bool {
-	switch t := v.(type) {
-	case bool:
-		return t
-	case string:
-		return t == "true" || t == "1"
-	case float64:
-		return t != 0
-	}
-	return false
-}
-
-func scalar(v any) string {
-	switch t := v.(type) {
-	case string:
-		return t
-	case float64:
-		return strconv.FormatFloat(t, 'f', -1, 64)
-	case int:
-		return strconv.Itoa(t)
-	case bool:
-		if t {
-			return "true"
-		}
-		return "false"
-	}
-	return ""
-}
-
-// normalizeNode converts one panel row into the stored node shape.
-// normalizeNetwork accepts the panel's network value, which is unreliable:
-// hysteria2 rows report "tcp", ssr rows report the SSR protocol name
-// (auth_chain_a), and some links append the display tag (tcp#tag). Protocol
-// facts win; the panel value is only a fallback for unknown transports.
-func normalizeNetwork(raw, protocol string) string {
-	value := strings.ToLower(strings.TrimSpace(raw))
-	if prefix, _, found := strings.Cut(value, "#"); found {
-		value = strings.TrimSpace(prefix)
-	}
-	switch value {
-	case "raw":
-		value = "tcp"
-	case "":
-		value = "tcp"
-	}
-	switch protocol {
-	case "hysteria", "hysteria2", "hy2", "tuic":
-		return "quic"
-	case "ssr", "ss", "socks", "socks5", "http", "https":
-		// These transports have no HTTP-style network; the panel field holds
-		// SSR's protocol or an unrelated value there.
-		if value == "tcp" || value == "" || value == "auth_chain_a" || value == "auth_aes128_md5" ||
-			value == "auth_aes128_sha1" || value == "origin" || value == "plain" {
-			return "tcp"
-		}
-	}
-	switch value {
-	case "tcp", "ws", "grpc", "http", "h2", "httpupgrade", "xhttp", "quic", "kcp":
-		return value
-	}
-	return "tcp"
-}
-
-// protocolDetails surfaces the parsed options SummarizeProxy's fixed summary
-// list does not carry. Qilan nodes are keyed by their share link, so adding
-// detail rows cannot change their stored identity.
-func protocolDetails(proxy domain.ProxyConfig) []domain.Detail {
-	var out []domain.Detail
-	if reality, ok := proxy["reality-opts"].(map[string]any); ok {
-		if v, _ := reality["public-key"].(string); v != "" {
-			out = append(out, domain.Detail{K: "reality-public-key", V: v})
-		}
-		if v, _ := reality["short-id"].(string); v != "" {
-			out = append(out, domain.Detail{K: "reality-short-id", V: v})
-		}
-	}
-	if ech, ok := proxy["ech-opts"].(map[string]any); ok {
-		if query, _ := ech["query-server-name"].(string); query != "" {
-			out = append(out, domain.Detail{K: "ech", V: query})
-		} else if enabled, _ := ech["enable"].(bool); enabled {
-			out = append(out, domain.Detail{K: "ech", V: "enabled"})
-		}
-	}
-	if v, _ := proxy["packet-encoding"].(string); v != "" {
-		out = append(out, domain.Detail{K: "packet-encoding", V: v})
-	}
-	if v, _ := proxy["obfs-password"].(string); v != "" {
-		out = append(out, domain.Detail{K: "obfs-password", V: v})
-	}
-	if v, ok := proxy["alterId"].(int); ok && v > 0 {
-		out = append(out, domain.Detail{K: "alter-id", V: strconv.Itoa(v)})
-	}
-	if xhttp, ok := proxy["xhttp-opts"].(map[string]any); ok {
-		if v, _ := xhttp["mode"].(string); v != "" {
-			out = append(out, domain.Detail{K: "xhttp-mode", V: v})
-		}
-	}
-	return out
-}
-
-// panelDetails renders the panel columns that only Qilan knows. Fields whose
-// unit is unstated upstream (speed/speed_limit) are deliberately omitted
-// instead of being displayed with a guessed unit.
-func panelDetails(node qilanNode) []domain.Detail {
-	details := []domain.Detail{{K: "source-id", V: scalar(node.ID)}}
-	if ping, ok := toFloat(node.Ping); ok && ping > 0 {
-		details = append(details, domain.Detail{K: "latency", V: fmt.Sprintf("%d ms", int64(ping))})
-	}
-	if node.Status != "" {
-		details = append(details, domain.Detail{K: "status", V: node.Status})
-	}
-	if node.IPType != "" {
-		details = append(details, domain.Detail{K: "ip-type", V: node.IPType})
-	}
-	if node.ISP != "" {
-		details = append(details, domain.Detail{K: "isp", V: node.ISP})
-	}
-	if asn := scalar(node.ASN); asn != "" {
-		details = append(details, domain.Detail{K: "asn", V: asn})
-	}
-	// The panel returns org separately; it is the network owner when it differs
-	// from the access provider.
-	if org := strings.TrimSpace(node.Org); org != "" && org != node.ISP {
-		details = append(details, domain.Detail{K: "org", V: org})
-	}
-	if city := strings.TrimSpace(node.City); city != "" {
-		details = append(details, domain.Detail{K: "city", V: city})
-	}
-	if score, ok := toFloat(node.IPScore); ok && score > 0 {
-		details = append(details, domain.Detail{K: "ip-score", V: strconv.Itoa(int(score))})
-	}
-	if node.Native {
-		details = append(details, domain.Detail{K: "native", V: "true"})
-	}
-	if node.Black {
-		details = append(details, domain.Detail{K: "blacklisted", V: "true"})
-	}
-	if rate, ok := toFloat(node.TrafficRate); ok && rate != 1 && rate > 0 {
-		details = append(details, domain.Detail{K: "traffic-rate", V: strconv.FormatFloat(rate, 'f', -1, 64) + "x"})
-	}
-	if fails, ok := toFloat(node.FailCount); ok && fails > 0 {
-		details = append(details, domain.Detail{K: "fail-count", V: strconv.Itoa(int(fails))})
-	}
-	if check := strings.TrimSpace(node.LastCheck); check != "" {
-		details = append(details, domain.Detail{K: "last-check", V: check})
-	}
-	if len(node.FeaturesList) > 0 {
-		parts := make([]string, 0, len(node.FeaturesList))
-		for _, item := range node.FeaturesList {
-			if s := scalar(item); s != "" {
-				parts = append(parts, s)
-			}
-		}
-		if len(parts) > 0 {
-			details = append(details, domain.Detail{K: "features", V: strings.Join(parts, ", ")})
-		}
-	}
-	return details
-}
-
-// normalizeNode converts one panel row into the stored node shape. The share
-// link is authoritative: the panel's own columns drop reality, transports and
-// transport options, and its network column is frequently wrong. The panel is
-// kept for metadata that only it knows (id, latency, status, ISP, country).
+// Conversion and validation belong to the third-party converter, never this HTTP adapter.
 func normalizeNode(node qilanNode) *domain.Node {
-	if node.ID == nil || node.Protocol == "" || node.Server == "" ||
-		node.Port == nil || node.Link == "" {
-		return nil
-	}
 	name := node.Name
 	if name == "" {
 		name = fmt.Sprintf("Qilan %v", node.ID)
 	}
-	meta := panelDetails(node)
-	var out domain.Node
-	proxy, err := domain.ShareLinkProxy(node.Link, name)
-	if err == nil {
-		out = domain.SummarizeProxy(proxy)
-		// SummarizeProxy already reports the protocol-derived network; only fall
-		// back to the panel column when it produced nothing.
-		if strings.TrimSpace(out.Network) == "" {
-			out.Network = normalizeNetwork(node.Network, strings.ToLower(node.Protocol))
-		}
-		out.Details = append(append([]domain.Detail{}, meta...), out.Details...)
-		out.Details = append(out.Details, protocolDetails(proxy)...)
-	} else {
-		// Unparseable link: keep the panel-derived summary so the row still
-		// exists, with the network column normalised.
-		tls, sni := linkSettings(node.Link)
-		out = domain.Node{
-			Type:    strings.ToLower(node.Protocol),
-			Server:  node.Server,
-			Port:    scalar(node.Port),
-			TLS:     tls,
-			Network: normalizeNetwork(node.Network, strings.ToLower(node.Protocol)),
-			Details: meta,
-		}
-		if sni != "" {
-			out.SNI = sni
-		}
-	}
-	out.Name = name + " [Qilan]"
-	out.BaseName = name
-	out.SubTag = "Qilan"
-	out.RawLink = node.Link
-	if node.Region != "" {
-		out.Country = node.Region
-	}
-	return &out
-}
-
-func toFloat(v any) (float64, bool) {
-	switch t := v.(type) {
-	case float64:
-		return t, true
-	case string:
-		if f, err := strconv.ParseFloat(strings.TrimSpace(t), 64); err == nil {
-			return f, true
-		}
-	}
-	return 0, false
+	return &domain.Node{Name: name, RawLink: node.Link, SubTag: "qilan"}
 }
 
 // FetchSnapshot crawls the member list. A truncated round is never published:
@@ -405,7 +157,7 @@ func FetchSnapshot(ctx context.Context, client *http.Client, session, userAgent 
 					newest = checked
 				}
 			}
-			key := domain.AggregateIdentity(*node)
+			key := fmt.Sprintf("%v:%s", item.ID, item.Link)
 			if previous, ok := nodes[key]; !ok || checked > previous.checkedTime {
 				nodes[key] = struct {
 					node        domain.Node
@@ -507,27 +259,25 @@ func LoadSession(session, sessionFile string) (string, error) {
 
 // Source refreshes the Qilan panel on an interval.
 type Source struct {
-	store       *store.Store
 	ingestor    Ingestor
 	session     string
 	sessionFile string
 	userAgent   string
 	interval    time.Duration
 	retention   float64
-	notifier    func(context.Context, string) error
 	onError     func(error)
 
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
 	mu       sync.Mutex
 	closed   bool
 	pending  bool
 	lastSize int
-	broken   bool
-	shrunken bool
 }
 
 // Ingestor is the subset of the import pipeline the source needs.
 type Ingestor interface {
-	Import(ctx context.Context, snap domain.Snapshot, sources *domain.Sources) error
+	Import(ctx context.Context, snap domain.Snapshot) error
 }
 
 // SourceConfig configures the Qilan source.
@@ -537,11 +287,11 @@ type SourceConfig struct {
 	UserAgent    string
 	Interval     time.Duration
 	MinRetention float64
-	Webhook      string
+	OnError      func(error)
 }
 
 // NewSource builds a Qilan source.
-func NewSource(st *store.Store, ingestor Ingestor, cfg SourceConfig) *Source {
+func NewSource(ingestor Ingestor, cfg SourceConfig) *Source {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 15 * time.Minute
 	}
@@ -552,15 +302,13 @@ func NewSource(st *store.Store, ingestor Ingestor, cfg SourceConfig) *Source {
 		cfg.UserAgent = "Mozilla/5.0"
 	}
 	return &Source{
-		store:       st,
 		ingestor:    ingestor,
 		session:     cfg.Session,
 		sessionFile: cfg.SessionFile,
 		userAgent:   cfg.UserAgent,
 		interval:    cfg.Interval,
 		retention:   cfg.MinRetention,
-		notifier:    notify.Feishu(cfg.Webhook),
-		onError:     func(err error) { fmt.Printf("Qilan source refresh failed: %v\n", err) },
+		onError:     cfg.OnError,
 	}
 }
 
@@ -581,80 +329,51 @@ func (s *Source) Refresh(ctx context.Context) error {
 
 	session, err := LoadSession(s.session, s.sessionFile)
 	if err != nil {
-		return s.handleFailure(ctx, err)
+		return s.handleFailure(err)
 	}
 	snapshot, err := FetchSnapshot(ctx, nil, session, s.userAgent, nil)
 	if err != nil {
-		return s.handleFailure(ctx, err)
+		return s.handleFailure(err)
 	}
 	// Upstream can understate `total` itself, so what matters is not absolute
 	// size but the step: a real panel does not shed 40% of its members between
 	// two rounds.
 	s.mu.Lock()
-	collapsed := s.lastSize > 0 && len(snapshot.Nodes) < int(float64(s.lastSize)*s.retention)
+	lastSize := s.lastSize
+	collapsed := lastSize > 0 && len(snapshot.Nodes) < int(float64(s.lastSize)*s.retention)
 	s.mu.Unlock()
 	if collapsed {
-		return s.handleFailure(ctx, fmt.Errorf(
-			"Qilan member count collapsed from %d to %d; round discarded", s.lastSize, len(snapshot.Nodes)))
+		return s.handleFailure(fmt.Errorf(
+			"Qilan member count collapsed from %d to %d; round discarded", lastSize, len(snapshot.Nodes)))
 	}
-	if err := s.ingestor.Import(ctx, snapshot, nil); err != nil {
-		return s.handleFailure(ctx, err)
+	if err := s.ingestor.Import(ctx, snapshot); err != nil {
+		return s.handleFailure(err)
 	}
 	s.mu.Lock()
 	s.lastSize = len(snapshot.Nodes)
-	wasBroken, wasShrunken := s.broken, s.shrunken
-	s.broken, s.shrunken = false, false
 	s.mu.Unlock()
-	if wasBroken {
-		_ = s.notifier(ctx, fmt.Sprintf(
-			"✅ Qilan 登录状态已恢复，节点快照同步继续。\n时间: %s", time.Now().UTC().Format(time.RFC3339)))
-	}
-	if wasShrunken {
-		_ = s.notifier(ctx, fmt.Sprintf(
-			"✅ Qilan 抓取已恢复正常，本轮入库 %d 个节点。\n时间: %s",
-			len(snapshot.Nodes), time.Now().UTC().Format(time.RFC3339)))
-	}
 	return nil
 }
 
-// handleFailure logs the error and escalates the two failure modes that degrade
-// silently: an expired session and a throttled upstream that under-reports.
-func (s *Source) handleFailure(ctx context.Context, err error) error {
+func (s *Source) handleFailure(err error) error {
 	if s.onError != nil {
 		s.onError(err)
-	}
-	message := err.Error()
-	s.mu.Lock()
-	sessionFailure := containsFold(message, "session") || containsFold(message, "403")
-	wasBroken := s.broken
-	if sessionFailure {
-		s.broken = true
-	}
-	collapsed := containsFold(message, "member count collapsed")
-	wasShrunken := s.shrunken
-	if collapsed {
-		s.shrunken = true
-	}
-	s.mu.Unlock()
-	if sessionFailure && !wasBroken {
-		_ = s.notifier(ctx, fmt.Sprintf(
-			"⚠️ Qilan 登录状态失效，节点快照同步已暂停。\n原因: %s\n时间: %s\n请更新 QILAN_SESSION（session.txt）后等待自动恢复。",
-			message, time.Now().UTC().Format(time.RFC3339)))
-	} else if collapsed && !wasShrunken {
-		_ = s.notifier(ctx, fmt.Sprintf(
-			"⚠️ Qilan 本轮成员数骤降，已判定为抓取降级并丢弃该轮（保留上一快照）。\n原因: %s\n时间: %s",
-			message, time.Now().UTC().Format(time.RFC3339)))
 	}
 	return err
 }
 
-func containsFold(haystack, needle string) bool {
-	return strings.Contains(strings.ToLower(haystack), strings.ToLower(needle))
-}
-
 // Start runs the source until the context is cancelled.
 func (s *Source) Start(ctx context.Context) {
+	s.mu.Lock()
+	if s.closed || s.cancel != nil {
+		s.mu.Unlock()
+		return
+	}
+	ctx, s.cancel = context.WithCancel(ctx)
+	s.wg.Add(1)
+	s.mu.Unlock()
 	go func() {
+		defer s.wg.Done()
 		_ = s.Refresh(ctx)
 		ticker := time.NewTicker(s.interval)
 		defer ticker.Stop()
@@ -673,5 +392,9 @@ func (s *Source) Start(ctx context.Context) {
 func (s *Source) Close() {
 	s.mu.Lock()
 	s.closed = true
+	if s.cancel != nil {
+		s.cancel()
+	}
 	s.mu.Unlock()
+	s.wg.Wait()
 }

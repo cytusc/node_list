@@ -1,4 +1,4 @@
-# Six independently restartable application services. PostgreSQL is an existing external service.
+# Five independently restartable application services. PostgreSQL is an existing external service.
 x-environment: &environment
   PGHOST: ${PGHOST:?Set PGHOST in .env}
   PGPORT: ${PGPORT:-5432}
@@ -6,13 +6,6 @@ x-environment: &environment
   PGUSER: ${PGUSER:?Set PGUSER in .env}
   PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
   PGPOOL_MAX: ${PGPOOL_MAX:-8}
-  REDIS_URL: redis://task-redis:6379/0
-  REDIS_NAMESPACE: ${REDIS_NAMESPACE:-node-explorer}
-  NORMAL_INTERVAL_SECONDS: ${NORMAL_INTERVAL_SECONDS:-1800}
-  MIHOMO_EXIT_CONCURRENCY: ${MIHOMO_EXIT_CONCURRENCY:-8}
-  MIHOMO_RISK_CONCURRENCY: ${MIHOMO_RISK_CONCURRENCY:-2}
-  MIHOMO_MANAGER_URL: http://mihomo-manager:9080
-  MIHOMO_MANAGER_TOKEN: ${MIHOMO_MANAGER_TOKEN:?Set MIHOMO_MANAGER_TOKEN in .env}
 x-app: &app
   image: ghcr.io/cytusc/node_list:${IMAGE_TAG:-latest}
   restart: unless-stopped
@@ -20,21 +13,6 @@ x-app: &app
   environment: *environment
   networks: [default, postgres]
   read_only: true
-  tmpfs: [/tmp]
-  cap_drop: [ALL]
-  security_opt: ["no-new-privileges:true"]
-  logging:
-    driver: json-file
-    options: { max-size: "10m", max-file: "3" }
-x-worker: &worker
-  <<: *app
-  depends_on:
-    task-redis: { condition: service_healthy }
-x-proxy: &proxy
-  image: metacubex/mihomo:${IPPURE_MIHOMO_TAG:-v1.19.27}
-  restart: unless-stopped
-  volumes:
-    - ./deploy/ippure-mihomo.yaml:/root/.config/mihomo/config.yaml:ro
   tmpfs: [/tmp]
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
@@ -61,9 +39,16 @@ services:
       - /app/webman/runtime:mode=0777
   source-ingest:
     <<: *app
-    command: [node-worker, -role, source]
+    command: [node-source]
     environment:
-      <<: *environment
+      PGHOST: ${PGHOST:?Set PGHOST in .env}
+      PGPORT: ${PGPORT:-5432}
+      PGDATABASE: ${PGDATABASE:?Set PGDATABASE in .env}
+      PGUSER: ${PGUSER:?Set PGUSER in .env}
+      PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+      PGPOOL_MAX: ${SOURCE_PGPOOL_MAX:-4}
+      SOURCE_CONVERTER: /app/services/node-source-converter/converter.mjs
+      SOURCE_SUBSCRIPTIONS: ${SOURCE_SUBSCRIPTIONS:-}
       SOURCE_PROVIDERS: ${SOURCE_PROVIDERS:-subs-check,proxio-all,Jakee-http,xyzs996-all}
       PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS: ${PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS:-1800}
       SUBS_CHECK_DIR: /data/sub
@@ -74,53 +59,51 @@ services:
         read_only: true
         bind: { create_host_path: false }
     healthcheck:
-      test: [CMD, node-worker, -role, source, -health]
+      test: [CMD, node-source, -health]
       interval: 30s
       timeout: 10s
       start_period: 60s
   exit-provision:
-    <<: *worker
-    command: [node-worker, -role, exit-provision]
+    <<: *app
+    command: [node-exit]
     environment:
-      <<: *environment
-      IP_SERVICE_HIGH_CONCURRENCY: ${EXIT_PROVISION_HIGH_CONCURRENCY:-8}
-      IP_SERVICE_NORMAL_CONCURRENCY: ${EXIT_PROVISION_NORMAL_CONCURRENCY:-8}
-    depends_on:
-      task-redis: { condition: service_healthy }
-      mihomo-manager: { condition: service_healthy }
+      PGHOST: ${PGHOST:?Set PGHOST in .env}
+      PGPORT: ${PGPORT:-5432}
+      PGDATABASE: ${PGDATABASE:?Set PGDATABASE in .env}
+      PGUSER: ${PGUSER:?Set PGUSER in .env}
+      PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+      PGSSLMODE: ${PGSSLMODE:-prefer}
+      EXIT_WORKERS: ${EXIT_WORKERS:-4}
+      EXIT_TIMEOUT_SECONDS: ${EXIT_TIMEOUT_SECONDS:-25}
+      EXIT_INTERVAL_SECONDS: ${EXIT_INTERVAL_SECONDS:-1800}
+      EXIT_RETRY_SECONDS: ${EXIT_RETRY_SECONDS:-300}
     healthcheck:
-      test: [CMD, node-worker, -role, exit-provision, -health]
-      interval: 30s
-      timeout: 10s
+      test: [CMD, node-exit, -health]
+      interval: 10s
+      timeout: 6s
       start_period: 60s
   exit-attributes:
-    <<: *worker
-    command: [node-worker, -role, exit-attributes]
+    <<: *app
+    command: [node-attributes]
     environment:
-      <<: *environment
-      # More consumers used to make this lane worse, because every job spent its
-      # own single-IP quota slot. Classification is now batch-first: one priming
-      # wave covers 100 addresses, duplicate waves are collapsed, and a cached
-      # address costs no quota at all — so consumers add throughput instead of
-      # contention. Keep the product of this and PGPOOL_MAX in mind.
-      IP_SERVICE_ATTRIBUTES_CONCURRENCY: ${ATTRIBUTES_CONCURRENCY:-3}
+      PGHOST: ${PGHOST:?Set PGHOST in .env}
+      PGPORT: ${PGPORT:-5432}
+      PGDATABASE: ${PGDATABASE:?Set PGDATABASE in .env}
+      PGUSER: ${PGUSER:?Set PGUSER in .env}
+      PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+      ATTR_WORKERS: ${ATTR_WORKERS:-3}
+      ATTR_TIMEOUT_SECONDS: ${ATTR_TIMEOUT_SECONDS:-45}
+      ATTR_RETRY_SECONDS: ${ATTR_RETRY_SECONDS:-1800}
       IPPURE_API_ORIGIN: ${IPPURE_API_ORIGIN:-https://api.123169.xyz}
-      # Comma separated subset of ipinfo,ip-api,ipregistry,abuseipdb,ipapi,
-      # ip2location. Empty keeps every source; deployments without credentials
-      # for some of them should narrow the list instead of querying blind.
       IP_PROVIDERS: ${IP_PROVIDERS:-}
       IPINFO_TOKEN: ${IPINFO_TOKEN:-}
       IP_API_PRO_KEY: ${IP_API_PRO_KEY:-}
       IPREGISTRY_API_KEY: ${IPREGISTRY_API_KEY:-}
       ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
-      IP_SERVICE_RISK_CONCURRENCY: ${EXIT_ATTRIBUTES_RISK_CONCURRENCY:-2}
-    depends_on:
-      task-redis: { condition: service_healthy }
-      mihomo-manager: { condition: service_healthy }
     healthcheck:
-      test: [CMD, node-worker, -role, exit-attributes, -health]
-      interval: 30s
-      timeout: 10s
+      test: [CMD, node-attributes, -health]
+      interval: 10s
+      timeout: 6s
       start_period: 60s
   node-liveness:
     <<: *app
@@ -142,47 +125,7 @@ services:
       interval: 10s
       timeout: 6s
       start_period: 60s
-  mihomo-manager:
-    <<: *worker
-    cpus: ${MIHOMO_MANAGER_CPUS:-0.5}
-    command: [node-worker, -role, mihomo-manager]
-    environment:
-      <<: *environment
-      MIHOMO_CONTROLLER: http://shared-mihomo:9090
-      MIHOMO_PROXY_URL: http://shared-mihomo:7890
-      MIHOMO_CONTROLLER_SECRET: ${MIHOMO_CONTROLLER_SECRET:?Set MIHOMO_CONTROLLER_SECRET in .env}
-      MIHOMO_REGISTRY_POLL_SECONDS: ${MIHOMO_REGISTRY_POLL_SECONDS:-30}
-    depends_on:
-      shared-mihomo: { condition: service_started }
-    healthcheck:
-      test: [CMD, node-worker, -role, mihomo-manager, -health]
-      interval: 10s
-      timeout: 5s
-      start_period: 120s
-  shared-mihomo:
-    <<: *proxy
-    cpus: ${MIHOMO_CPUS:-1.0}
-    environment:
-      MIHOMO_CONTROLLER_SECRET: ${MIHOMO_CONTROLLER_SECRET:?Set MIHOMO_CONTROLLER_SECRET in .env}
-    entrypoint: [/bin/sh, -ec]
-    command:
-      - |
-        test -n "$$MIHOMO_CONTROLLER_SECRET"
-        printf 'mixed-port: 7890\nallow-lan: true\nbind-address: "*"\nexternal-controller: 0.0.0.0:9090\nsecret: "%s"\nmode: rule\nauthentication: ["disabled:disabled"]\nrules: ["MATCH,REJECT"]\n' "$$MIHOMO_CONTROLLER_SECRET" > /tmp/bootstrap.yaml
-        exec /mihomo -d /tmp/mihomo -f /tmp/bootstrap.yaml
-  task-redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: [redis-server, --appendonly, "yes", --maxmemory-policy, noeviction]
-    volumes: [task-redis:/data]
-    healthcheck:
-      test: [CMD, redis-cli, ping]
-      interval: 5s
-      timeout: 3s
-      retries: 10
 networks:
   postgres:
     external: true
     name: ${POSTGRES_NETWORK:?Set POSTGRES_NETWORK in .env}
-volumes:
-  task-redis:

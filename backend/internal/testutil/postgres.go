@@ -5,8 +5,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/cytusc/node_list/backend/internal/database"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,4 +44,24 @@ func Postgres(t *testing.T) *pgx.ConnConfig {
 	})
 	t.Setenv("PGOPTIONS", "-c search_path="+schema)
 	return admin.Config().ConnConfig.Copy()
+}
+
+// Database provisions the shared deployment schema in a private test schema.
+func Database(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	cfg := Postgres(t)
+	pc, err := pgxpool.ParseConfig(cfg.ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc.ConnConfig.RuntimeParams["search_path"] = strings.TrimPrefix(os.Getenv("PGOPTIONS"), "-c search_path=")
+	pool, err := pgxpool.NewWithConfig(context.Background(), pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(context.Background(), database.Schema); err != nil {
+		t.Fatal(err)
+	}
+	return pool
 }

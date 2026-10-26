@@ -38,14 +38,14 @@ with open(sys.argv[2], "w") as f:
             f.write(value + "\n")
 PYENV
 
-# Format: utc-timestamp|current_nodes|retired_nodes|snapshots|ippure_results|db_size
+# Format: utc-timestamp|registry|available|snapshots|ip_attributes|db_size
 row=$(docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges:true \
   --network "container:$container" --env-file "$pg_env" \
   --entrypoint psql "$image" -X -q -t -A -F'|' -v ON_ERROR_STOP=1 -c \
-  "select (select count(*) from node_explorer_current_nodes),
-          (select count(*) from node_explorer_retired_nodes),
+  "select (select count(*) from node_explorer_node_registry),
+          (select count(*) from node_explorer_node_registry WHERE available),
           (select count(*) from node_explorer_snapshots),
-          (select count(*) from node_explorer_ippure_results),
+          (select count(*) from node_explorer_ip_attributes),
           pg_size_pretty(pg_database_size(current_database()))")
 printf '%s|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$row" >> "$stats_file"
 

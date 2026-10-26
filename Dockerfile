@@ -9,9 +9,17 @@ COPY public ./public
 COPY src ./src
 RUN npm run build
 
+# Locked third-party parser; dependencies are architecture-independent JavaScript.
+FROM node:22.14.0-alpine3.21 AS source-converter
+WORKDIR /converter
+COPY services/node-source-converter/package*.json ./
+RUN npm ci --omit=dev --ignore-scripts
+COPY services/node-source-converter/converter.mjs ./
+COPY services/node-source-converter/vendor ./vendor
+
 # The collectors stay Go. Cross-compile them on the builder host for the same
 # reason: CGO is disabled, so the target architecture needs no emulated toolchain.
-# The HTTP API is PHP (webman) now, so only node-worker is built here.
+# The HTTP API is PHP (webman) now, so only the independent Go service binaries are built here.
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS backend
 WORKDIR /src
 COPY backend/go.mod backend/go.sum ./
@@ -20,9 +28,13 @@ COPY backend ./
 ARG TARGETOS=linux
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-      go build -trimpath -ldflags "-s -w" -o /out/node-worker ./cmd/node-worker \
+      go build -trimpath -ldflags "-s -w" -o /out/node-liveness ./cmd/node-liveness \
  && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-      go build -trimpath -ldflags "-s -w" -o /out/node-liveness ./cmd/node-liveness
+      go build -trimpath -ldflags "-s -w" -o /out/node-source ./cmd/node-source \
+ && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+      go build -trimpath -ldflags "-s -w" -o /out/node-exit ./cmd/node-exit \
+ && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+      go build -trimpath -ldflags "-s -w" -o /out/node-attributes ./cmd/node-attributes
 
 # Standalone liveness starts a private kernel for each probe.
 FROM ghcr.io/xtls/xray-core:26.10.21 AS xray
@@ -44,7 +56,7 @@ RUN composer install --no-dev --no-scripts --no-interaction --no-progress \
 #   pdo_pgsql PostgreSQL driver
 #   mbstring  multibyte string helpers used by the service layer
 #   tzdata    时区数据库（默认 Asia/Shanghai，见 config/app.php default_timezone）
-# The PHP API process and the Go node-worker share this image; compose passes a
+# The PHP API process and the independent Go services share this image; compose passes a
 # different command per service. The API process binds no privileged port and
 # runs as uid 1000, matching the data volumes.
 FROM php:8.4-cli-alpine
@@ -55,7 +67,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers oniguruma-dev postgresql-dev t
  && docker-php-ext-install -j"$(nproc)" pcntl sockets pdo_pgsql mbstring \
  && docker-php-ext-enable opcache \
  && apk del $PHPIZE_DEPS linux-headers oniguruma-dev postgresql-dev \
- && apk add --no-cache postgresql-libs oniguruma ca-certificates \
+ && apk add --no-cache postgresql-libs oniguruma ca-certificates libstdc++ \
  && adduser -D -u 1000 -h /home/node node \
  && mkdir -p /app/webman/runtime /app/webman/public \
  && chown -R node:node /app
@@ -67,6 +79,9 @@ WORKDIR /app/webman
 # 注意这不是 PG 会话时区——库里是 timestamptz，查询两侧都不经过它。
 # API_HOST 必须是 0.0.0.0：容器里监听回环的话，compose 的端口映射
 # （DNAT 到容器网卡）打不进来，站点直接连不上。本地开发默认 127.0.0.1 更安全。
+COPY --from=source-converter /usr/local/bin/node /usr/local/bin/node
+COPY --from=source-converter /converter /app/services/node-source-converter
+ENV SOURCE_CONVERTER=/app/services/node-source-converter/converter.mjs
 ENV API_HOST=0.0.0.0 API_PORT=3001 TZ=Asia/Shanghai SUBS_CHECK_DIR=/data/sub
 COPY --from=vendor --chown=node:node /app/vendor ./vendor
 # 逐个目录拷贝并显式指定目标名：Docker 在多源 COPY 且目标以 / 结尾时，会把
@@ -79,7 +94,9 @@ COPY --chown=node:node webman/support ./support
 COPY --chown=node:node webman/docker-entrypoint.sh ./docker-entrypoint.sh
 # Frontend build output is the static root (config/static.php).
 COPY --from=frontend --chown=node:node /app/dist ./public
-COPY --from=backend --chown=node:node /out/node-worker /usr/local/bin/node-worker
+COPY --from=backend --chown=node:node /out/node-attributes /usr/local/bin/node-attributes
+COPY --from=backend --chown=node:node /out/node-exit /usr/local/bin/node-exit
+COPY --from=backend --chown=node:node /out/node-source /usr/local/bin/node-source
 COPY --from=backend --chown=node:node /out/node-liveness /usr/local/bin/node-liveness
 COPY --from=probe-bin --chown=node:node /out/mihomo /usr/local/bin/mihomo
 COPY --from=xray --chown=node:node /usr/local/bin/xray /usr/local/bin/xray
@@ -89,6 +106,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -q -O /dev/null http://127.0.0.1:3001/api/health || exit 1
 # read_only 下 /app/webman/runtime 是 tmpfs（空），框架只自建 logs/views，
 # 不建 cache/container；入口脚本先 mkdir 再 exec，保证文件缓存与 DI 容器缓存
-# 能写入，且信号能透传给最终命令（php start.php / node-worker）。
+# 能写入，且信号能透传给最终命令（php start.php / Go service）。
 ENTRYPOINT ["/bin/sh", "/app/webman/docker-entrypoint.sh"]
 CMD ["php", "start.php", "start"]

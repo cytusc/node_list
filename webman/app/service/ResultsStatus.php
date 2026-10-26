@@ -96,22 +96,24 @@ final class ResultsStatus
     private function collectorSnapshot(): array
     {
         Heartbeat::beatIfDue('api');
-        $heart = Db::table('node_explorer_service_status')
-            ->select([
-                'updated_at',
-                Db::raw("coalesce(updated_at>now()-interval '90 seconds' AND coalesce(payload->>'error','')='',false) AS healthy"),
-                Db::raw("CASE WHEN updated_at IS NULL THEN '服务尚未启动' WHEN updated_at<=now()-interval '90 seconds' THEN '服务心跳已过期' ELSE coalesce(payload->>'error','') END AS error"),
-            ])
-            ->where('service', 'ip-service')->first();
-        $queued = Db::table('node_explorer_work')
-            ->whereIn('kind', ['exit', 'attributes', 'risk'])
-            ->where('state', 'queued')->whereRaw('due_at<=now()')->count();
-        return [
-            'healthy' => self::toBool($heart->healthy ?? false),
-            'queued' => (int)$queued,
-            'updatedAtRfc3339' => self::rfc3339((string)($heart->updated_at ?? '0001-01-01 00:00:00+00')),
-            'error' => (string)($heart->error ?? '服务尚未启动'),
-        ];
+        $hearts = Db::table('node_explorer_service_status')
+            ->whereIn('service', ['exit-provision', 'exit-attributes'])->get();
+        $healthy = count($hearts) === 2;
+        $updated = '0001-01-01 00:00:00+00';
+        $error = $healthy ? '' : '服务尚未启动';
+        foreach ($hearts as $heart) {
+            $payload = json_decode((string)$heart->payload, true) ?: [];
+            $updated = max($updated, (string)$heart->updated_at);
+            if (strtotime((string)$heart->updated_at) <= time() - 90) {
+                $healthy = false;
+                $error = '服务心跳已过期';
+            } elseif (($payload['running'] ?? false) !== true || !empty($payload['error'])) {
+                $healthy = false;
+                $error = '服务正在准备或报告异常';
+            }
+        }
+        return ['healthy' => $healthy, 'queued' => 0,
+            'updatedAtRfc3339' => self::rfc3339($updated), 'error' => $error];
     }
 
     /** 采集器状态用：Go 的 time.RFC3339（秒精度，无小数）。 */
@@ -168,12 +170,4 @@ final class ResultsStatus
         }
     }
 
-    /** pdo_pgsql 的 bool 可能是 't'/'f'，直接 (bool)'f' 会得到 true。 */
-    private static function toBool(mixed $value): bool
-    {
-        if (is_string($value)) {
-            return $value !== '' && $value !== 'f' && $value !== 'false' && $value !== '0';
-        }
-        return (bool)$value;
-    }
 }

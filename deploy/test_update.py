@@ -18,11 +18,11 @@ class UpdateTests(unittest.TestCase):
                 shutil.copy2(Path(__file__).with_name(name), root / 'deploy' / name)
             (root / '.env').write_text('NODE_EXPLORER_AUTO_UPDATE=true\n')
             (root / 'release.env').write_text(f'IMAGE_TAG={current}\nSUBS_CHECK_TAG=1.6.5\n')
-            services = ['node-explorer', 'source-ingest', 'mihomo-manager',
+            services = ['node-explorer', 'source-ingest',
                         'exit-provision', 'exit-attributes', 'node-liveness']
             config = {'services': {name: {'image': 'ghcr.io/cytusc/node_list:' + current}
                                    for name in services}}
-            config['services']['task-redis'] = {'image': 'redis:7-alpine'}
+            config['services']['subs-check'] = {'image': 'ghcr.io/beck-8/subs-check:1.6.5'}
             (root / 'config.json').write_text(json.dumps(config))
             (root / 'deploy/compose.sh').write_text('''#!/usr/bin/env bash
 set -eu

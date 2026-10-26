@@ -36,7 +36,7 @@ func TestParseProtocolsAndValidation(t *testing.T) {
 				if n.SubTag != "test" || n.RawConfig == nil {
 					t.Fatalf("missing provenance: %+v", n)
 				}
-				if err := domain.NodeCredentialError(n); err != nil {
+				if _, err := domain.ShareLinkProxy(n.RawLink, n.Name); len(n.RawConfig) == 0 && err != nil {
 					t.Fatal(err)
 				}
 				if n.Type != "http" && n.Type != "socks5" {
@@ -68,7 +68,7 @@ type recordingIngestor struct {
 	err       error
 }
 
-func (i *recordingIngestor) Import(_ context.Context, s domain.Snapshot, _ *domain.Sources) error {
+func (i *recordingIngestor) Import(_ context.Context, s domain.Snapshot) error {
 	if i.err != nil {
 		return i.err
 	}
@@ -153,7 +153,7 @@ func TestLiveSources(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, n := range i.snapshots[0].Nodes {
-				if err := domain.NodeCredentialError(n); err != nil {
+				if _, err := domain.ShareLinkProxy(n.RawLink, n.Name); len(n.RawConfig) == 0 && err != nil {
 					t.Fatal(err)
 				}
 			}

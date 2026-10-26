@@ -16,5 +16,8 @@
 webman/vendor
 webman/runtime
 webman/composer.phar
-!deploy/
-!deploy/legacy-node-launcher.sh
+
+!services/
+!services/node-source-converter/
+!services/node-source-converter/**
+services/node-source-converter/node_modules

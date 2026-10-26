@@ -289,12 +289,23 @@ Db::statement('DELETE FROM node_explorer_service_status');
 $isZeroTime = static fn (string $v): bool =>
     str_starts_with($v, '0000-12-31') || str_starts_with($v, '0001-01-01');
 
-// 采集器状态读的是 ip-service：本夹具没有它的心跳。
+// 附属状态聚合两个独立 IP 服务，不读取旧任务表。
 $collector = $status->collectorStatus();
 same(true, $collector['enabled'], 'collector.enabled 恒为 true');
 ok($isZeroTime($collector['lastRunAt']), 'collector.lastRunAt 用秒精度零值时间哨兵');
 same('服务尚未启动', $collector['error'], '采集器无心跳时透出错误文案');
 same(null, $status->sourceWarning(), '无 sourceWarning 时为 null');
+$cache = new \app\service\ReadCache();
+Db::insert("INSERT INTO node_explorer_service_status VALUES('exit-provision',now(),'{\"running\":true}'),('exit-attributes',now(),'{\"running\":true}')");
+$cache->forget('node-list:collector');
+same(true, $status->collectorStatus()['running'] ?? false, '两个独立 IP 服务心跳正常');
+Db::update("UPDATE node_explorer_service_status SET updated_at=now()-interval '2 minutes' WHERE service='exit-attributes'");
+$cache->forget('node-list:collector');
+same('服务心跳已过期', $status->collectorStatus()['error'] ?? '', '属性服务过期必须反映到汇总状态');
+Db::statement("DELETE FROM node_explorer_service_status WHERE service='exit-attributes'");
+$cache->forget('node-list:collector');
+same('服务尚未启动', $status->collectorStatus()['error'] ?? '', '仅出口服务正常不能掩盖属性服务缺失');
+
 
 // ---------------------------------------------------------------------------
 // 结果

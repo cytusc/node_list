@@ -2,7 +2,7 @@
 
 node_list 网页接口的 **PHP / webman 实现**，目前是接口的**唯一实现**——
 Go 版的接口层（`backend/internal/api` 与 `cmd/node-explorer`）已经删除，
-采集、调度、存储仍在 Go（`node-worker`），本实现只负责 HTTP 面。
+采集、测活、出口和属性处理由独立 Go 服务负责，本实现只负责 HTTP 面。
 
 接口契约来自 Go 版，且经过逐字节比对固化：同一份路径、状态码、JSON 字段名与顺序、
 中文文案、`Cache-Control`，前端 `src/App.tsx` 不需要任何改动。
@@ -162,7 +162,7 @@ wsl -d <distro> -- sleep 300 &     # 撑住转发
    漏了这一步的表现是「接口正常、打开首页 404」。
 
 2. **容器化**：仓库根的 `Dockerfile` 在同一镜像里构建 PHP 接口进程与 Go
-   `node-worker`，`compose.yaml` 的 `node-explorer` 服务即本实现（command 为
+   独立 Go 服务，`compose.yaml` 的 `node-explorer` 服务即本实现（command 为
    `php /app/start.php start`）。`runtime/` 挂 tmpfs，见 compose 里该服务的
    `tmpfs` 段——漏了会在 `read_only: true` 下起不来。
 

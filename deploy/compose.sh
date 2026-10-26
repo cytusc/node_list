@@ -13,7 +13,7 @@ for argument in "$@"; do
   if [[ "$argument" == up ]]; then
     project=$(docker compose "${files[@]}" --env-file .env --env-file release.env config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
     [[ -n "$project" ]] || exit 1
-    for retired_service in node-cleanup recovery dead-verify; do
+    for retired_service in node-cleanup recovery dead-verify mihomo-manager shared-mihomo task-redis; do
       retired=$(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$retired_service")
       if [[ -n "$retired" ]]; then
         while IFS= read -r container; do docker rm -f "$container"; done <<< "$retired"

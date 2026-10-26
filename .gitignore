@@ -18,20 +18,21 @@ playwright-report/
 
 # Go backend build output.
 backend/node-explorer
-backend/node-worker
 backend/*.exe
 backend/tools/*.tsv
 .workbuddy/
 *.md
 !README.md
-!RESIDENTIAL_RECOVERY.md
 !MODULAR_SERVICES.md
-!NODE_CLEANUP.md
 !docs/*.md
 !docs/kernel-evaluation/*.md
 !docs/service-refactoring/*.md
 
-!SINGLE_MIHOMO.md
-!SINGLE_MIHOMO_VALIDATION.md
 scripts/
 reports/.dsh-ops-update-651c76543915baf76d861d472449782f90e379dbb38b94f231c133d9b851a9da.lock
+
+backend/node-source
+
+/node-exit
+
+/backend/node-attributes

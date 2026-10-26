@@ -24,7 +24,7 @@ if [[ "$1" == compose && "$*" == *'config --format json'* ]]; then
   echo '{"name":"test-project","services":{}}'
 elif [[ "$1" == ps ]]; then
   [[ "$*" == *'label=com.docker.compose.project=test-project'* ]]
-  [[ "$*" == *'label=com.docker.compose.service=node-cleanup'* || "$*" == *'label=com.docker.compose.service=recovery'* || "$*" == *'label=com.docker.compose.service=dead-verify'* ]]
+  [[ "$*" == *'label=com.docker.compose.service=node-cleanup'* || "$*" == *'label=com.docker.compose.service=recovery'* || "$*" == *'label=com.docker.compose.service=dead-verify'* || "$*" == *'label=com.docker.compose.service=mihomo-manager'* || "$*" == *'label=com.docker.compose.service=shared-mihomo'* || "$*" == *'label=com.docker.compose.service=task-redis'* ]]
   printf 'old-cleanup-a\\nold-cleanup-b\\n'
 fi
 ''')
@@ -41,6 +41,9 @@ fi
         self.assertIn('rm -f old-cleanup-a\nrm -f old-cleanup-b\n', actions)
         self.assertLess(actions.index('rm -f'), actions.index('up -d node-liveness'))
         self.assertNotIn('--remove-orphans', actions)
+        for service in ['mihomo-manager', 'shared-mihomo', 'task-redis']:
+            self.assertIn('label=com.docker.compose.service=' + service, actions)
+        self.assertNotIn('volume rm', actions)
 
     def test_read_only_config_never_removes_containers(self):
         actions = self.invoke('config', '--quiet')

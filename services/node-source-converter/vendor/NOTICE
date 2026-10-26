@@ -1,0 +1,5 @@
+Sub-Store 2.44.2, AGPL-3.0
+Official release artifact: https://github.com/sub-store-org/Sub-Store/releases/download/2.44.2/proxy-utils.esm.mjs
+SHA-256: ed870a8728056663acee57629472261a83d0277ba7ff3b8ec8b8f0fe98d52847
+Corresponding source: https://github.com/sub-store-org/Sub-Store/tree/c1018115a7eee4cdcb9042cce5e94afda41e48ba
+The bundled artifact is unmodified. The adapter only calls parse / produce; no remote scripts, processors, or persistent Sub-Store application are enabled.

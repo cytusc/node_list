@@ -6,26 +6,18 @@
 #   PGURL="postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test" \
 #     bash tests/fixtures/load.sh
 #
-# 设计说明：schema 与视图直接执行 backend 侧的 services.sql / live.sql，
+# 设计说明：schema 与视图直接执行 backend/internal/database/schema.sql，
 # 不在 webman 里复制一份 DDL —— 两边共用同一份定义才能真正比出差异。
 set -euo pipefail
 
 PGURL="${PGURL:-postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-BACKEND_SQL="$ROOT/../backend/internal/store/postgres"
-
-for file in \
-  "$HERE/core.sql" \
-  "$BACKEND_SQL/services.sql" \
-  "$BACKEND_SQL/live.sql"; do
-  printf '== %s\n' "$file"
-  psql "$PGURL" -v ON_ERROR_STOP=1 -q -f "$file"
-done
+psql "$PGURL" -v ON_ERROR_STOP=1 -q -f "$ROOT/../backend/internal/database/schema.sql"
 
 # 种子数据里的 __NOW2M__ 必须替换成真实时间戳：优选位判定要求连通性/出口证据
 # 在 10 分钟内，写死的时间戳会随时间失效。
-NOW2M="$(date -u -d '2 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+NOW2M="$(python3 -c 'from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)-timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
 RESOLVED="$(mktemp)"
 sed "s/__NOW2M__/$NOW2M/g" "$HERE/seed.sql" > "$RESOLVED"
 printf '== %s (__NOW2M__ -> %s)\n' "$HERE/seed.sql" "$NOW2M"

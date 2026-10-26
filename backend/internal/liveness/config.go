@@ -3,13 +3,11 @@
 package liveness
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
-	"strconv"
+
 	"strings"
 
-	"github.com/cytusc/node_list/backend/internal/domain"
+	"github.com/cytusc/node_list/backend/internal/proxyprocess"
 )
 
 type Proxy = map[string]any
@@ -23,36 +21,8 @@ func text(p Proxy, key string) string {
 func flag(p Proxy, key string) bool    { b, _ := p[key].(bool); return b }
 func object(p Proxy, key string) Proxy { v, _ := p[key].(map[string]any); return v }
 
-// Decode only adapts the stored node format. Execution never uses the old
-// transport, sweeper, Runner or manager implementation.
-func Decode(raw []byte) (Proxy, error) {
-	var n domain.Node
-	if json.Unmarshal(raw, &n) != nil {
-		return nil, errors.New("invalid_node")
-	}
-	var p Proxy
-	if len(n.RawConfig) > 0 {
-		b, _ := json.Marshal(n.RawConfig)
-		_ = json.Unmarshal(b, &p)
-	} else {
-		link := n.RawLink
-		if link == "" {
-			link = n.GeneratedLink
-		}
-		parsed, err := domain.ShareLinkProxy(link, "probe")
-		if err != nil {
-			return nil, errors.New("invalid_config")
-		}
-		p = Proxy(parsed)
-	}
-	port, err := strconv.Atoi(text(p, "port"))
-	if err != nil || port < 1 || port > 65535 || text(p, "server") == "" {
-		return nil, errors.New("invalid_endpoint")
-	}
-	p["port"] = port
-	p["name"] = "probe"
-	return p, nil
-}
+// Decode adapts the common stored node format.
+func Decode(raw []byte) (Proxy, error) { return proxyprocess.Decode(raw) }
 
 // XrayOutbound is deliberately conservative: an unmodelled connection option
 // goes to Mihomo, never gets silently dropped. Version: Xray 26.10.21.

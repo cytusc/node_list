@@ -14,10 +14,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"github.com/cytusc/node_list/backend/internal/proxyprocess"
 )
 
 type Result struct {
@@ -81,6 +80,7 @@ func (e ProcessEngine) Probe(parent context.Context, p Proxy) Result {
 	var cmd *exec.Cmd
 	var tr *http.Transport
 	var ready func() bool
+	var done <-chan struct{}
 	if e.Name == "xray" {
 		out, reason := XrayOutbound(p)
 		if reason != "" {
@@ -98,94 +98,49 @@ func (e ProcessEngine) Probe(parent context.Context, p Proxy) Result {
 		}}
 		ready = func() bool { _, err := os.Stat(socket); return err == nil }
 	} else {
-		// A random per-process authenticated loopback proxy. No controller or shared
-		// kernel, and no mutable route can be held by a slow node.
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		var closeProcess func()
+		tr, closeProcess, done, err = proxyprocess.Mihomo(ctx, e.Binary, p)
 		if err != nil {
-			return r
-		}
-		port := listener.Addr().(*net.TCPAddr).Port
-		_ = listener.Close()
-		token := filepath.Base(dir)
-		copied := Proxy{}
-		for k, v := range p {
-			if k != "__ech-resolver" {
-				copied[k] = v
+			r.Reason = err.Error()
+			if r.Reason == "kernel_rejected" {
+				r.Status = "config_error"
 			}
-		}
-		// Mihomo opens its listener while its tunnel is still suspended. A TCP
-		// connect alone can therefore produce false negatives. Route a private
-		// loopback readiness request through the tunnel before probing the node.
-		checkListener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
 			return r
 		}
-		checkPort := checkListener.Addr().(*net.TCPAddr).Port
-		checkServer := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			if req.URL.Path != "/"+token {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-		})}
-		checkDone := make(chan struct{})
-		go func() { _ = checkServer.Serve(checkListener); close(checkDone) }()
-		defer func() { _ = checkServer.Close(); <-checkDone }()
-		checkRule := "AND,((IP-CIDR,127.0.0.1/32),(DST-PORT," + strconv.Itoa(checkPort) + ")),DIRECT"
-		cfg := Proxy{"mixed-port": port, "bind-address": "127.0.0.1", "allow-lan": false, "mode": "rule", "log-level": "silent", "ipv6": true, "authentication": []string{"probe:" + token}, "proxies": []any{copied}, "rules": []string{checkRule, "MATCH,probe"}}
-		if resolver := text(p, "__ech-resolver"); resolver != "" {
-			dns := Proxy{"enable": true, "nameserver": []string{"system"}, "proxy-server-nameserver": []string{resolver}}
-			if name := text(object(p, "ech-opts"), "query-server-name"); name != "" {
-				dns["proxy-server-nameserver-policy"] = Proxy{name: []string{resolver}}
-			}
-			cfg["dns"] = dns
-		}
-		b, err := yaml.Marshal(cfg)
-		if err != nil {
-			return r
-		}
-		file := filepath.Join(dir, "config.yaml")
-		if os.WriteFile(file, b, 0600) != nil {
-			return r
-		}
-		cmd = exec.CommandContext(ctx, e.Binary, "-d", dir, "-f", file)
-		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-		proxy := http.ProxyURL(&url.URL{Scheme: "http", Host: address, User: url.UserPassword("probe", token)})
-		tr = &http.Transport{Proxy: proxy, DisableKeepAlives: true}
-		ready = func() bool {
-			check, stop := context.WithTimeout(ctx, 100*time.Millisecond)
-			defer stop()
-			_, err := request(check, &http.Transport{Proxy: proxy, DisableKeepAlives: true}, "http://"+checkListener.Addr().String()+"/"+token, http.StatusNoContent)
-			return err == nil
-		}
+		defer closeProcess()
 	}
+
 	if e.RootCAs != nil {
 		tr.TLSClientConfig = &tls.Config{RootCAs: e.RootCAs, MinVersion: tls.VersionTLS12}
 	}
-	// Discard all child output: proxy configurations and errors can carry secrets.
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	cmd.WaitDelay = time.Second
-	if cmd.Start() != nil {
-		return r
-	}
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
-	defer func() { _ = cmd.Process.Kill(); <-done }()
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	for !ready() {
-		select {
-		case <-ctx.Done():
-			r.Reason = "startup_timeout"
+	if cmd != nil {
+		// Discard all child output: proxy configurations and errors can carry secrets.
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		cmd.WaitDelay = time.Second
+		if cmd.Start() != nil {
 			return r
-		case <-done:
-			r.Status = "config_error"
-			r.Reason = "kernel_rejected"
-			return r
-		case <-ticker.C:
+		}
+		exited := make(chan struct{})
+		done = exited
+		go func() { _ = cmd.Wait(); close(exited) }()
+		defer func() { _ = cmd.Process.Kill(); <-done }()
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for !ready() {
+			select {
+			case <-ctx.Done():
+				r.Reason = "startup_timeout"
+				return r
+			case <-done:
+				r.Status = "config_error"
+				r.Reason = "kernel_rejected"
+				return r
+			case <-ticker.C:
+			}
 		}
 	}
+
 	latency, err := request(ctx, tr, e.Target, e.Expected)
 	if parent.Err() != nil {
 		r.Status = "cancelled"

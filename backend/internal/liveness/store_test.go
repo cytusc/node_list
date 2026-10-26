@@ -9,39 +9,33 @@ import (
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
-	"github.com/cytusc/node_list/backend/internal/service"
-	"github.com/cytusc/node_list/backend/internal/store"
-	"github.com/cytusc/node_list/backend/internal/store/postgres"
+
 	"github.com/cytusc/node_list/backend/internal/testutil"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestAvailabilityOwnershipAndStaleResults(t *testing.T) {
-	cfg := testutil.Postgres(t)
 	ctx := context.Background()
-	a, err := postgres.NewAdapter(ctx, postgres.Config{Host: cfg.Host, Port: int(cfg.Port), User: cfg.User, Password: cfg.Password, Database: cfg.Database, PoolMax: 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.Close()
+	a := testutil.Database(t)
+	var err error
 	node := domain.Node{Name: "test", Type: "http", Server: "192.0.2.1", Port: "80", RawConfig: domain.ProxyConfig{"type": "http", "server": "192.0.2.1", "port": 80}}
 	raw, _ := json.Marshal(domain.Snapshot{Nodes: []domain.Node{node}})
-	if err = a.Insert(ctx, "test", raw, "", 1); err != nil {
+	if _, err = a.Exec(ctx, `INSERT INTO node_explorer_snapshots(fingerprint,imported_at,node_count,payload) VALUES('test','now',1,$1)`, string(raw)); err != nil {
 		t.Fatal(err)
 	}
-	st := store.New(a, nil)
-	if err = st.Reload(ctx); err != nil {
+	payload, _ := json.Marshal(node)
+	id := "test-identity"
+	if _, err = a.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,snapshot_id,node_index,available) VALUES($1,$2,1,0,false)`, id, payload); err != nil {
 		t.Fatal(err)
 	}
-	repo := &service.Repository{Pool: a.Pool()}
-	if err = repo.SyncRegistry(ctx, st); err != nil {
+	if _, err = a.Exec(ctx, `INSERT INTO node_explorer_snapshot_members(snapshot_id,node_index,identity) VALUES(1,0,$1)`, id); err != nil {
 		t.Fatal(err)
 	}
 	// Acquire copies the explicit schema setting as a dedicated ownership session.
-	d := &DB{Pool: a.Pool()}
+	d := &DB{Pool: a}
 	// Make the isolated schema explicit for every input and ownership connection.
 	schema := strings.TrimPrefix(os.Getenv("PGOPTIONS"), "-c search_path=")
-	pc := a.Pool().Config()
+	pc := a.Config()
 	pc.ConnConfig.RuntimeParams["search_path"] = schema
 	pool, err := pgxpool.NewWithConfig(ctx, pc)
 	if err != nil {
@@ -81,9 +75,6 @@ func TestAvailabilityOwnershipAndStaleResults(t *testing.T) {
 	check(true)
 	save("infrastructure", false)
 	check(true)
-	if err = repo.SyncRegistry(ctx, st); err != nil {
-		t.Fatal(err)
-	}
 	check(true)
 	save("unreachable", false)
 	check(false)

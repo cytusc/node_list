@@ -22,12 +22,6 @@ jobs:
     name: Tests and frontend assets
     runs-on: ubuntu-24.04
     services:
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s --health-timeout 3s --health-retries 10
       postgres:
         image: postgres:18-alpine
         env:
@@ -48,6 +42,8 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      - run: npm --prefix services/node-source-converter ci --ignore-scripts
+      - run: npm --prefix services/node-source-converter test
       - run: npm run build
       - name: Test deployment updater
         run: |
@@ -59,7 +55,6 @@ jobs:
           cache-dependency-path: backend/go.sum
       - name: Lint and test the Go backend
         env:
-          NODE_EXPLORER_TEST_REDIS: redis://127.0.0.1:6379/0
           NODE_EXPLORER_TEST_PG: postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test
         working-directory: backend
         run: |
@@ -67,13 +62,13 @@ jobs:
           test ! -s /tmp/gofmt.out
           go vet ./...
           go test -race ./...
-      - name: Verify real Mihomo routing and timeout capacity
+      - name: Verify independent private Mihomo routing
         working-directory: backend
         run: |
           curl -fL --retry 3 https://github.com/MetaCubeX/mihomo/releases/download/v1.19.27/mihomo-linux-amd64-v1.19.27.gz -o /tmp/mihomo.gz
           gzip -dc /tmp/mihomo.gz > /tmp/mihomo
           chmod +x /tmp/mihomo
-          MIHOMO_TEST_BINARY=/tmp/mihomo MIHOMO_TIMEOUT_BENCH=1 go test -race ./internal/transport -run TestRealManager -count=1 -v
+          LIVENESS_TEST_MIHOMO=/tmp/mihomo go test -race ./internal/liveness ./internal/exitprobe -run '^TestReal' -count=1 -v
       - uses: shivammathur/setup-php@v2
         with:
           php-version: "8.4"
@@ -112,12 +107,6 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     services:
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s --health-timeout 3s --health-retries 10
       postgres:
         image: postgres:18-alpine
         env:
@@ -184,9 +173,7 @@ jobs:
           psql "postgresql://postgres:test_password@127.0.0.1:5432/postgres" \
             -c "DROP DATABASE IF EXISTS node_explorer_test" \
             -c "CREATE DATABASE node_explorer_test"
-          for f in webman/tests/fixtures/core.sql \
-                   backend/internal/store/postgres/services.sql \
-                   backend/internal/store/postgres/live.sql; do
+          for f in backend/internal/database/schema.sql; do
             psql "postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test" \
               -v ON_ERROR_STOP=1 -q -f "$f"
           done
@@ -225,32 +212,22 @@ jobs:
             sleep 1
           done
           docker exec liveness-smoke node-liveness -health
-      - name: Smoke test Mihomo manager worker
+      - name: Smoke test independent node source and bundled converter
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          mkdir -p /tmp/mihomo-manager-smoke
-          printf 'mixed-port: 17890\nallow-lan: true\nbind-address: "127.0.0.1"\nmode: rule\nexternal-controller: 127.0.0.1:19090\nsecret: "smoke-controller-secret"\nauthentication: ["disabled:disabled"]\nrules: ["MATCH,REJECT"]\n' > /tmp/mihomo-manager-smoke.yaml
-          /tmp/mihomo -d /tmp/mihomo-manager-smoke -f /tmp/mihomo-manager-smoke.yaml >/tmp/mihomo-manager-smoke.log 2>&1 &
-          mihomo_pid=$!
-          trap 'docker logs mihomo-manager-smoke 2>/dev/null || true; docker rm -f mihomo-manager-smoke >/dev/null 2>&1 || true; kill "$mihomo_pid" 2>/dev/null || true; wait "$mihomo_pid" 2>/dev/null || true; cat /tmp/mihomo-manager-smoke.log' EXIT
+          docker run --rm -i --read-only --tmpfs /tmp "$IMAGE_NAME@$IMAGE_DIGEST" \
+            node /app/services/node-source-converter/converter.mjs <<<'{"items":[]}'
           docker run -d --read-only --tmpfs /tmp --network host \
             -e PGHOST=127.0.0.1 -e PGPORT=5432 -e PGDATABASE=node_explorer_test \
-            -e PGUSER=postgres -e PGPASSWORD=test_password \
-            -e MIHOMO_MANAGER_TOKEN=smoke-manager-token -e MIHOMO_CONTROLLER_SECRET=smoke-controller-secret \
-            -e MIHOMO_CONTROLLER=http://127.0.0.1:19090 -e MIHOMO_PROXY_URL=http://127.0.0.1:17890 \
-            -e MIHOMO_MANAGER_LISTEN=127.0.0.1:9080 \
-            --name mihomo-manager-smoke "$IMAGE_NAME@$IMAGE_DIGEST" node-worker -role mihomo-manager
+            -e PGUSER=postgres -e PGPASSWORD=test_password -e SOURCE_PROVIDERS=none \
+            --name source-smoke "$IMAGE_NAME@$IMAGE_DIGEST" node-source
+          trap 'docker logs source-smoke; docker rm -f source-smoke' EXIT
           for attempt in $(seq 1 20); do
-            if curl --fail --silent -H 'Authorization: Bearer smoke-controller-secret' http://127.0.0.1:19090/version >/dev/null; then break; fi
+            if docker exec source-smoke node-source -health; then break; fi
             sleep 1
           done
-          curl --fail -H 'Authorization: Bearer smoke-controller-secret' http://127.0.0.1:19090/version
-          for attempt in $(seq 1 30); do
-            if docker exec mihomo-manager-smoke node-worker -role mihomo-manager -health; then break; fi
-            sleep 1
-          done
-          docker exec mihomo-manager-smoke node-worker -role mihomo-manager -health
+          docker exec source-smoke node-source -health
       # Only expose digests to the publish job after all smoke checks pass.
       - name: Export tested image digest
         env:
@@ -324,7 +301,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         # webman/ 只打包源码：vendor 由镜像的 composer stage 重装，runtime 是运行产物。
         # 生产跑容器镜像，这份 tar 是服务器上的参考副本与部署脚本集合。
-        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz --exclude='webman/vendor' --exclude='webman/runtime' --exclude='webman/composer.phar' dist backend webman package.json package-lock.json Dockerfile SINGLE_MIHOMO.md NODE_CLEANUP.md compose.yaml compose.subs-check.yaml compose.qilan.yaml deploy README.md MODULAR_SERVICES.md RESIDENTIAL_RECOVERY.md .env.example
+        run: tar -czf node-explorer-${{ github.ref_name }}.tar.gz --exclude='webman/vendor' --exclude='webman/runtime' --exclude='webman/composer.phar' --exclude='services/node-source-converter/node_modules' dist backend webman services package.json package-lock.json Dockerfile compose.yaml compose.subs-check.yaml compose.qilan.yaml deploy docs README.md MODULAR_SERVICES.md .env.example
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:
