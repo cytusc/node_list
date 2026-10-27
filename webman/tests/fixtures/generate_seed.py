@@ -103,26 +103,18 @@ nodes.append(("id-gb-unavail", 2, 4, n7, None, None, None, False, False))
 
 out = ["BEGIN;"]
 out.append(
-    "TRUNCATE node_explorer_snapshots, "
+    "TRUNCATE "
     "node_explorer_node_registry, "
     "node_explorer_connectivity, node_explorer_exits, node_explorer_ip_attributes, "
     "node_explorer_service_status "
     "RESTART IDENTITY CASCADE;")
 
-for sid, fp, ca in [(1, "fixture-1", "2026-10-17T23:00:00Z"),
-                    (2, "fixture-2", "2026-10-18T00:00:00Z")]:
-    out.append(
-        "INSERT INTO node_explorer_snapshots "
-        "(id,fingerprint,checked_at,imported_at,node_count,payload) VALUES "
-        "(%d,'%s','%s','%s',0,'{}');" % (sid, fp, ca, ca))
-out.append("SELECT setval('node_explorer_snapshots_id_seq', 2, true);")
-
 for (ident, sid, idx, node, conn, exitp, attr, avail, hist) in nodes:
     out.append(
         "INSERT INTO node_explorer_node_registry "
-        "(identity,node,snapshot_id,node_index,available) VALUES "
-        "('%s',%s,%d,%d,%s);"
-        % (ident, j(node), sid, idx, str(avail).lower()))
+        "(identity,node,available) VALUES "
+        "('%s',%s,%s);"
+        % (ident, j(node), str(avail).lower()))
     if conn:
         out.append(
             "INSERT INTO node_explorer_connectivity (identity,checked_at,payload) VALUES "

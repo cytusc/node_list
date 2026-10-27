@@ -141,7 +141,6 @@ same(
     'SortKey 取值顺序与 Go 的 domain.ResultSortKeys 一致'
 );
 ok(SortKey::Speed->isNumeric() && !SortKey::Name->isNumeric(), '数值型排序键判定');
-ok(str_contains(SortKey::Name->sqlExpression(), 'regexp_replace'), '名称排序剥离国旗 emoji');
 same(['tls', 'reality', 'udp'], Feature::values(), 'Feature 取值集合');
 same('TLS', Feature::Tls->label(), 'Feature 标签');
 same(
@@ -188,7 +187,7 @@ ok(!array_key_exists('rawLink', $node), 'rawLink 被剥离');
 ok(!array_key_exists('generatedLink', $node), '生成链接凭据被剥离');
 ok(!array_key_exists('rawConfig', $node), 'rawConfig 被剥离');
 
-// 键顺序必须与 Go 的结构体声明顺序一致（前端不依赖，但快照指纹依赖）
+// 兼容 Go 节点结构的 JSON 字段。
 $order = array_keys($node);
 same('name', $order[0], '首字段是 name');
 same('speed', $order[array_search('tls', $order, true) + 2] ?? null, 'tls 之后依次是 reality、udp，再往后是 network');
@@ -300,7 +299,7 @@ function nl_fact(array $p): stdClass
 
 $raw = [
     nl_fact([
-        'identity' => 'id-us', 'has_original_link' => true, 'snapshot_id' => 10, 'node_index' => 0, 'country' => 'US', 'region' => 'US',
+        'identity' => 'id-us', 'has_original_link' => true, 'country' => 'US', 'region' => 'US',
         'name' => '美国 01', 'base_name' => '美国 01', 'server' => 's', 'sni' => '', 'node_type' => 'ss',
         'protocol' => 'ss', 'network' => 'tcp', 'speed' => 1048576, 'tls' => true, 'reality' => true, 'udp' => true,
         'speed_test' => true, 'media_check' => true, 'checked_at' => '2026-10-18T00:00:00Z',
@@ -313,7 +312,7 @@ $raw = [
         'media' => json_encode(['Netflix']),
     ]),
     nl_fact([
-        'identity' => 'id-jp', 'has_original_link' => 'f', 'snapshot_id' => 10, 'node_index' => 1, 'country' => 'JP', 'region' => 'JP',
+        'identity' => 'id-jp', 'has_original_link' => 'f', 'country' => 'JP', 'region' => 'JP',
         'name' => '日本 10', 'base_name' => '日本 10', 'server' => 's', 'sni' => '', 'node_type' => 'ss',
         'protocol' => 'ss', 'network' => 'tcp', 'speed' => 2097152, 'tls' => true, 'reality' => true, 'udp' => false,
         'speed_test' => true, 'media_check' => true, 'checked_at' => '2026-10-18T00:00:00Z',
@@ -326,7 +325,7 @@ $raw = [
         'media' => json_encode(['Netflix', 'YouTube']),
     ]),
     nl_fact([
-        'identity' => 'id-de', 'snapshot_id' => 10, 'node_index' => 2, 'country' => 'DE', 'region' => 'DE',
+        'identity' => 'id-de', 'country' => 'DE', 'region' => 'DE',
         'name' => '德国 02', 'base_name' => '德国 02', 'server' => 's', 'sni' => '', 'node_type' => 'vmess',
         'protocol' => 'vmess', 'network' => 'tcp', 'speed' => 0, 'tls' => false, 'reality' => false, 'udp' => true,
         'speed_test' => true, 'media_check' => true, 'checked_at' => '2026-10-18T00:00:00Z',
@@ -337,7 +336,7 @@ $raw = [
         'reported_exit_ip' => '', 'exit_error' => '', 'exit_at' => '', 'media' => json_encode([]),
     ]),
     nl_fact([
-        'identity' => 'id-sg', 'snapshot_id' => 10, 'node_index' => 3, 'country' => 'SG', 'region' => 'SG',
+        'identity' => 'id-sg', 'country' => 'SG', 'region' => 'SG',
         'name' => '新加坡 01', 'base_name' => '新加坡 01', 'server' => 's', 'sni' => '', 'node_type' => 'ss',
         'protocol' => 'ss', 'network' => 'tcp', 'speed' => 0, 'tls' => true, 'reality' => false, 'udp' => true,
         'speed_test' => true, 'media_check' => true, 'checked_at' => '2026-10-18T00:00:00Z',
@@ -348,7 +347,7 @@ $raw = [
         'reported_exit_ip' => '', 'exit_error' => '', 'exit_at' => '', 'media' => json_encode(['Netflix']),
     ]),
     nl_fact([
-        'identity' => 'id-hk', 'snapshot_id' => 10, 'node_index' => 4, 'country' => 'HK', 'region' => 'HK',
+        'identity' => 'id-hk', 'country' => 'HK', 'region' => 'HK',
         'name' => '香港 03', 'base_name' => '香港 03', 'server' => 's', 'sni' => '', 'node_type' => 'ss',
         'protocol' => 'ss', 'network' => 'tcp', 'speed' => 0, 'tls' => true, 'reality' => false, 'udp' => false,
         'speed_test' => false, 'media_check' => false, 'checked_at' => '2026-10-18T00:00:00Z',

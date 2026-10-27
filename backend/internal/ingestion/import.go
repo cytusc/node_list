@@ -36,7 +36,7 @@ type sourceItem struct {
 	RawConfig domain.ProxyConfig `json:"rawConfig,omitempty"`
 }
 
-func (i *Importer) Import(ctx context.Context, snap domain.Snapshot) error {
+func (i *Importer) Import(ctx context.Context, snap domain.SourceBatch) error {
 	items := make([]sourceItem, 0, len(snap.Nodes))
 	for _, n := range snap.Nodes {
 		items = append(items, sourceItem{Name: n.Name, RawLink: n.RawLink, RawConfig: n.RawConfig})
@@ -155,18 +155,7 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 		node.SubTag = source
 		nodes[index] = node
 	}
-	snapshotID := 0
-	if len(nodes) > 0 {
-		payload, err := json.Marshal(domain.Snapshot{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Nodes: nodes})
-		if err != nil {
-			return err
-		}
-		err = tx.QueryRow(ctx, `INSERT INTO node_explorer_snapshots(fingerprint,checked_at,imported_at,node_count,payload) VALUES($1,$2,$2,$3,$4) RETURNING id`, "source-v1:"+source+":"+digest, time.Now().UTC().Format(time.RFC3339Nano), len(nodes), string(payload)).Scan(&snapshotID)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO node_explorer_source_batches(source,digest,snapshot_id,version,status,total,accepted,rejected) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, source, digest, snapshotID, result.Version, status, result.Total, len(nodes), len(result.Rejected))
+	_, err = tx.Exec(ctx, `INSERT INTO node_explorer_source_batches(source,digest,version,status,total,accepted,rejected) VALUES($1,$2,$3,$4,$5,$6,$7)`, source, digest, result.Version, status, result.Total, len(nodes), len(result.Rejected))
 	if err != nil {
 		return err
 	}
@@ -209,7 +198,7 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 			if e != nil {
 				return e
 			}
-			_, err = tx.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,snapshot_id,node_index,available) VALUES($1,$2,$3,$4,false) ON CONFLICT(identity) DO NOTHING`, id, payload, snapshotID, index)
+			_, err = tx.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,available) VALUES($1,$2,false) ON CONFLICT(identity) DO NOTHING`, id, payload)
 			if err != nil {
 				return err
 			}
@@ -228,13 +217,6 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 		// Keep the first complete config and URI. A config-only repeat cannot erase an original.
 		_, err = tx.Exec(ctx, `UPDATE node_explorer_node_registry SET node=CASE WHEN coalesce(node->>'rawLink','')='' AND $2<>'' THEN node || jsonb_build_object('rawLink',$2::text) ELSE node END WHERE identity=$1`, id, n.RawLink)
 		if err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_snapshot_members(snapshot_id,node_index,identity) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, snapshotID, index, id); err != nil {
-			return err
-		}
-		// Repair only a missing reader location, preserving every valid existing location.
-		if _, err = tx.Exec(ctx, `UPDATE node_explorer_node_registry r SET snapshot_id=$2,node_index=$3 WHERE identity=$1 AND NOT EXISTS(SELECT 1 FROM node_explorer_snapshot_members m WHERE m.snapshot_id=r.snapshot_id AND m.node_index=r.node_index AND m.identity=r.identity)`, id, snapshotID, index); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_source_occurrences(source,digest,position,identity,name) VALUES($1,$2,$3,$4,$5)`, source, digest, n.Index, id, n.Name); err != nil {

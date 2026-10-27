@@ -64,15 +64,15 @@ func TestRejectInvalidLists(t *testing.T) {
 }
 
 type recordingIngestor struct {
-	snapshots []domain.Snapshot
+	batches []domain.SourceBatch
 	err       error
 }
 
-func (i *recordingIngestor) Import(_ context.Context, s domain.Snapshot) error {
+func (i *recordingIngestor) Import(_ context.Context, s domain.SourceBatch) error {
 	if i.err != nil {
 		return i.err
 	}
-	i.snapshots = append(i.snapshots, s)
+	i.batches = append(i.batches, s)
 	return nil
 }
 
@@ -96,8 +96,8 @@ func TestRefreshRetainsPreviousOnFailureAndRecovers(t *testing.T) {
 		if err := s.Refresh(context.Background()); err == nil {
 			t.Fatal("accepted failed fetch")
 		}
-		if len(i.snapshots) != 1 {
-			t.Fatal("failure published a snapshot")
+		if len(i.batches) != 1 {
+			t.Fatal("failure published a batch")
 		}
 	}
 	status, body = 200, "203.0.113.2:3128\n"
@@ -109,10 +109,10 @@ func TestRefreshRetainsPreviousOnFailureAndRecovers(t *testing.T) {
 	if err := s.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(i.snapshots) != 2 || i.snapshots[1].Nodes[0].Server != "203.0.113.2" {
+	if len(i.batches) != 2 || i.batches[1].Nodes[0].Server != "203.0.113.2" {
 		t.Fatal("did not recover")
 	}
-	if _, err := time.Parse(time.RFC3339Nano, i.snapshots[1].CheckedAt); err != nil {
+	if _, err := time.Parse(time.RFC3339Nano, i.batches[1].CheckedAt); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -152,12 +152,12 @@ func TestLiveSources(t *testing.T) {
 			if err := s.Refresh(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			for _, n := range i.snapshots[0].Nodes {
+			for _, n := range i.batches[0].Nodes {
 				if _, err := domain.ShareLinkProxy(n.RawLink, n.Name); len(n.RawConfig) == 0 && err != nil {
 					t.Fatal(err)
 				}
 			}
-			t.Logf("parsed and imported %d supported proxies", len(i.snapshots[0].Nodes))
+			t.Logf("parsed and imported %d supported proxies", len(i.batches[0].Nodes))
 		})
 	}
 }

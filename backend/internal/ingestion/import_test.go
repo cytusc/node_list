@@ -79,7 +79,7 @@ func TestConcurrentReplayAndSourceMembership(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_snapshots") != 1 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != 1 {
 		t.Fatal("concurrent duplicate")
 	}
 	v.Nodes[0].Name = "second alias"
@@ -111,12 +111,12 @@ func TestConcurrentReplayAndSourceMembership(t *testing.T) {
 		t.Fatal("source marked available")
 	}
 }
-func TestLegacyAdoptionPreservesFactsAndRepairsLocation(t *testing.T) {
+func TestLegacyAdoptionPreservesFacts(t *testing.T) {
 	r, c := fixture(t)
 	ctx := context.Background()
 	config := configuration(8080)
 	raw, _ := json.Marshal(domain.Node{Name: "old", RawConfig: config})
-	_, err := r.Pool.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,snapshot_id,node_index,available) VALUES('legacy',$1,-1,0,true)`, raw)
+	_, err := r.Pool.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,available) VALUES('legacy',$1,true)`, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,20 +146,16 @@ func TestLegacyAdoptionPreservesFactsAndRepairsLocation(t *testing.T) {
 	if count(t, r, "SELECT count(*) FROM node_explorer_source_identity_aliases") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 {
 		t.Fatal("legacy not adopted")
 	}
-	if count(t, r, `SELECT count(*) FROM node_explorer_node_registry r JOIN node_explorer_snapshot_members m ON m.snapshot_id=r.snapshot_id AND m.node_index=r.node_index AND m.identity=r.identity`) != 1 {
-		t.Fatal("reader location not repaired")
+	if count(t, r, "SELECT count(*) FROM node_explorer_live_nodes WHERE identity='legacy'") != 1 {
+		t.Fatal("adopted node not visible directly from registry")
 	}
-	var sid int
-	r.Pool.QueryRow(ctx, "SELECT snapshot_id FROM node_explorer_node_registry WHERE identity='legacy'").Scan(&sid)
 	save(t, r, "source", "b", v, nil)
-	var after int
-	r.Pool.QueryRow(ctx, "SELECT snapshot_id FROM node_explorer_node_registry WHERE identity='legacy'").Scan(&after)
-	if sid != after {
-		t.Fatal("valid reader location changed")
+	if facts() != before {
+		t.Fatal("repeat changed current facts")
 	}
 	// Two identical historical rows must not be silently merged or selected arbitrarily.
 	raw, _ = json.Marshal(domain.Node{RawConfig: configuration(9090)})
-	_, err = r.Pool.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,snapshot_id,node_index) VALUES('old-a',$1,-1,0),('old-b',$1,-1,0)`, raw)
+	_, err = r.Pool.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node) VALUES('old-a',$1),('old-b',$1)`, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,12 +172,12 @@ func TestCollisionRollsBackEntireBatch(t *testing.T) {
 	if _, err := r.Pool.Exec(ctx, "UPDATE node_explorer_source_connections SET canonical='tampered'"); err != nil {
 		t.Fatal(err)
 	}
-	before := count(t, r, "SELECT count(*) FROM node_explorer_snapshots")
+	before := count(t, r, "SELECT count(*) FROM node_explorer_source_batches")
 	v = convert(t, c, configuration(81), configuration(80))
 	if err := r.Save(ctx, "source", "collision", v); err == nil {
 		t.Fatal("collision accepted")
 	}
-	if count(t, r, "SELECT count(*) FROM node_explorer_snapshots") != before || count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE current") != 1 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != before || count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE current") != 1 {
 		t.Fatal("partial transaction persisted")
 	}
 }
@@ -235,7 +231,7 @@ func TestImporterIgnoresUpstreamFactsAndRetainsOriginal(t *testing.T) {
 	ctx := context.Background()
 	in := &Importer{Repository: r, Converter: c, Source: "panel"}
 	link := "http://user:pass@192.0.2.1:8080#original"
-	snap := domain.Snapshot{CheckedAt: "first", Nodes: []domain.Node{{Name: "original", RawLink: link, Country: "untrusted", IP: "192.0.2.9", Speed: 999}}}
+	snap := domain.SourceBatch{CheckedAt: "first", Nodes: []domain.Node{{Name: "original", RawLink: link, Country: "untrusted", IP: "192.0.2.9", Speed: 999}}}
 	if err := in.Import(ctx, snap); err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +248,7 @@ func TestImporterIgnoresUpstreamFactsAndRetainsOriginal(t *testing.T) {
 	if err := json.Unmarshal(payload, &node); err != nil {
 		t.Fatal(err)
 	}
-	if available || node.RawLink != link || node.IP != "" || node.Country != "" || node.Speed != 0 || count(t, r, "SELECT count(*) FROM node_explorer_snapshots") != 1 {
+	if available || node.RawLink != link || node.IP != "" || node.Country != "" || node.Speed != 0 || count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != 1 {
 		t.Fatal("upstream facts imported or repeat not idempotent")
 	}
 	for _, table := range []string{"node_explorer_connectivity", "node_explorer_exits", "node_explorer_ip_attributes"} {

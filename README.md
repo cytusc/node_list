@@ -42,7 +42,7 @@ curl --fail http://127.0.0.1:3001/api/health
 
 默认 `COMPOSE_FILE=compose.yaml:compose.subs-check.yaml`，包含五个应用服务和可选上游 subs-check。已有 subs-check 时可只使用 `compose.yaml`。数据库是已有外部服务，不自动新建。只有来源服务挂载订阅目录；测活和出口服务使用私有内核，不发布代理端口。Web 默认绑定 `127.0.0.1:3001`，可用 `BIND_ADDRESS`／`WEB_PORT` 调整。
 
-首次启动执行 `psql -v ON_ERROR_STOP=1 -f backend/internal/database/schema.sql`。旧版本升级必须先停机备份，再执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/016-retire-legacy.sql`；详见 [清理与迁移记录](docs/service-refactoring/11-project-cleanup.md)。
+首次启动执行 `psql -v ON_ERROR_STOP=1 -f backend/internal/database/schema.sql`。旧版本升级必须先停机备份，再执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/016-retire-legacy.sql`，然后执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/017-remove-snapshots.sql`；详见 [清理与迁移记录](docs/service-refactoring/11-project-cleanup.md)。
 
 `deploy/node-list.service`、`deploy/node-list-update.service` 和 timer 可安装到 systemd。`deploy/update.sh` 会同步更新五个应用服务，健康检查失败时回滚对应版本。`NODE_EXPLORER_AUTO_UPDATE=false` 可关闭应用自动更新。
 
@@ -94,4 +94,6 @@ php webman/tools/hash-password.php
 
 列表每行和详情均提供「复制节点链接」。`POST /api/nodes/link` 在登录校验后按节点 identity 读取单个有效节点，优先复制数据库保存的原始分享链接 `rawLink`（逐字保留上游原文）；上游仅提供 IP、端口或 Clash 配置时，由采集服务转换并保存 `generatedLink`，接口直接读取已保存的链接。普通列表响应剥离 `rawLink` / `generatedLink` / `rawConfig`，复制响应禁止缓存。
 
-链接保留规则：原文与生成链接分开保存。采集服务使用固定版本 Sub-Store 完成第三方解析、生成和回读验证，再按严格配置指纹去重；来源链接历史存入 `node_explorer_source_links`。旧 `node_explorer_node_links` 已备份退役，现有 registry / snapshots 中的节点链接保持不变。链接属于敏感凭据，禁止记录到日志或普通列表响应。
+链接保留规则：原文与生成链接分开保存。采集服务使用固定版本 Sub-Store 完成第三方解析、生成和回读验证，再按严格配置指纹去重；来源链接历史存入 `node_explorer_source_links`。旧 `node_explorer_node_links` 已备份退役，当前节点链接保存在 registry 中。链接属于敏感凭据，禁止记录到日志或普通列表响应。
+
+查询直接读取 PostgreSQL 当前记录，不使用结果快照、历史回退或业务查询缓存。监控页只读取当前服务心跳。快照清理与索引分析见 [实时查询清理](docs/service-refactoring/12-realtime-query-cleanup.md)。

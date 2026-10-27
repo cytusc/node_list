@@ -8,7 +8,7 @@
 
 采集服务只导入节点，新节点 `available=false`；重复导入不修改此字段。出口和属性服务可读取测活事实，但不能改变它，也不能向测活服务投递任务。测活成功即可标记可用，无需出口、住宅属性或恢复审批；失败不会退役、删除节点或写 tombstone。不可用节点持续按相同规则复测。
 
-已删除 recovery、normal recovery、dead-verify、malformed-clean、connectivity-bench、manager sweeper、fast-delay 和共享 manager 的 delay 接口，以及来源 TCP 准入、恢复依赖、生命周期变更和自动判死删除流程。旧历史表保留供历史读取，不再驱动当前可用状态。普通出口 / 属性 / 风险任务及其租约仍由对应服务维护。
+已删除 recovery、normal recovery、dead-verify、malformed-clean、connectivity-bench、manager sweeper、fast-delay 和共享 manager 的 delay 接口，以及来源 TCP 准入、恢复依赖、生命周期变更和自动判死删除流程。测活直接读取 registry，不依赖历史表、快照成员或其他服务任务；出口与属性服务独立运行。
 
 ## 测试流程
 
@@ -55,7 +55,7 @@ go -C backend build -o /tmp/node-liveness ./cmd/node-liveness
 
 先备份数据库及部署配置。停止旧 recovery、dead-verify 和旧 manager，再更新全部应用镜像及 Compose；旧 manager 不认识新所有权约定，禁止并存。`deploy/compose.sh up` 按当前 project 标签移除旧 recovery / dead-verify / node-cleanup 容器。
 
-共享 schema 版本 15 由现有 source / worker 的启动迁移安装，将旧测活、恢复、生命周期和其会话依赖任务完成并递增 generation、清空租约。独立测活进程不调用其他服务的迁移器；首次建库需先运行常规 schema 迁移，再启动本服务。服务只创建自有尝试表。现有 availability 和历史证据保留，后续由本服务重新验证；新增节点未验证前不会展示为可用。
+共享表由部署显式准备，当前升级需执行 017 快照清理迁移；独立测活仅创建自有尝试表。现有 availability 和观察事实保留，后续由本服务重新验证；新增节点未验证前不会展示为可用。
 
 发布后检查独立心跳、每种最终结果计数、最老待测时间、回退比例、CPU / 内存和实际每轮耗时。需要回退时先停 node-liveness，再恢复完整旧版本，不能混用两套写入者。本次仅本地实施和验证，未连接生产库写入、未部署。
 

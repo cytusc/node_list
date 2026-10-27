@@ -82,8 +82,8 @@ export function parseResultsQuery(params) {
   };
 }
 
-export function resultsMetadata(snapshot) {
-  const nodes = snapshot.nodes;
+export function resultsMetadata(results) {
+  const nodes = results.nodes;
   const counts = (key) => {
     const values = new Map();
     for (const node of nodes) {
@@ -147,7 +147,7 @@ export function resultsMetadata(snapshot) {
         ).length,
       })),
   };
-  const { nodes: _nodes, sourceWarning: _warning, ...metadata } = snapshot;
+  const { nodes: _nodes, sourceWarning: _warning, ...metadata } = results;
   return { ...metadata, totalNodes: nodes.length, summary, facets };
 }
 
@@ -164,14 +164,14 @@ export function resultSearchValues(n) {
     .map((v) => v.toLocaleLowerCase());
 }
 
-export function resultsSort(snapshot, query) {
+export function resultsSort(results, query) {
   return {
     key:
-      query.sort === "speed" && !snapshot.speedTest
+      query.sort === "speed" && !results.speedTest
         ? "name"
-        : query.sort || (snapshot.speedTest ? "speed" : "name"),
+        : query.sort || (results.speedTest ? "speed" : "name"),
     direction:
-      query.sort === "speed" && !snapshot.speedTest ? "asc" : query.direction,
+      query.sort === "speed" && !results.speedTest ? "asc" : query.direction,
   };
 }
 
@@ -199,8 +199,8 @@ export function compareResultValues(left, right) {
     : String(left).localeCompare(String(right), "zh-CN", { numeric: true });
 }
 
-export function paginateResults(snapshot, query) {
-  const nodes = snapshot.nodes;
+export function paginateResults(results, query) {
+  const nodes = results.nodes;
   const matches = nodes.filter(
     (n) =>
       (!query.q || resultSearchValues(n).some((v) => v.includes(query.q))) &&
@@ -218,13 +218,13 @@ export function paginateResults(snapshot, query) {
           n.ippure.attributes?.some((value) =>
             query.ipAttributes.includes(value),
           ))) &&
-      (!snapshot.speedTest || (n.speed || 0) >= query.minSpeed * 1024) &&
-      (!snapshot.mediaCheck ||
+      (!results.speedTest || (n.speed || 0) >= query.minSpeed * 1024) &&
+      (!results.mediaCheck ||
         query.media.every((p) =>
           n.media?.some((m) => platform(m) === p && mediaValue(m)),
         )),
   );
-  const { key: sort, direction: order } = resultsSort(snapshot, query);
+  const { key: sort, direction: order } = resultsSort(results, query);
   const direction = order === "desc" ? -1 : 1;
   matches.sort((a, b) => {
     const left = resultSortValue(a, sort),
@@ -238,8 +238,8 @@ export function paginateResults(snapshot, query) {
     Math.max(1, Math.ceil(matches.length / query.limit)),
   );
   return {
-    ...snapshot,
-    ...resultsMetadata(snapshot),
+    ...results,
+    ...resultsMetadata(results),
     nodes: matches.slice((page - 1) * query.limit, page * query.limit),
     total: matches.length,
     page,

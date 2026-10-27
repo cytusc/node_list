@@ -10,7 +10,7 @@
 | ip_attributes | node-attributes | API |
 | 各服务自有尝试表、心跳 | 对应服务 | 自身调度、API 心跳读取 |
 
-新节点由采集以默认 available=false 创建；已有节点重入不得覆盖测活事实。identity 保留既有节点关联；strict-v1 配置指纹用于新采集去重，incarnation 用于防止旧结果写入已替换节点。快照成员保留来源位置，出口 version 防止属性错配，不能合并成一个版本字段。
+新节点由采集以默认 available=false 创建；已有节点重入不得覆盖测活事实。identity 保留既有节点关联；strict-v1 配置指纹用于新采集去重，incarnation 用于防止旧结果写入已替换节点。测活直接读取 registry 当前配置，出口 version 防止属性错配，不能合并成一个版本字段。
 
 共享表与只读视图由部署执行 `backend/internal/database/schema.sql`，服务启动只维护各自的调度表。旧库执行 `deploy/sql/016-retire-legacy.sql`，先停全部旧写入者并备份。没有 Redis、通用任务表、恢复或自动删除服务。
 

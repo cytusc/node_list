@@ -3,8 +3,6 @@ declare(strict_types=1);
 
 namespace app\service;
 
-use DateTimeImmutable;
-use DateTimeZone;
 use support\Db;
 
 /** Read only aggregated telemetry. Never return worker payloads, node identities or errors verbatim. */
@@ -17,14 +15,6 @@ final class ServiceMonitor
         'exit-attributes' => ['IP 属性', '更新 IP 分类与风险信息'],
         'node-liveness' => ['节点测活', '独立使用 Xray / Mihomo 更新节点可用状态'],
     ];
-
-    public static function hours(mixed $value): int
-    {
-        if (!in_array($value, [null, '24', '168', 24, 168], true)) {
-            throw ApiError::invalidQuery('时间范围仅支持 24 或 168 小时。');
-        }
-        return $value === null ? 24 : (int)$value;
-    }
 
     public static function service(string $id, ?array $row, int $now): array
     {
@@ -45,17 +35,17 @@ final class ServiceMonitor
             }];
     }
 
-    public function query(int $hours): array
+    public function query(): array
     {
-        return Db::transaction(function () use ($hours): array {
-            // Read all service heartbeats from a consistent snapshot.
+        return Db::transaction(function (): array {
+            // Read current heartbeats in one database transaction.
             Db::statement('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
             Db::statement("SET LOCAL statement_timeout = '5s'");
-            return $this->snapshot($hours);
+            return $this->readCurrent();
         });
     }
 
-    private function snapshot(int $hours): array
+    private function readCurrent(): array
     {
         $now = (int)Db::selectOne('SELECT extract(epoch FROM now())::bigint AS stamp')->stamp;
         $rows = [];
@@ -73,26 +63,6 @@ final class ServiceMonitor
         }
         $stamp = (string)($liveness['lastCompletedAt'] ?? '');
         $safeLiveness['lastCompletedAt'] = $stamp !== '' && !str_starts_with($stamp, '0001-') && strtotime($stamp) !== false ? gmdate('c', strtotime($stamp)) : null;
-        // Legacy response keys remain for the unchanged frontend. Shared kernel is retired.
-        $kernel = [];
-        $safeKernel = ['healthy' => ($kernel['healthy'] ?? false) === true];
-        foreach (['loaded','quarantined','reloadMillis','reloadDrainMillis','reloadPauseMillis'] as $key) {
-            $safeKernel[$key] = isset($kernel[$key]) ? max(0, (int)$kernel[$key]) : null;
-        }
-        $safeKernel['exitCapacity'] = null;
-
-        // Historical sampling service is retired; unknown data stays null.
-        $sample = null;
-        $sampledAt = null;
-        $start = (new DateTimeImmutable('@' . $now))->setTimezone(new DateTimeZone('UTC'))->setTime((int)gmdate('H', $now), 0)->modify('-' . ($hours - 1) . ' hours');
-        $history = [];
-        for ($i = 0; $i < $hours; $i++) {
-            $stamp = $start->modify('+' . $i . ' hours')->format('c');
-            $history[$stamp] = ['hour' => $stamp, 'samples' => 0, 'queues' => null, 'coverage' => null];
-        }
-        return ['generatedAt' => gmdate('c', $now), 'sampledAt' => $sampledAt,
-            'sampleStale' => $sampledAt === null || $now - strtotime($sampledAt) > 180,
-            'services' => $services, 'liveness' => $safeLiveness, 'kernel' => $safeKernel,
-            'current' => $sample, 'hours' => $hours, 'hourly' => array_values($history)];
+        return ['generatedAt' => gmdate('c', $now), 'services' => $services, 'liveness' => $safeLiveness];
     }
 }

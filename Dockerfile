@@ -105,7 +105,7 @@ EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -q -O /dev/null http://127.0.0.1:3001/api/health || exit 1
 # read_only 下 /app/webman/runtime 是 tmpfs（空），框架只自建 logs/views，
-# 不建 cache/container；入口脚本先 mkdir 再 exec，保证文件缓存与 DI 容器缓存
-# 能写入，且信号能透传给最终命令（php start.php / Go service）。
+# 不建 container；入口脚本先 mkdir 再 exec，保证框架运行目录可写，
+# 且信号能透传给最终命令（php start.php / Go service）。
 ENTRYPOINT ["/bin/sh", "/app/webman/docker-entrypoint.sh"]
 CMD ["php", "start.php", "start"]

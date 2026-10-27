@@ -20,8 +20,7 @@ type Candidate struct {
 const dueSQL = `SELECT n.identity,n.incarnation,md5(n.node::text),n.node
  FROM node_explorer_node_registry n
  LEFT JOIN node_explorer_liveness_attempts a USING(identity)
- WHERE EXISTS(SELECT 1 FROM node_explorer_snapshot_members m WHERE m.identity=n.identity AND m.snapshot_id=n.snapshot_id)
- AND (a.identity IS NULL OR a.incarnation<>n.incarnation OR a.digest<>md5(n.node::text) OR a.next_at<=now())
+ WHERE (a.identity IS NULL OR a.incarnation<>n.incarnation OR a.digest<>md5(n.node::text) OR a.next_at<=now())
  ORDER BY coalesce(a.next_at,'-infinity'::timestamptz),n.identity LIMIT $1`
 
 const schemaSQL = `CREATE TABLE IF NOT EXISTS node_explorer_liveness_attempts (
@@ -91,8 +90,7 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 	}()
 	var id string
 	err = tx.QueryRow(ctx, `SELECT identity FROM node_explorer_node_registry
- WHERE identity=$1 AND incarnation=$2 AND md5(node::text)=$3
- AND EXISTS(SELECT 1 FROM node_explorer_snapshot_members m WHERE m.identity=node_explorer_node_registry.identity AND m.snapshot_id=node_explorer_node_registry.snapshot_id) FOR UPDATE`, n.Identity, n.Incarnation, n.Digest).Scan(&id)
+ WHERE identity=$1 AND incarnation=$2 AND md5(node::text)=$3 FOR UPDATE`, n.Identity, n.Incarnation, n.Digest).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}

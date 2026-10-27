@@ -6,7 +6,11 @@ SET LOCAL statement_timeout = '120s';
 SELECT pg_advisory_xact_lock(hashtext(current_schema()),hashtext('node-explorer-schema'));
 DROP VIEW IF EXISTS node_explorer_live_nodes;
 DROP VIEW IF EXISTS node_explorer_live_facts;
-DROP TRIGGER IF EXISTS results_changed ON node_explorer_snapshots;
+DO $$ BEGIN
+ IF to_regclass('node_explorer_snapshots') IS NOT NULL THEN
+  DROP TRIGGER IF EXISTS results_changed ON node_explorer_snapshots;
+ END IF;
+END $$;
 DROP TRIGGER IF EXISTS registry_changed ON node_explorer_node_registry;
 DROP TRIGGER IF EXISTS observation_changed ON node_explorer_connectivity;
 DROP TRIGGER IF EXISTS observation_changed ON node_explorer_exits;

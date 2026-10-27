@@ -19,16 +19,9 @@ func TestAvailabilityOwnershipAndStaleResults(t *testing.T) {
 	a := testutil.Database(t)
 	var err error
 	node := domain.Node{Name: "test", Type: "http", Server: "192.0.2.1", Port: "80", RawConfig: domain.ProxyConfig{"type": "http", "server": "192.0.2.1", "port": 80}}
-	raw, _ := json.Marshal(domain.Snapshot{Nodes: []domain.Node{node}})
-	if _, err = a.Exec(ctx, `INSERT INTO node_explorer_snapshots(fingerprint,imported_at,node_count,payload) VALUES('test','now',1,$1)`, string(raw)); err != nil {
-		t.Fatal(err)
-	}
 	payload, _ := json.Marshal(node)
 	id := "test-identity"
-	if _, err = a.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,snapshot_id,node_index,available) VALUES($1,$2,1,0,false)`, id, payload); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = a.Exec(ctx, `INSERT INTO node_explorer_snapshot_members(snapshot_id,node_index,identity) VALUES(1,0,$1)`, id); err != nil {
+	if _, err = a.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,available) VALUES($1,$2,false)`, id, payload); err != nil {
 		t.Fatal(err)
 	}
 	// Acquire copies the explicit schema setting as a dedicated ownership session.
@@ -93,11 +86,8 @@ func TestAvailabilityOwnershipAndStaleResults(t *testing.T) {
 	}
 	save("reachable", true)
 	check(false)
-	if _, err = pool.Exec(ctx, "DELETE FROM node_explorer_snapshot_members WHERE identity=$1", n.Identity); err != nil {
-		t.Fatal(err)
-	}
 	due, err = d.Due(ctx, 10)
-	if err != nil || len(due) != 0 {
-		t.Fatalf("orphan input: %v %d", err, len(due))
+	if err != nil || len(due) != 1 {
+		t.Fatalf("replacement not scheduled from registry: %v %d", err, len(due))
 	}
 }

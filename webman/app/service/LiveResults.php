@@ -64,8 +64,7 @@ final class LiveResults
      * facts 查询构造器：用 webman（Illuminate）查询构造器取派生列。
      *
      * 单张视图、扁平 SELECT，不含 JOIN / CTE / 分页。jsonb 拆解用 Db::raw 表达
-     * （PG 特有，构造器本身无法表达），其余列走构造器的列名。视图整体只扫一遍，
-     * 不会逐行重算。改这里前请比对 Go 的 liveRows。
+     * （PG 特有，构造器本身无法表达），其余列走构造器的列名。数据库根据普通视图规划底层表查询。
      */
     private function factsQuery()
     {

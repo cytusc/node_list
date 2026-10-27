@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS node_explorer_source_connections (
  PRIMARY KEY(version,fingerprint), UNIQUE(identity)
 );
 CREATE TABLE IF NOT EXISTS node_explorer_source_batches (
- source text NOT NULL, digest text NOT NULL, snapshot_id integer NOT NULL,
+ source text NOT NULL, digest text NOT NULL,
  version text NOT NULL, status text NOT NULL CHECK(status IN ('complete','partial','rejected')),
  total integer NOT NULL, accepted integer NOT NULL, rejected integer NOT NULL,
  fetched_at timestamptz NOT NULL DEFAULT now(),

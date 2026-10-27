@@ -1,12 +1,14 @@
 # node-source 实现与验收记录
 
-更新：2026-10-26。第三方解析、链接生成、严格去重与独立事务入库已完成本地实现和隔离验证；尚未提交、部署或对生产执行新迁移。前端未修改。
+更新：2026-10-27。快照依赖已移除，当前清理范围见 [实时查询清理](12-realtime-query-cleanup.md)。
+
+原实现验收记录（2026-10-26）：第三方解析、链接生成、严格去重与独立事务入库已完成本地实现和隔离验证；尚未提交、部署或对生产执行新迁移。前端未修改。
 
 ## 独立运行与写入边界
 
 入口为 `backend/cmd/node-source`，仅依赖 PostgreSQL 和已配置的来源。Go 负责获取、调度、健康与事务；本地 Node.js 子进程调用第三方转换库。无需 API、Redis、manager、测活、出口或属性服务，不启动代理内核，不发布测活任务。
 
-采集只创建连接输入、来源记录和兼容快照，新 registry 行显式 `available=false`。已有 available、last_available_at、incarnation、historical_residential、connectivity、exits、ip_attributes、work 不由采集更新。不接受来源声明的可用、延迟、测速、出口和属性事实。完整来源批次只替换本来源成员关系，不删除 registry 节点或其他服务数据。
+采集只创建当前连接输入、去重和来源记录，新 registry 行显式 `available=false`。已有 available、last_available_at、incarnation、historical_residential、connectivity、exits、ip_attributes、work 不由采集更新。不接受来源声明的可用、延迟、测速、出口和属性事实。完整来源批次只替换本来源成员关系，不删除 registry 节点或其他服务数据。
 
 来源支持 Qilan、三个现有公开代理列表、subs-check 的 all.yaml/base64.txt、`SOURCE_SUBSCRIPTIONS` 中按行配置的 HTTP(S) 订阅。YAML 与 URI 导出分别记来源，不通过旧 results.json 做名称匹配或上游测活筛选。上游导出本身可能只含成功节点，需要完整覆盖时应直接配置原订阅。
 
@@ -16,7 +18,7 @@
 
 只调用 parse/produce，不运行 Sub-Store HTTP 应用、远程处理器或用户脚本。库初始化的缓存文件放临时目录，转换子进程退出后清理；Go 同样为子进程建立临时工作目录，取消或超时后删除。日志屏蔽库可能输出的原始链接，子进程不继承 PostgreSQL 和供应商凭据。配置中拒绝库私有 `_` 字段，避免把来源数据当成本地文件选项。此为独立子进程和资源限制，并非操作系统文件访问沙箱。
 
-每批最多 20,000 项，输入最多 32 MiB、输出最多 64 MiB；子进程 V8 堆上限 192 MiB，等待与执行合计超时 45 秒，同一进程最多一个转换子进程。数据库批次事务超时 30 秒。超限、启动失败和超时只返回固定错误，不输出凭据。
+每批最多 20,000 项，输入最多 32 MiB、输出最多 64 MiB；子进程 V8 堆上限 192 MiB，等待与执行合计超时 45 秒，同一进程最多一个转换子进程。数据库批次事务超时 5 分钟。超限、启动失败和超时只返回固定错误，不输出凭据。
 
 | 输入 | 处理 |
 | --- | --- |
@@ -42,17 +44,17 @@ HTTP 仅使用标准库，不手写分享协议。SOCKS 回读中的缺省与空
 | 表（均带 node_explorer_ 前缀） | 责任 |
 | --- | --- |
 | source_connections | 版本、指纹、完整 canonical、稳定 registry identity，唯一约束 |
-| source_batches | 来源、输入摘要、快照、数量与 complete/partial/rejected 状态 |
+| source_batches | 来源、输入摘要、数量与 complete/partial/rejected 状态 |
 | source_occurrences | 来源批次位置、identity、别名、current 关系 |
 | source_links | 原始/生成链接、验证或冲突状态与转换版本 |
 | source_rejections | 批次位置和原因代码，不保存拒绝原文 |
 | source_identity_aliases | 唯一匹配历史 identity 的增量采用记录 |
 
-批次在同一 PostgreSQL 事务内写入，使用事务互斥锁和唯一约束保证多写者并发幂等。摘要命中核对完整 canonical，差异整批回滚。批次摘要不含抓取时间，完全重放不创建新快照；重放旧完整批次会重新激活该来源对应成员关系。partial/rejected 批次也保持幂等并返回固定警告，健康检查不会将部分失败视为完全正常。
+批次在同一 PostgreSQL 事务内写入，使用事务互斥锁和唯一约束保证多写者并发幂等。摘要命中核对完整 canonical，差异整批回滚。批次摘要不含抓取时间，完全重放不重复写入节点和来源记录；重放旧完整批次会重新激活该来源对应成员关系。partial/rejected 批次也保持幂等并返回固定警告，健康检查不会将部分失败视为完全正常。
 
-新 identity 为 `src1:<fingerprint>`。纯配置输入只有在历史 rawConfig 严格相等且恰好一条、没有其他绑定时才采用旧 identity，不批量合并旧记录。别名表记录采用关系。已有有效 snapshot 位置保留，缺失成员定位时修复到新批次，供测活与 API 自行读取；不调用这些服务。节点配置不整行覆盖，仅更新时间，必要时补原始链接。来源失效不等于节点不可用。
+新 identity 为 `src1:<fingerprint>`。纯配置输入只有在历史 rawConfig 严格相等且恰好一条、没有其他绑定时才采用旧 identity，不批量合并旧记录。别名表记录采用关系。测活与 API 直接读取 registry，不依赖批次成员或快照定位；不调用这些服务。节点配置不整行覆盖，仅更新时间，必要时补原始链接。来源失效不等于节点不可用。
 
-转换 canonical、节点配置、链接表与兼容快照均可能包含认证信息，应沿用数据库与备份访问权限；拒绝码、心跳及仓库证据不包含链接和凭据。批次证据目前持续保留，尚无自动历史清理策略。
+转换 canonical、节点配置、链接表均可能包含认证信息，应沿用数据库与备份访问权限；拒绝码、心跳及仓库证据不包含链接和凭据。批次证据目前持续保留，尚无自动历史清理策略。
 
 ## 历史样本离线验证
 

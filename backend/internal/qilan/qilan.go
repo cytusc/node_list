@@ -68,11 +68,11 @@ func normalizeNode(node qilanNode) *domain.Node {
 	return &domain.Node{Name: name, RawLink: node.Link, SubTag: "qilan"}
 }
 
-// FetchSnapshot crawls the member list. A truncated round is never published:
+// FetchNodes crawls the member list. A truncated round is never published:
 // it would mark every missing connection as departed and burn probe budget.
-func FetchSnapshot(ctx context.Context, client *http.Client, session, userAgent string, sleep func(time.Duration)) (domain.Snapshot, error) {
+func FetchNodes(ctx context.Context, client *http.Client, session, userAgent string, sleep func(time.Duration)) (domain.SourceBatch, error) {
 	if strings.TrimSpace(session) == "" {
-		return domain.Snapshot{}, fmt.Errorf("Qilan session cookie is empty")
+		return domain.SourceBatch{}, fmt.Errorf("Qilan session cookie is empty")
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
@@ -92,7 +92,7 @@ func FetchSnapshot(ctx context.Context, client *http.Client, session, userAgent 
 		for attempt := 0; attempt < attemptsPer; attempt++ {
 			endpoint, err := url.Parse(baseURL + "/api/nodes")
 			if err != nil {
-				return domain.Snapshot{}, err
+				return domain.SourceBatch{}, err
 			}
 			query := endpoint.Query()
 			query.Set("page", strconv.Itoa(page))
@@ -104,10 +104,10 @@ func FetchSnapshot(ctx context.Context, client *http.Client, session, userAgent 
 				Data  []qilanNode `json:"data"`
 			}
 			if err := fetchJSON(ctx, client, endpoint.String(), session, userAgent, &payload); err != nil {
-				return domain.Snapshot{}, err
+				return domain.SourceBatch{}, err
 			}
 			if payload.Data == nil {
-				return domain.Snapshot{}, fmt.Errorf("Qilan returned an invalid node page")
+				return domain.SourceBatch{}, fmt.Errorf("Qilan returned an invalid node page")
 			}
 			if payload.Total != nil {
 				total = payload.Total
@@ -121,7 +121,7 @@ func FetchSnapshot(ctx context.Context, client *http.Client, session, userAgent 
 				}
 			}
 			if len(items) > 0 && !usable {
-				return domain.Snapshot{}, fmt.Errorf(
+				return domain.SourceBatch{}, fmt.Errorf(
 					"Qilan session rejected: nodes returned without share links (stale session?)")
 			}
 			expected := pageSize
@@ -139,7 +139,7 @@ func FetchSnapshot(ctx context.Context, client *http.Client, session, userAgent 
 			if attempt+1 < attemptsPer {
 				select {
 				case <-ctx.Done():
-					return domain.Snapshot{}, ctx.Err()
+					return domain.SourceBatch{}, ctx.Err()
 				case <-time.After(time.Duration(300*pow3(attempt)) * time.Millisecond):
 				}
 			}
@@ -172,27 +172,27 @@ func FetchSnapshot(ctx context.Context, client *http.Client, session, userAgent 
 			break
 		}
 		if page >= maxPages {
-			return domain.Snapshot{}, fmt.Errorf("Qilan pagination exceeded %d pages", maxPages)
+			return domain.SourceBatch{}, fmt.Errorf("Qilan pagination exceeded %d pages", maxPages)
 		}
 		select {
 		case <-ctx.Done():
-			return domain.Snapshot{}, ctx.Err()
+			return domain.SourceBatch{}, ctx.Err()
 		case <-time.After(300 * time.Millisecond):
 		}
 	}
 	if total != nil && *total-received > missingTolerance(*total) {
-		return domain.Snapshot{}, fmt.Errorf(
-			"Qilan returned an incomplete node page set (%d/%d); previous snapshot retained", received, *total)
+		return domain.SourceBatch{}, fmt.Errorf(
+			"Qilan returned an incomplete node page set (%d/%d); incomplete fetch discarded", received, *total)
 	}
 	if len(nodes) == 0 {
-		return domain.Snapshot{}, fmt.Errorf("Qilan returned no usable nodes")
+		return domain.SourceBatch{}, fmt.Errorf("Qilan returned no usable nodes")
 	}
 	keys := make([]string, 0, len(nodes))
 	for key := range nodes {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	out := domain.Snapshot{SpeedTest: false, MediaCheck: false, Nodes: make([]domain.Node, 0, len(keys))}
+	out := domain.SourceBatch{Nodes: make([]domain.Node, 0, len(keys))}
 	for _, key := range keys {
 		out.Nodes = append(out.Nodes, nodes[key].node)
 	}
@@ -277,7 +277,7 @@ type Source struct {
 
 // Ingestor is the subset of the import pipeline the source needs.
 type Ingestor interface {
-	Import(ctx context.Context, snap domain.Snapshot) error
+	Import(ctx context.Context, snap domain.SourceBatch) error
 }
 
 // SourceConfig configures the Qilan source.
@@ -331,7 +331,7 @@ func (s *Source) Refresh(ctx context.Context) error {
 	if err != nil {
 		return s.handleFailure(err)
 	}
-	snapshot, err := FetchSnapshot(ctx, nil, session, s.userAgent, nil)
+	batch, err := FetchNodes(ctx, nil, session, s.userAgent, nil)
 	if err != nil {
 		return s.handleFailure(err)
 	}
@@ -340,17 +340,17 @@ func (s *Source) Refresh(ctx context.Context) error {
 	// two rounds.
 	s.mu.Lock()
 	lastSize := s.lastSize
-	collapsed := lastSize > 0 && len(snapshot.Nodes) < int(float64(s.lastSize)*s.retention)
+	collapsed := lastSize > 0 && len(batch.Nodes) < int(float64(s.lastSize)*s.retention)
 	s.mu.Unlock()
 	if collapsed {
 		return s.handleFailure(fmt.Errorf(
-			"Qilan member count collapsed from %d to %d; round discarded", lastSize, len(snapshot.Nodes)))
+			"Qilan member count collapsed from %d to %d; round discarded", lastSize, len(batch.Nodes)))
 	}
-	if err := s.ingestor.Import(ctx, snapshot); err != nil {
+	if err := s.ingestor.Import(ctx, batch); err != nil {
 		return s.handleFailure(err)
 	}
 	s.mu.Lock()
-	s.lastSize = len(snapshot.Nodes)
+	s.lastSize = len(batch.Nodes)
 	s.mu.Unlock()
 	return nil
 }

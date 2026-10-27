@@ -133,7 +133,7 @@ func Parse(def Definition, raw []byte) ([]domain.Node, error) {
 }
 
 type Ingestor interface {
-	Import(context.Context, domain.Snapshot) error
+	Import(context.Context, domain.SourceBatch) error
 }
 
 type Source struct {
@@ -188,7 +188,7 @@ func (s *Source) Refresh(ctx context.Context) (result error) {
 	if err != nil {
 		return err
 	}
-	if err := s.ingestor.Import(ctx, domain.Snapshot{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Nodes: nodes}); err != nil {
+	if err := s.ingestor.Import(ctx, domain.SourceBatch{CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Nodes: nodes}); err != nil {
 		return err
 	}
 	log.Printf("public proxy source %s: imported %d nodes", s.Name(), len(nodes))

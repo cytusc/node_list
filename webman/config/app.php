@@ -2,8 +2,8 @@
 /**
  * 应用级配置：只放 webman 框架需要的键。
  *
- * 业务参数（分页上限、缓存 TTL、判定版本）在 config/api.php，
- * 数据库在 config/database.php，缓存驱动在 config/cache.php —— 一事一文件，
+ * 业务参数（分页上限、判定版本）在 config/api.php，
+ * 数据库在 config/database.php —— 一事一文件，
  * 这是 webman 的配置约定（Config::load 会把每个文件挂成一个顶层键）。
  */
 

@@ -22,7 +22,7 @@ const ShareLinkVersion = 9
 
 // ErrShareLink is returned for any link this converter cannot express as a
 // usable outbound. The message never includes the link itself: share links
-// embed credentials and are stored alongside public snapshot data.
+// embed credentials and are stored alongside node records.
 var ErrShareLink = fmt.Errorf("节点分享链接格式或连接参数不受当前检测服务支持")
 
 // ShareLinkError contains only fixed diagnostic codes, never link values.

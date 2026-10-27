@@ -11,7 +11,7 @@ type reportingImporter struct {
 	report func(error)
 }
 
-func (i *reportingImporter) Import(ctx context.Context, snap domain.Snapshot) error {
+func (i *reportingImporter) Import(ctx context.Context, snap domain.SourceBatch) error {
 	err := i.Importer.Import(ctx, snap)
 	i.report(err)
 	return err

@@ -1,7 +1,7 @@
 import { fulfillRoute } from "./results-fixture";
 import { test, expect } from "./authenticated-fixture";
 
-const snapshot = {
+const results = {
   checkedAt: "2026-10-11T08:06:01+08:00",
   speedTest: true,
   mediaCheck: false,
@@ -52,7 +52,7 @@ test("loads real local results with no browser errors", async ({
 test.describe("interactions and data states", () => {
   test.beforeEach(async ({ page }) => {
     await page.route("**/api/results?**", (route) =>
-      fulfillRoute(route, { json: snapshot }),
+      fulfillRoute(route, { json: results }),
     );
     await page.route("**/api/downloads", (route) =>
       fulfillRoute(route, {
@@ -61,7 +61,7 @@ test.describe("interactions and data states", () => {
             id: "clash",
             label: "Clash 节点",
             available: true,
-            updatedAt: snapshot.checkedAt,
+            updatedAt: results.checkedAt,
           },
         ],
       }),
@@ -76,11 +76,11 @@ test.describe("interactions and data states", () => {
     await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
         json: {
-          ...snapshot,
+          ...results,
           batchCount: 2,
           nodes: [
             {
-              ...snapshot.nodes[0],
+              ...results.nodes[0],
               addedAt: "2026-10-09T00:00:00Z",
               checkedAt: "2026-10-10T00:00:00Z",
               connectivity: {
@@ -90,7 +90,7 @@ test.describe("interactions and data states", () => {
               name: "Current node",
               baseName: "Current node",
             },
-            snapshot.nodes[1],
+            results.nodes[1],
           ],
         },
       }),
@@ -296,9 +296,12 @@ test.describe("interactions and data states", () => {
     await expect(page.locator(".node-row")).toHaveCount(0);
     await page.unroute("**/api/results?**");
     await page.route("**/api/results?**", (route) =>
-      fulfillRoute(route, { json: snapshot }),
+      fulfillRoute(route, { json: results }),
     );
-    await page.getByRole("button", { name: "重试", exact: true }).click();
+    // Dispatch immediately: the automatic live poll may also recover the page.
+    await page
+      .getByRole("button", { name: "重试", exact: true })
+      .dispatchEvent("click");
     await expect(page.locator(".node-row")).toHaveCount(50);
     await expect(page.getByRole("alert")).toHaveCount(0);
   });
@@ -306,7 +309,7 @@ test.describe("interactions and data states", () => {
   test("handles zero nodes and disabled speed tests", async ({ page }) => {
     await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
-        json: { ...snapshot, speedTest: false, nodes: [] },
+        json: { ...results, speedTest: false, nodes: [] },
       }),
     );
     await page.getByRole("button", { name: "刷新结果" }).click();
@@ -324,14 +327,14 @@ test.describe("interactions and data states", () => {
     await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
         json: {
-          ...snapshot,
+          ...results,
           mediaCheck: true,
           nodes: [
             {
-              ...snapshot.nodes[0],
+              ...results.nodes[0],
               media: [{ platform: "openai", tag: "GPT⁺-US" }],
             },
-            snapshot.nodes[1],
+            results.nodes[1],
           ],
         },
       }),

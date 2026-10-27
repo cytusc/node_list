@@ -78,7 +78,7 @@ Sub-Store 为 AGPL-3.0；保留许可及相应源码获取方式。canonicalize 
 
 ## 存储与并发
 
-下列模型已落为 `internal/ingestion/schema.sql`，通过 registry 与 snapshot_members 兼容现有读者：
+下列模型已落为 `internal/ingestion/schema.sql`，以 registry 提供当前节点输入，不再写 snapshot_members 或整批快照：
 
 | 对象 | 内容与约束 |
 | --- | --- |

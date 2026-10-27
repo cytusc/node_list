@@ -21,8 +21,8 @@ type Media struct {
 	Tag      string
 }
 
-// UnmarshalJSON accepts platform/Platform and tag/Tag while keeping the original
-// payload so snapshots round-trip byte for byte.
+// UnmarshalJSON accepts platform/Platform and tag/Tag while preserving
+// the original upstream payload.
 func (m *Media) UnmarshalJSON(data []byte) error {
 	m.raw = append(json.RawMessage(nil), data...)
 	var lower struct {
@@ -47,7 +47,7 @@ func (m *Media) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON re-emits the original bytes; snapshots must not be normalised.
+// MarshalJSON re-emits the original bytes; upstream payloads keep their original shape.
 func (m Media) MarshalJSON() ([]byte, error) {
 	if len(m.raw) > 0 {
 		return m.raw, nil
@@ -120,7 +120,7 @@ type ExitIPAttempt struct {
 	Code      string `json:"code,omitempty"`
 }
 
-// Node is one detected connection inside a snapshot.
+// Node describes a connection and its current observed facts.
 type Node struct {
 	shape jsonShape
 
@@ -149,16 +149,12 @@ type Node struct {
 	GeneratedLink string      `json:"generatedLink,omitempty"`
 	RawConfig     ProxyConfig `json:"rawConfig,omitempty"`
 
-	// Enrichment and presentation state. Never part of a snapshot fingerprint.
+	// Enrichment and presentation state. Excluded from connection deduplication.
 	IPPure       *IPPureResult      `json:"ippure,omitempty"`
 	Connectivity *ConnectivityState `json:"connectivity,omitempty"`
 	Exit         *ExitState         `json:"exit,omitempty"`
 	Lifecycle    *LifecycleState    `json:"lifecycle,omitempty"`
 
-	// Runtime coordinates. The aggregate view publishes the batch each node
-	// came from, so those three are pointers and stay absent from a
-	// single-batch view — the JavaScript store only attaches them while folding.
-	SnapshotID *int   `json:"snapshotId,omitempty"`
 	Index      int    `json:"-"`
 	AddedAt    string `json:"addedAt,omitempty"`
 	CheckedAt  string `json:"checkedAt,omitempty"`
@@ -248,14 +244,8 @@ func (r IPPureResult) MarshalJSON() ([]byte, error) {
 	return marshalJSONShape(plain(r), shape, ippureJSONFields)
 }
 
-// Snapshot is one detection batch.
-type Snapshot struct {
-	ID         int    `json:"-"`
-	CheckedAt  string `json:"checkedAt,omitempty"`
-	SpeedTest  bool   `json:"speedTest"`
-	MediaCheck bool   `json:"mediaCheck"`
-	Nodes      []Node `json:"nodes"`
-
-	// SourceWarning is surfaced to the UI when the upstream files were unreadable.
-	SourceWarning string `json:"sourceWarning,omitempty"`
+// SourceBatch is a transient upstream fetch; only its nodes enter ingestion.
+type SourceBatch struct {
+	CheckedAt string `json:"checkedAt,omitempty"`
+	Nodes     []Node `json:"nodes"`
 }

@@ -1,5 +1,9 @@
 import { test, expect } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  await page.route("https://hm.baidu.com/**", (route) => route.abort());
+});
+
 test("login validates credentials before mounting protected pages and supports logout", async ({
   page,
 }) => {
@@ -19,12 +23,12 @@ test("login validates credentials before mounting protected pages and supports l
   await page.route("**/api/auth/logout", (route) =>
     route.fulfill({ json: { authenticated: false } }),
   );
-  await page.route("**/api/services?**", (route) =>
+  await page.route("**/api/services", (route) =>
     route.fulfill({ status: 503, json: { error: "测试监控暂不可用" } }),
   );
   let protectedRequests = 0;
   page.on("request", (request) => {
-    if (request.url().includes("/api/services?")) protectedRequests++;
+    if (request.url().includes("/api/services")) protectedRequests++;
   });
   await page.goto("/services");
   await expect(
