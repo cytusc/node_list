@@ -122,7 +122,7 @@ func TestLegacyAdoptionPreservesFacts(t *testing.T) {
 	}
 	for _, sql := range []string{
 		`INSERT INTO node_explorer_connectivity VALUES('legacy',now(),'{"reachable":true}')`,
-		`INSERT INTO node_explorer_exits(identity,ip,checked_at,payload) VALUES('legacy','192.0.2.9',now(),'{"test":true}')`,
+		`INSERT INTO node_explorer_exits(identity,ip,checked_at,payload) VALUES('legacy','192.0.2.9',now(),'{"test":true,"verified":true}')`,
 		`INSERT INTO node_explorer_ip_attributes VALUES('192.0.2.9',now(),'{"test":true}')`,
 	} {
 		if _, err = r.Pool.Exec(ctx, sql); err != nil {

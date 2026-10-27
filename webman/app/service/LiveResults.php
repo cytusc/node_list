@@ -468,8 +468,9 @@ final class LiveResults
      * 「优选」布尔位，逐项对应 Go 的 livePreferred。
      *
      * 一次节点可用必须同时满足：可连通、出口探针无错、出口 IP 已上报、
-     * 连通性与出口都在 10 分钟内、分类判定为住宅且版本匹配、
-     * 属性 IP 与出口 IP 一致、分类证据未过期。
+     * 连通性与出口都在 45 分钟内（node-liveness 与 node-exit 的周期是 30 分钟，
+     * 窗口取 1.5 个周期，否则每个周期里有一半时间优选位恒为 false）、
+     * 分类判定为住宅且版本匹配、属性 IP 与出口 IP 一致、分类证据未过期。
      */
     private function isPreferred(array $r, DateTimeImmutable $now): bool
     {
@@ -485,10 +486,10 @@ final class LiveResults
         if (($r['reported_exit_ip'] ?? '') === '') {
             return false;
         }
-        if (!$this->within($r['connectivity_at'] ?? '', $now, '-10 minutes', '+1 minute')) {
+        if (!$this->within($r['connectivity_at'] ?? '', $now, '-45 minutes', '+1 minute')) {
             return false;
         }
-        if (!$this->within($r['exit_at'] ?? '', $now, '-10 minutes', '+1 minute')) {
+        if (!$this->within($r['exit_at'] ?? '', $now, '-45 minutes', '+1 minute')) {
             return false;
         }
         $c = $r['classification'];

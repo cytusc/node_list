@@ -27,6 +27,9 @@ type Result struct {
 	LatencyMS int64     `json:"latencyMs"`
 	Reason    string    `json:"reason,omitempty"`
 	Fallback  string    `json:"fallback,omitempty"`
+	// FailureStreak counts consecutive "unreachable" verdicts for this
+	// configuration; the store uses it to back off dead addresses.
+	FailureStreak int `json:"failureStreak,omitempty"`
 }
 
 func (r Result) Valid() bool { return r.Status == "reachable" || r.Status == "unreachable" }

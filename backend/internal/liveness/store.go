@@ -33,6 +33,30 @@ CREATE INDEX IF NOT EXISTS node_explorer_liveness_due ON node_explorer_liveness_
 type DB struct {
 	Pool  *pgxpool.Pool
 	owner *pgx.Conn
+	// MaxBackoff caps the retry delay for addresses that keep failing. Without
+	// it every dead address returns after Interval, the due queue grows faster
+	// than the workers can drain it, and availability conclusions age by hours.
+	MaxBackoff time.Duration
+}
+
+// backoff doubles the retry delay per consecutive failure, capped at max.
+// The first failure keeps the normal interval; each further consecutive
+// failure doubles it, so a dead address stops competing with live ones.
+func backoff(interval time.Duration, streak int, max time.Duration) time.Duration {
+	if interval <= 0 || streak <= 0 {
+		return interval
+	}
+	if max <= 0 {
+		max = 24 * time.Hour
+	}
+	delay := interval
+	for i := 1; i < streak && delay < max; i++ {
+		delay *= 2
+	}
+	if delay > max {
+		delay = max
+	}
+	return delay
 }
 
 func (d *DB) Acquire(ctx context.Context) error {
@@ -97,13 +121,33 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 	if err != nil {
 		return err
 	}
+	// A failed probe is a fact about the attempt, not about the address: only
+	// "unreachable" continues the streak. Infrastructure and config errors are
+	// retried on the short path and must not inherit a dead address's backoff.
+	var previous []byte
+	if err = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_liveness_attempts WHERE identity=$1`, id).Scan(&previous); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if r.Status == "unreachable" {
+		var last Result
+		if len(previous) > 0 {
+			_ = json.Unmarshal(previous, &last)
+		}
+		r.FailureStreak = last.FailureStreak + 1
+	} else {
+		r.FailureStreak = 0
+	}
 	b, err := json.Marshal(r)
 	if err != nil {
 		return err
 	}
+	delay := interval
+	if r.FailureStreak > 0 {
+		delay = backoff(interval, r.FailureStreak, d.MaxBackoff)
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_liveness_attempts(identity,incarnation,digest,checked_at,next_at,payload)
  VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(identity) DO UPDATE SET incarnation=EXCLUDED.incarnation,digest=EXCLUDED.digest,
- checked_at=EXCLUDED.checked_at,next_at=EXCLUDED.next_at,payload=EXCLUDED.payload`, id, n.Incarnation, n.Digest, r.CheckedAt, time.Now().Add(interval), b); err != nil {
+ checked_at=EXCLUDED.checked_at,next_at=EXCLUDED.next_at,payload=EXCLUDED.payload`, id, n.Incarnation, n.Digest, r.CheckedAt, time.Now().Add(delay), b); err != nil {
 		return err
 	}
 	if r.Valid() {

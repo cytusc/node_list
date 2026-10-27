@@ -40,7 +40,16 @@ WITH observed AS (
  LEFT JOIN node_explorer_connectivity c USING(identity)
  LEFT JOIN node_explorer_exits e USING(identity)
  LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
+ -- Publishing needs three independent facts, not just the scheduling flag:
+ --   available     the last probe reached the target at all;
+ --   c.checked_at  that verdict is recent (the worker refreshes every interval);
+ --   verified      the exit could actually be observed through the node.
+ -- registry.available deliberately stays the scheduling signal for the exit and
+ -- attribute workers, so a hidden node keeps being probed and returns to the
+ -- page on its own once it recovers.
  WHERE n.available
+ AND c.checked_at>now()-interval '6 hours'
+ AND e.identity IS NOT NULL AND e.payload->>'verified'='true'
 )
 SELECT observed.*,
  CASE WHEN observed_country ~ '^[a-zA-Z]{2}$' THEN

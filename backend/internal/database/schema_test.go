@@ -18,7 +18,7 @@ func TestRetirementPreservesFactsAndIsRepeatable(t *testing.T) {
  INSERT INTO node_explorer_node_registry(identity,node,snapshot_id,node_index,available) VALUES('kept','{"rawLink":"fixture","name":"kept"}',1,0,true);
  INSERT INTO node_explorer_snapshot_members VALUES(1,0,'kept');
  INSERT INTO node_explorer_connectivity VALUES('kept',now(),'{"reachable":true}');
- INSERT INTO node_explorer_exits VALUES('kept','192.0.2.1',7,now(),'{"ip":"192.0.2.1"}');
+ INSERT INTO node_explorer_exits VALUES('kept','192.0.2.1',7,now(),'{"ip":"192.0.2.1","verified":true}');
  INSERT INTO node_explorer_ip_attributes VALUES('192.0.2.1',now(),'{"ip":"192.0.2.1","status":"success"}');
  ALTER TABLE node_explorer_node_registry ADD COLUMN historical_residential boolean DEFAULT true, ADD COLUMN connection_key text DEFAULT 'legacy', ADD COLUMN source_at timestamptz DEFAULT now();
  CREATE TABLE node_explorer_retired_nodes(identity text);
@@ -108,7 +108,7 @@ func TestRemoveSnapshotsPreservesCurrentFacts(t *testing.T) {
  INSERT INTO node_explorer_node_registry(identity,node,available) VALUES('kept','{"name":"kept","rawLink":"private-link"}',true);
  INSERT INTO node_explorer_snapshot_members VALUES(1,0,'kept');
  INSERT INTO node_explorer_connectivity VALUES('kept',now(),'{"reachable":true}');
- INSERT INTO node_explorer_exits VALUES('kept','192.0.2.1',7,now(),'{"ip":"192.0.2.1"}');
+ INSERT INTO node_explorer_exits VALUES('kept','192.0.2.1',7,now(),'{"ip":"192.0.2.1","verified":true}');
  INSERT INTO node_explorer_ip_attributes VALUES('192.0.2.1',now(),'{"ip":"192.0.2.1","status":"success"}');
  CREATE TABLE node_explorer_source_batches(source text,digest text,snapshot_id int NOT NULL,PRIMARY KEY(source,digest));
  INSERT INTO node_explorer_source_batches VALUES('source','digest',1);

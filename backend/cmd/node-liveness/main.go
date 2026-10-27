@@ -86,12 +86,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	maxBackoff, err := number("LIVENESS_MAX_BACKOFF_SECONDS", 86400, 60, 604800)
+	if err != nil {
+		return err
+	}
 	for _, bin := range []string{env("XRAY_BIN", "xray"), env("MIHOMO_BIN", "mihomo")} {
 		if _, err := exec.LookPath(bin); err != nil {
 			return fmt.Errorf("required kernel binary unavailable: %s", bin)
 		}
 	}
-	db := &liveness.DB{Pool: pool}
+	db := &liveness.DB{Pool: pool, MaxBackoff: time.Duration(maxBackoff) * time.Second}
 	defer db.Close()
 	acquire, stop := context.WithTimeout(ctx, 10*time.Second)
 	err = db.Acquire(acquire)
