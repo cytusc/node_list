@@ -91,3 +91,36 @@ func TestAvailabilityOwnershipAndStaleResults(t *testing.T) {
 		t.Fatalf("replacement not scheduled from registry: %v %d", err, len(due))
 	}
 }
+
+func TestDueReservesAvailableCapacityWithoutStarvation(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.Database(t)
+	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,available) SELECT 'available-'||i,'{}',true FROM generate_series(1,12) i;
+ INSERT INTO node_explorer_node_registry(identity,node,available) SELECT 'new-'||i,'{}',false FROM generate_series(1,12) i`); err != nil {
+		t.Fatal(err)
+	}
+	d := DB{Pool: pool}
+	nodes, err := d.Due(ctx, 8)
+	if err != nil || len(nodes) != 8 {
+		t.Fatalf("due: %d %v", len(nodes), err)
+	}
+	available := 0
+	for _, n := range nodes {
+		if strings.HasPrefix(n.Identity, "available-") {
+			available++
+		}
+	}
+	if available != 6 {
+		t.Fatalf("available slots=%d want 6/8", available)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM node_explorer_node_registry WHERE NOT available`); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err = d.Due(ctx, 8)
+	if err != nil || len(nodes) != 8 {
+		t.Fatalf("unused quota not filled: %d %v", len(nodes), err)
+	}
+}

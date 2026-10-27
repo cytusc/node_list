@@ -14,5 +14,13 @@ export type MonitorData = {
     mihomoQueued: number | null;
     inFlight: number | null;
     lastCompletedAt: string | null;
+    results?: Record<
+      "reachable" | "unreachable" | "config_error" | "infrastructure",
+      number
+    >;
+    visibility?: Record<
+      "published" | "unavailable" | "expired" | "unverified" | "unverifiedExit",
+      number
+    >;
   };
 };

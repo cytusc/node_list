@@ -28,8 +28,7 @@ func Decode(raw []byte) (Proxy, error) {
 	}
 	var p Proxy
 	if len(n.RawConfig) > 0 {
-		b, _ := json.Marshal(n.RawConfig)
-		_ = json.Unmarshal(b, &p)
+		p = Proxy(n.RawConfig)
 	} else {
 		link := n.RawLink
 		if link == "" {
@@ -37,6 +36,10 @@ func Decode(raw []byte) (Proxy, error) {
 		}
 		parsed, err := domain.ShareLinkProxy(link, "probe")
 		if err != nil {
+			var detail *domain.ShareLinkError
+			if errors.As(err, &detail) {
+				return nil, errors.New("share_link_" + detail.Code)
+			}
 			return nil, errors.New("invalid_config")
 		}
 		p = Proxy(parsed)

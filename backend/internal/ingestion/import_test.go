@@ -121,7 +121,7 @@ func TestLegacyAdoptionPreservesFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sql := range []string{
-		`INSERT INTO node_explorer_connectivity VALUES('legacy',now(),'{"reachable":true}')`,
+		`INSERT INTO node_explorer_connectivity SELECT identity,now(),jsonb_build_object('reachable',true,'incarnation',incarnation,'configDigest',md5(node::text)) FROM node_explorer_node_registry WHERE identity='legacy'`,
 		`INSERT INTO node_explorer_exits(identity,ip,checked_at,payload) VALUES('legacy','192.0.2.9',now(),'{"test":true,"verified":true}')`,
 		`INSERT INTO node_explorer_ip_attributes VALUES('192.0.2.9',now(),'{"test":true}')`,
 	} {

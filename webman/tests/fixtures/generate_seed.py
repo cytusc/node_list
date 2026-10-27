@@ -75,7 +75,7 @@ n4 = {
     "speedTest": True, "mediaCheck": True, "checkedAt": "2026-10-18T00:00:00Z",
 }
 nodes.append(("id-sg-hy2", 2, 1, n4,
-    {"reachable": False, "checkedAt": "__NOW2M__", "error": "dial timeout"},
+    {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
     {"ip": "2001:db8::40", "addressFamily": 6, "country": "SG", "checkedAt": "__NOW2M__",
      "source": "ip.sb", "error": "", "verified": True, "version": 3},
     None, True, False))
@@ -150,6 +150,9 @@ for (ident, sid, idx, node, conn, exitp, attr, avail, hist) in nodes:
             "INSERT INTO node_explorer_ip_attributes (ip,checked_at,payload) VALUES "
             "('%s',now()-interval '2 minutes',%s);" % (attr["ip"], j(attr)))
 
+out.append("UPDATE node_explorer_connectivity c SET payload=c.payload || "
+           "jsonb_build_object('incarnation',n.incarnation,'configDigest',md5(n.node::text)) "
+           "FROM node_explorer_node_registry n WHERE n.identity=c.identity;")
 out.append("COMMIT;")
 
 body = "\n".join(out)

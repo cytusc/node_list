@@ -110,6 +110,10 @@ try {
 
 // 缺少任一发布事实都要隐藏节点；调度标记保留，以便后续探针恢复。
 foreach ([
+    '负面测活结论' => "UPDATE node_explorer_connectivity SET payload=payload || '{\"reachable\":false}'::jsonb WHERE identity='id-us-ss'",
+    '旧版测活记录' => "UPDATE node_explorer_connectivity SET payload=payload-'configDigest' WHERE identity='id-us-ss'",
+    '配置已改变' => "UPDATE node_explorer_node_registry SET node=node || '{\"name\":\"changed\"}'::jsonb WHERE identity='id-us-ss'",
+    '节点已替换' => "UPDATE node_explorer_node_registry SET incarnation='replacement' WHERE identity='id-us-ss'",
     '过期连通性记录' => "UPDATE node_explorer_connectivity SET checked_at=now()-interval '7 hours' WHERE identity='id-us-ss'",
     '缺少连通性记录' => "DELETE FROM node_explorer_connectivity WHERE identity='id-us-ss'",
     '出口未验证' => "UPDATE node_explorer_exits SET payload=jsonb_set(payload,'{verified}','false'::jsonb) WHERE identity='id-us-ss'",
@@ -258,7 +262,7 @@ foreach ($all['nodes'] as $node) {
     }
 }
 same('unsupported', $sg['ippure']['status'] ?? null, '仅 IPv6 的出口标记为 unsupported');
-ok(isset($sg['connectivity']['error']), '连通性失败原因透出');
+same(true, $sg['connectivity']['reachable'] ?? null, '已发布节点保留正面测活结论');
 
 // 出口已验证但属性尚未查询的节点仍可展示，返回待查询状态。
 $hk = null;

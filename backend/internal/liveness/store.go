@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/rand/v2"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,7 +22,11 @@ const dueSQL = `SELECT n.identity,n.incarnation,md5(n.node::text),n.node
  FROM node_explorer_node_registry n
  LEFT JOIN node_explorer_liveness_attempts a USING(identity)
  WHERE (a.identity IS NULL OR a.incarnation<>n.incarnation OR a.digest<>md5(n.node::text) OR a.next_at<=now())
- ORDER BY coalesce(a.next_at,'-infinity'::timestamptz),n.identity LIMIT $1`
+ -- Interleave three available nodes with one other node. Neither group can
+ -- starve the other, and an empty group leaves all slots to the remaining one.
+ ORDER BY (row_number() OVER (PARTITION BY n.available ORDER BY coalesce(a.next_at,'-infinity'::timestamptz),n.identity)-1)
+ / CASE WHEN n.available THEN 3 ELSE 1 END, n.available DESC,
+ coalesce(a.next_at,'-infinity'::timestamptz),n.identity LIMIT $1`
 
 const schemaSQL = `CREATE TABLE IF NOT EXISTS node_explorer_liveness_attempts (
  identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity) ON DELETE CASCADE,
@@ -121,21 +126,22 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 	if err != nil {
 		return err
 	}
-	// A failed probe is a fact about the attempt, not about the address: only
-	// "unreachable" continues the streak. Infrastructure and config errors are
-	// retried on the short path and must not inherit a dead address's backoff.
+	// Retry deterministic configuration errors less often without treating
+	// them as negative availability verdicts. Changed configurations start fresh.
 	var previous []byte
-	if err = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_liveness_attempts WHERE identity=$1`, id).Scan(&previous); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_liveness_attempts WHERE identity=$1 AND incarnation=$2 AND digest=$3`, id, n.Incarnation, n.Digest).Scan(&previous); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
+	var last Result
+	_ = json.Unmarshal(previous, &last)
+	r.FailureStreak, r.ErrorStreak = 0, 0
 	if r.Status == "unreachable" {
-		var last Result
-		if len(previous) > 0 {
-			_ = json.Unmarshal(previous, &last)
-		}
 		r.FailureStreak = last.FailureStreak + 1
-	} else {
-		r.FailureStreak = 0
+	} else if r.Status == "config_error" {
+		r.ErrorStreak = 1
+		if last.Status == r.Status && last.Reason == r.Reason {
+			r.ErrorStreak += last.ErrorStreak
+		}
 	}
 	b, err := json.Marshal(r)
 	if err != nil {
@@ -144,6 +150,10 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 	delay := interval
 	if r.FailureStreak > 0 {
 		delay = backoff(interval, r.FailureStreak, d.MaxBackoff)
+	} else if r.ErrorStreak > 0 {
+		delay = backoff(interval, r.ErrorStreak, time.Hour)
+	} else if r.Status == "infrastructure" && interval > 0 {
+		delay += time.Duration(rand.Int64N(int64(interval)/5 + 1))
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_liveness_attempts(identity,incarnation,digest,checked_at,next_at,payload)
  VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(identity) DO UPDATE SET incarnation=EXCLUDED.incarnation,digest=EXCLUDED.digest,
@@ -151,7 +161,7 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 		return err
 	}
 	if r.Valid() {
-		state := map[string]any{"reachable": r.Reachable, "checkedAt": r.CheckedAt, "probeTarget": Target, "engine": r.Engine, "latencyMs": r.LatencyMS, "status": r.Status, "incarnation": n.Incarnation, "configDigest": n.Digest}
+		state := map[string]any{"reachable": r.Reachable, "checkedAt": r.CheckedAt, "probeTarget": r.ProbeTarget, "targets": r.Targets, "engine": r.Engine, "latencyMs": r.LatencyMS, "status": r.Status, "incarnation": n.Incarnation, "configDigest": n.Digest}
 		if !r.Reachable {
 			state["error"] = "target_unreachable"
 		}

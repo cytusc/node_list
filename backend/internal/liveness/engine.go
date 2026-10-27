@@ -20,16 +20,19 @@ import (
 )
 
 type Result struct {
-	Status    string    `json:"status"`
-	Engine    string    `json:"engine"`
-	Reachable bool      `json:"reachable"`
-	CheckedAt time.Time `json:"checkedAt"`
-	LatencyMS int64     `json:"latencyMs"`
-	Reason    string    `json:"reason,omitempty"`
-	Fallback  string    `json:"fallback,omitempty"`
+	Status      string          `json:"status"`
+	Engine      string          `json:"engine"`
+	Reachable   bool            `json:"reachable"`
+	CheckedAt   time.Time       `json:"checkedAt"`
+	LatencyMS   int64           `json:"latencyMs"`
+	Reason      string          `json:"reason,omitempty"`
+	Fallback    string          `json:"fallback,omitempty"`
+	ProbeTarget string          `json:"probeTarget,omitempty"`
+	Targets     map[string]bool `json:"targets,omitempty"`
 	// FailureStreak counts consecutive "unreachable" verdicts for this
 	// configuration; the store uses it to back off dead addresses.
 	FailureStreak int `json:"failureStreak,omitempty"`
+	ErrorStreak   int `json:"errorStreak,omitempty"`
 }
 
 func (r Result) Valid() bool { return r.Status == "reachable" || r.Status == "unreachable" }
@@ -39,6 +42,7 @@ type Engine interface {
 }
 type ProcessEngine struct {
 	Name, Binary, Target string
+	BackupTarget         string
 	Expected             int
 	Timeout              time.Duration
 	RootCAs              *x509.CertPool
@@ -69,6 +73,31 @@ func request(ctx context.Context, tr *http.Transport, target string, expected in
 		return 0, errors.New("response_too_large")
 	}
 	return max(1, time.Since(started).Milliseconds()), nil
+}
+
+// Reserve time for each remaining target so a blocked primary cannot exhaust
+// the entire probe deadline. Both requests use the same private proxy.
+func requestTargets(ctx context.Context, tr *http.Transport, targets []string, expected int) (int64, string, map[string]bool, error) {
+	results := make(map[string]bool, len(targets))
+	var last error
+	for i, target := range targets {
+		check := ctx
+		cancel := func() {}
+		if deadline, ok := ctx.Deadline(); ok {
+			check, cancel = context.WithTimeout(ctx, time.Until(deadline)/time.Duration(len(targets)-i))
+		}
+		latency, err := request(check, tr, target, expected)
+		cancel()
+		results[target] = err == nil
+		if err == nil {
+			return latency, target, results, nil
+		}
+		last = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return 0, "", results, last
 }
 
 func (e ProcessEngine) Probe(parent context.Context, p Proxy) Result {
@@ -144,7 +173,11 @@ func (e ProcessEngine) Probe(parent context.Context, p Proxy) Result {
 		}
 	}
 
-	latency, err := request(ctx, tr, e.Target, e.Expected)
+	targets := []string{e.Target}
+	if e.BackupTarget != "" {
+		targets = append(targets, e.BackupTarget)
+	}
+	latency, target, results, err := requestTargets(ctx, tr, targets, e.Expected)
 	if parent.Err() != nil {
 		r.Status = "cancelled"
 		r.Reason = "cancelled"
@@ -158,6 +191,8 @@ func (e ProcessEngine) Probe(parent context.Context, p Proxy) Result {
 	}
 	r.CheckedAt = time.Now().UTC()
 	r.LatencyMS = latency
+	r.ProbeTarget = target
+	r.Targets = results
 	if err == nil {
 		r.Status = "reachable"
 		r.Reachable = true

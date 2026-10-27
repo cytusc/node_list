@@ -63,6 +63,32 @@ final class ServiceMonitor
         }
         $stamp = (string)($liveness['lastCompletedAt'] ?? '');
         $safeLiveness['lastCompletedAt'] = $stamp !== '' && !str_starts_with($stamp, '0001-') && strtotime($stamp) !== false ? gmdate('c', strtotime($stamp)) : null;
+        $safeLiveness['results'] = array_fill_keys(['reachable', 'unreachable', 'config_error', 'infrastructure'], 0);
+        foreach (($liveness['counts'] ?? []) as $key => $count) {
+            $status = explode(':', (string)$key, 2)[1] ?? '';
+            if (array_key_exists($status, $safeLiveness['results'])) {
+                $safeLiveness['results'][$status] += max(0, (int)$count);
+            }
+        }
+        // Count each node once, in the same gate order as the publishing view.
+        $safeLiveness['visibility'] = array_fill_keys(['published', 'unavailable', 'expired', 'unverified', 'unverifiedExit'], 0);
+        foreach (Db::select(<<<'SQL'
+SELECT reason,count(*) AS total FROM (
+ SELECT CASE
+ WHEN NOT n.available THEN 'unavailable'
+ WHEN c.checked_at IS NULL OR c.checked_at<=now()-interval '6 hours' THEN 'expired'
+ WHEN c.payload->>'reachable' IS DISTINCT FROM 'true'
+   OR c.payload->>'incarnation' IS DISTINCT FROM n.incarnation
+   OR c.payload->>'configDigest' IS DISTINCT FROM md5(n.node::text) THEN 'unverified'
+ WHEN e.payload->>'verified' IS DISTINCT FROM 'true' THEN 'unverifiedExit'
+ ELSE 'published' END AS reason
+ FROM node_explorer_node_registry n
+ LEFT JOIN node_explorer_connectivity c USING(identity)
+ LEFT JOIN node_explorer_exits e USING(identity)
+) states GROUP BY reason
+SQL) as $row) {
+            $safeLiveness['visibility'][$row->reason] = (int)$row->total;
+        }
         return ['generatedAt' => gmdate('c', $now), 'services' => $services, 'liveness' => $safeLiveness];
     }
 }

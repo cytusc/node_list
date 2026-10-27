@@ -83,4 +83,42 @@ func TestSaveBacksOffConsecutiveFailures(t *testing.T) {
 	if streak != 0 || delay > interval+time.Minute {
 		t.Fatalf("recovery kept streak=%d delay=%s", streak, delay)
 	}
+	// Deterministic errors back off independently and never replace connectivity.
+	saveError := func(reason string, want int, delay time.Duration) {
+		t.Helper()
+		if err := d.Save(ctx, n, Result{Status: "config_error", Reason: reason, CheckedAt: time.Now()}, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		var streak int
+		var next time.Time
+		if err := pool.QueryRow(ctx, `SELECT (payload->>'errorStreak')::int,next_at FROM node_explorer_liveness_attempts WHERE identity=$1`, n.Identity).Scan(&streak, &next); err != nil {
+			t.Fatal(err)
+		}
+		if streak != want || time.Until(next) < delay-time.Second || time.Until(next) > delay+time.Second {
+			t.Fatalf("error streak=%d next=%s want=%d/%s", streak, time.Until(next), want, delay)
+		}
+	}
+	for i := 1; i <= 8; i++ {
+		saveError("invalid_endpoint", i, backoff(time.Minute, i, time.Hour))
+	}
+	saveError("kernel_rejected", 1, time.Minute)
+	if _, err := pool.Exec(ctx, `UPDATE node_explorer_node_registry SET node=node || '{"name":"changed"}'::jsonb WHERE identity=$1`, n.Identity); err != nil {
+		t.Fatal(err)
+	}
+	due, err = d.Due(ctx, 1)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("changed config not due: %v %v", due, err)
+	}
+	n = due[0]
+	saveError("kernel_rejected", 1, time.Minute)
+	if _, err := pool.Exec(ctx, `UPDATE node_explorer_node_registry SET incarnation='replacement' WHERE identity=$1`, n.Identity); err != nil {
+		t.Fatal(err)
+	}
+	due, err = d.Due(ctx, 1)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("replacement not due: %v %v", due, err)
+	}
+	n = due[0]
+	saveError("kernel_rejected", 1, time.Minute)
+
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -207,5 +208,64 @@ func TestIndependentPoolsAndSingleFallbackResult(t *testing.T) {
 	v := st.saved["fallback"]
 	if !v.Reachable || v.Engine != "mihomo" || v.Fallback == "" || len(st.done) != 0 {
 		t.Fatalf("wrong final verdict: %+v", v)
+	}
+}
+
+func TestBackupTargetUsesRemainingDeadline(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer primary.Close()
+	var calls atomic.Int32
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(204) }))
+	defer backup.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, target, results, err := requestTargets(ctx, &http.Transport{}, []string{primary.URL, backup.URL}, 204)
+	if err != nil || target != backup.URL || results[primary.URL] || !results[backup.URL] || calls.Load() != 1 {
+		t.Fatalf("backup not reached within deadline: target=%q results=%v err=%v", target, results, err)
+	}
+	_, target, results, err = requestTargets(ctx, &http.Transport{}, []string{backup.URL, primary.URL}, 204)
+	if err != nil || target != backup.URL || len(results) != 1 {
+		t.Fatalf("successful primary did not stop: %v %v", results, err)
+	}
+	untrusted := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
+	defer untrusted.Close()
+	_, _, results, err = requestTargets(ctx, &http.Transport{}, []string{untrusted.URL, untrusted.URL + "/backup"}, 204)
+	if err == nil || len(results) != 2 {
+		t.Fatalf("untrusted TLS accepted: %v %v", results, err)
+	}
+}
+
+func TestConcurrentFailuresShareControlCheck(t *testing.T) {
+	st := &memoryStore{saved: map[string]Result{}, done: make(chan string, 8)}
+	for i := 0; i < 8; i++ {
+		st.nodes = append(st.nodes, candidate(string(rune('a'+i)), "hysteria2"))
+	}
+	var calls atomic.Int32
+	failed := fakeEngine(func(context.Context, Proxy) Result {
+		return Result{Engine: "mihomo", Status: "unreachable", CheckedAt: time.Now()}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := Runner{Store: st, Xray: failed, Mihomo: failed, XrayWorkers: 1, MihomoWorkers: 4, Interval: time.Hour, Retry: time.Minute, Control: func(context.Context) bool { calls.Add(1); return false }}
+	finished := make(chan error, 1)
+	go func() { finished <- r.Run(ctx) }()
+	for range st.nodes {
+		select {
+		case <-st.done:
+		case <-time.After(time.Second):
+			t.Fatal("failed probes did not complete")
+		}
+	}
+	cancel()
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("control checked %d times", calls.Load())
+	}
+	for _, r := range st.saved {
+		if r.Status != "infrastructure" {
+			t.Fatalf("wrong verdict: %+v", r)
+		}
 	}
 }

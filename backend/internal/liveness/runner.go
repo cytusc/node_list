@@ -9,6 +9,7 @@ import (
 )
 
 const Target = "https://www.gstatic.com/generate_204"
+const BackupTarget = "https://cp.cloudflare.com/generate_204"
 
 type Store interface {
 	Due(context.Context, int) ([]Candidate, error)
@@ -21,9 +22,10 @@ type completed struct {
 	xray   bool
 }
 type task struct {
-	node     Candidate
-	proxy    Proxy
-	fallback string
+	node        Candidate
+	proxy       Proxy
+	fallback    string
+	configError string
 }
 type Runner struct {
 	Store                      Store
@@ -42,6 +44,19 @@ func (r *Runner) Run(parent context.Context) error {
 	defer func() { cancel(); wg.Wait() }()
 	xq, mq := make(chan task), make(chan task)
 	results := make(chan completed, r.XrayWorkers+r.MihomoWorkers)
+	// Share the direct control result across failed probes during a host outage.
+	var controlMu sync.Mutex
+	var controlAt time.Time
+	var controlOK bool
+	control := func(ctx context.Context) bool {
+		controlMu.Lock()
+		defer controlMu.Unlock()
+		if time.Since(controlAt) > 15*time.Second {
+			controlOK = r.Control(ctx)
+			controlAt = time.Now()
+		}
+		return controlOK
+	}
 	worker := func(q <-chan task, e Engine, xray bool) {
 		defer wg.Done()
 		for {
@@ -49,11 +64,11 @@ func (r *Runner) Run(parent context.Context) error {
 			case <-ctx.Done():
 				return
 			case t := <-q:
-				res := Result{Status: "config_error", Reason: "invalid_config", CheckedAt: time.Now().UTC()}
+				res := Result{Status: "config_error", Reason: t.configError, CheckedAt: time.Now().UTC()}
 				if t.proxy != nil {
 					res = e.Probe(ctx, t.proxy)
 				}
-				if !xray && res.Status == "unreachable" && !r.Control(ctx) {
+				if !xray && res.Status == "unreachable" && !control(ctx) {
 					res.Status = "infrastructure"
 					res.Reason = "control_unavailable"
 				}
@@ -152,7 +167,7 @@ func (r *Runner) Run(parent context.Context) error {
 				pending[n.Identity] = true
 				p, err := Decode(n.Node)
 				if err != nil {
-					ms = append(ms, task{node: n})
+					ms = append(ms, task{node: n, configError: err.Error()})
 					continue
 				}
 				t := task{node: n, proxy: p}
@@ -199,6 +214,6 @@ func (r *Runner) Run(parent context.Context) error {
 func DirectControl(ctx context.Context) bool {
 	check, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
-	_, err := request(check, &http.Transport{Proxy: nil, DisableKeepAlives: true}, Target, http.StatusNoContent)
+	_, _, _, err := requestTargets(check, &http.Transport{Proxy: nil, DisableKeepAlives: true}, []string{Target, BackupTarget}, http.StatusNoContent)
 	return err == nil
 }

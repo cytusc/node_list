@@ -26,7 +26,13 @@ func TestRealPrivateKernels(t *testing.T) {
 			if binary == "" {
 				t.Skip("set LIVENESS_TEST_XRAY / LIVENESS_TEST_MIHOMO")
 			}
-			target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
+			target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/primary" {
+					w.WriteHeader(503)
+					return
+				}
+				w.WriteHeader(204)
+			}))
 			defer target.Close()
 			roots := x509.NewCertPool()
 			roots.AddCert(target.Certificate())
@@ -60,13 +66,13 @@ func TestRealPrivateKernels(t *testing.T) {
 			host, port, _ := net.SplitHostPort(upstream.Listener.Addr().String())
 			number, _ := strconv.Atoi(port)
 			p := Proxy{"name": "probe", "type": "http", "server": host, "port": number}
-			e := ProcessEngine{Name: name, Binary: binary, Target: target.URL, Expected: 204, Timeout: 3 * time.Second, RootCAs: roots}
+			e := ProcessEngine{Name: name, Binary: binary, Target: target.URL + "/primary", BackupTarget: target.URL, Expected: 204, Timeout: 3 * time.Second, RootCAs: roots}
 			r := e.Probe(context.Background(), p)
 			if !r.Reachable || r.Status != "reachable" {
 				t.Fatalf("private kernel proxy failed: %+v", r)
 			}
-			if tunneled.Load() == 0 {
-				t.Fatal("private kernel bypassed upstream proxy")
+			if tunneled.Load() < 2 || r.ProbeTarget != target.URL || r.Targets[e.Target] || !r.Targets[e.BackupTarget] {
+				t.Fatal("backup did not use the upstream proxy")
 			}
 			upstream.Close()
 			r = e.Probe(context.Background(), p)

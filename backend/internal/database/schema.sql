@@ -42,12 +42,16 @@ WITH observed AS (
  LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip
  -- Publishing needs three independent facts, not just the scheduling flag:
  --   available     the last probe reached the target at all;
+ --   connectivity a positive verdict for the current configuration/incarnation;
  --   c.checked_at  that verdict is recent (the worker refreshes every interval);
  --   verified      the exit could actually be observed through the node.
  -- registry.available deliberately stays the scheduling signal for the exit and
  -- attribute workers, so a hidden node keeps being probed and returns to the
  -- page on its own once it recovers.
  WHERE n.available
+ AND c.payload->>'reachable'='true'
+ AND c.payload->>'incarnation'=n.incarnation
+ AND c.payload->>'configDigest'=md5(n.node::text)
  AND c.checked_at>now()-interval '6 hours'
  AND e.identity IS NOT NULL AND e.payload->>'verified'='true'
 )

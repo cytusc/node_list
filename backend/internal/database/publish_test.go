@@ -18,17 +18,30 @@ func TestLiveFactsRequireRecentVerdictAndVerifiedExit(t *testing.T) {
   ('fresh','{"name":"fresh"}',true),
   ('stale','{"name":"stale"}',true),
   ('unverified','{"name":"unverified"}',true),
+  ('negative','{}',true),
+  ('changed','{}',true),
+  ('replaced','{}',true),
+  ('legacy','{}',true),
   ('scheduling-off','{"name":"off"}',false);
  INSERT INTO node_explorer_connectivity VALUES
   ('fresh',now(),'{"reachable":true}'),
   ('stale',now()-interval '7 hours','{"reachable":true}'),
   ('unverified',now(),'{"reachable":true}'),
   ('scheduling-off',now(),'{"reachable":true}');
+ INSERT INTO node_explorer_connectivity
+ SELECT identity,now(),'{"reachable":true}' FROM node_explorer_node_registry WHERE identity IN ('negative','changed','replaced','legacy');
+ UPDATE node_explorer_connectivity c SET payload=c.payload || jsonb_build_object('incarnation',n.incarnation,'configDigest',md5(n.node::text))
+ FROM node_explorer_node_registry n WHERE c.identity=n.identity AND n.identity<>'legacy';
+ UPDATE node_explorer_connectivity SET payload=payload || '{"reachable":false}' WHERE identity='negative';
+ UPDATE node_explorer_node_registry SET node='{"changed":true}' WHERE identity='changed';
+ UPDATE node_explorer_node_registry SET incarnation='replacement' WHERE identity='replaced';
  INSERT INTO node_explorer_exits VALUES
   ('fresh','192.0.2.10',1,now(),'{"ip":"192.0.2.10","verified":true}'),
   ('stale','192.0.2.11',1,now(),'{"ip":"192.0.2.11","verified":true}'),
   ('unverified','192.0.2.12',1,now(),'{"ip":"192.0.2.12","verified":false,"error":"echo_failed"}'),
   ('scheduling-off','192.0.2.13',1,now(),'{"ip":"192.0.2.13","verified":true}');
+ INSERT INTO node_explorer_exits SELECT identity,'192.0.2.14',1,now(),'{"verified":true}'
+ FROM node_explorer_node_registry WHERE identity IN ('negative','changed','replaced','legacy');
  `); err != nil {
 		t.Fatal(err)
 	}

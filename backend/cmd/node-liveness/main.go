@@ -104,7 +104,7 @@ func run() error {
 		return err
 	}
 	engine := func(name, bin string) liveness.Engine {
-		return liveness.ProcessEngine{Name: name, Binary: bin, Target: liveness.Target, Expected: 204, Timeout: time.Duration(seconds) * time.Second}
+		return liveness.ProcessEngine{Name: name, Binary: bin, Target: liveness.Target, BackupTarget: liveness.BackupTarget, Expected: 204, Timeout: time.Duration(seconds) * time.Second}
 	}
 	runner := liveness.Runner{Store: db, Xray: engine("xray", env("XRAY_BIN", "xray")), Mihomo: engine("mihomo", env("MIHOMO_BIN", "mihomo")), XrayWorkers: xw, MihomoWorkers: mw, Interval: time.Duration(interval) * time.Second, Retry: time.Duration(retry) * time.Second, Control: liveness.DirectControl}
 	return runner.Run(ctx)

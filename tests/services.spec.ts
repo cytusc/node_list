@@ -24,6 +24,19 @@ function fixture(): MonitorData {
       mihomoQueued: 3,
       inFlight: 2,
       lastCompletedAt: now,
+      results: {
+        reachable: 6,
+        unreachable: 2,
+        config_error: 3,
+        infrastructure: 1,
+      },
+      visibility: {
+        published: 4,
+        unavailable: 5,
+        expired: 2,
+        unverified: 1,
+        unverifiedExit: 3,
+      },
     },
   };
 }
@@ -45,6 +58,8 @@ test("monitor reads current services without history or kernel placeholders", as
   await expect(
     page.getByRole("button", { name: "7 天", exact: true }),
   ).toHaveCount(0);
+  await expect(page.getByText(/已展示：4/)).toBeVisible();
+  await expect(page.getByText(/配置错误：3/)).toBeVisible();
   const beforeRefresh = requests;
   await page.getByRole("button", { name: "刷新状态" }).click();
   await expect.poll(() => requests).toBeGreaterThan(beforeRefresh);

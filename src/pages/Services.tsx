@@ -182,6 +182,41 @@ export default function Services() {
               <p className="text-xs text-muted-foreground sm:col-span-3">
                 最近完成：{time(data.liveness.lastCompletedAt)}
               </p>
+              <div className="space-y-2 text-sm sm:col-span-3">
+                <p className="font-medium">首页节点与隐藏原因（当前数量）</p>
+                <p className="text-muted-foreground">
+                  {(
+                    [
+                      ["已展示", "published"],
+                      ["尚未标记可用", "unavailable"],
+                      ["测活过期或未完成", "expired"],
+                      ["测活未验证或配置已变化", "unverified"],
+                      ["出口待验证", "unverifiedExit"],
+                    ] as const
+                  )
+                    .map(
+                      ([label, key]) =>
+                        `${label}：${data.liveness.visibility?.[key]?.toLocaleString("zh-CN") ?? "—"}`,
+                    )
+                    .join(" · ")}
+                </p>
+                <p className="font-medium">本次测活服务启动以来</p>
+                <p className="text-muted-foreground">
+                  {(
+                    [
+                      ["测活成功", "reachable"],
+                      ["测活失败", "unreachable"],
+                      ["配置错误", "config_error"],
+                      ["探测环境异常", "infrastructure"],
+                    ] as const
+                  )
+                    .map(
+                      ([label, key]) =>
+                        `${label}：${data.liveness.results?.[key]?.toLocaleString("zh-CN") ?? "—"}`,
+                    )
+                    .join(" · ")}
+                </p>
+              </div>
             </CardContent>
           </Card>
         </>
