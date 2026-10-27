@@ -17,12 +17,14 @@ type Candidate struct {
 	IP                                 string
 	Previous                           domain.IPPureResult
 	ClassificationMissing, RiskMissing bool
+	CountryMissing                     bool
 }
 type Result struct {
 	Evidence      []ipcheck.Evidence
 	Risk          *collector.IPPureResult
 	RiskError     string
 	RiskAttempted bool
+	Country       string
 }
 type Lookup interface {
 	Lookup(context.Context, Candidate) Result
@@ -30,15 +32,23 @@ type Lookup interface {
 type Client struct {
 	Classification *ipcheck.Client
 	Risk           *collector.IPPureClient
+	Geolocation    *GeolocationClient
 	ASN            *collector.ASNCache
 	riskMu         sync.Mutex
 	riskNext       time.Time
+	geoMu          sync.Mutex
+	geoNext        time.Time
 	BeforeProvider func(context.Context, string) error
 	AfterProvider  func(context.Context, string, time.Time) error
 }
 
 func NewClient(classification *ipcheck.Client, origin string) *Client {
-	return &Client{Classification: classification, Risk: collector.NewIPPureClient(&http.Client{Timeout: 12 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, origin, 10*time.Second), ASN: collector.NewASNCacheWithTTL(6 * time.Hour)}
+	return &Client{
+		Classification: classification,
+		Risk:           collector.NewIPPureClient(&http.Client{Timeout: 12 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, origin, 10*time.Second),
+		Geolocation:    NewGeolocationClient(&http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}),
+		ASN:            collector.NewASNCacheWithTTL(6 * time.Hour),
+	}
 }
 func (c *Client) Lookup(ctx context.Context, n Candidate) Result {
 	var r Result
@@ -87,6 +97,40 @@ func (c *Client) Lookup(ctx context.Context, n Candidate) Result {
 		}
 		c.riskMu.Unlock()
 	}
+	if n.CountryMissing && (r.Risk == nil || r.Risk.Country == "") {
+		c.geoMu.Lock()
+		wait := time.Until(c.geoNext)
+		ready := ctx.Err() == nil
+		if wait > 10*time.Second {
+			ready = false
+		} else if wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				ready = false
+			case <-timer.C:
+			}
+			timer.Stop()
+		}
+		if ready && c.BeforeProvider != nil {
+			ready = c.BeforeProvider(ctx, "ipwhois") == nil
+		}
+		if ready {
+			country, err := c.Geolocation.Lookup(ctx, n.IP)
+			c.geoNext = time.Now().Add(1500 * time.Millisecond)
+			if err != nil {
+				c.geoNext = time.Now().Add(30 * time.Minute)
+			} else {
+				r.Country = country
+			}
+			if c.AfterProvider != nil {
+				cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+				_ = c.AfterProvider(cleanup, "ipwhois", c.geoNext)
+				stop()
+			}
+		}
+		c.geoMu.Unlock()
+	}
 	wg.Wait()
 	return r
 }
@@ -122,6 +166,9 @@ func merge(n Candidate, r Result, now time.Time) domain.IPPureResult {
 		e := ipcheck.IPPureEvidence(n.IP, a.Attributes, stamp)
 		e.QueryStatus = "success"
 		r.Evidence = append(r.Evidence, e)
+	}
+	if v.Country == "" && r.Country != "" {
+		v.Country = r.Country
 	}
 	if n.ClassificationMissing {
 		evidence := r.Evidence

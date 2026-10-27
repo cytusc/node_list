@@ -34,7 +34,8 @@ const hasClass = `(jsonb_typeof(a.payload->'classification'->'types')='array' AN
  OR coalesce(a.payload->'attributes','[]'::jsonb) ?| ARRAY['住宅IP','商业宽带','机房IP','移动网络','教育IP','政府IP','银行网络','组织网络','军事网络','图书馆网络','CDN','搜索引擎','保留IP','其他网络'])`
 const classMissing = `NOT coalesce(` + hasClass + `,false)`
 const riskMissing = `(position(':' in e.ip)=0 AND coalesce(a.payload->>'status','')<>'success')`
-const missing = `(` + classMissing + ` OR ` + riskMissing + `)`
+const countryMissing = `coalesce(a.payload->>'country','')=''`
+const missing = `(` + classMissing + ` OR ` + riskMissing + ` OR ` + countryMissing + `)`
 
 func (d *DB) Acquire(ctx context.Context) error {
 	cfg := d.Pool.Config().ConnConfig.Copy()
@@ -63,7 +64,7 @@ func (d *DB) Close() {
 	}
 }
 func (d *DB) Due(ctx context.Context, limit int) ([]Candidate, error) {
-	rows, err := d.Pool.Query(ctx, `SELECT DISTINCT e.ip,coalesce(a.payload,'{}'::jsonb),`+classMissing+`,`+riskMissing+`,coalesce(t.next_at,'1970-01-01'::timestamptz)
+	rows, err := d.Pool.Query(ctx, `SELECT DISTINCT e.ip,coalesce(a.payload,'{}'::jsonb),`+classMissing+`,`+riskMissing+`,`+countryMissing+`,coalesce(t.next_at,'1970-01-01'::timestamptz)
  FROM node_explorer_exits e JOIN node_explorer_node_registry n USING(identity)
  LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip AND coalesce(a.payload->>'ip',a.ip)=e.ip LEFT JOIN node_explorer_attribute_attempts t ON t.ip=e.ip
  WHERE `+eligible+` AND `+missing+` AND (t.ip IS NULL OR t.next_at<=now())
@@ -77,7 +78,7 @@ func (d *DB) Due(ctx context.Context, limit int) ([]Candidate, error) {
 		var n Candidate
 		var b []byte
 		var next time.Time
-		if err = rows.Scan(&n.IP, &b, &n.ClassificationMissing, &n.RiskMissing, &next); err != nil {
+		if err = rows.Scan(&n.IP, &b, &n.ClassificationMissing, &n.RiskMissing, &n.CountryMissing, &next); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal(b, &n.Previous); err != nil {
