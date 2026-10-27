@@ -30,6 +30,20 @@ func TestRiskCompletionPreservesExistingClassification(t *testing.T) {
 	}
 }
 
+func TestLocationFallbackFillsOnlyMissingCountry(t *testing.T) {
+	now := time.Now()
+	got := merge(Candidate{IP: "58.186.168.3", CountryMissing: true}, Result{Country: "VN"}, now)
+	if got.Country != "VN" {
+		t.Fatalf("fallback country not saved: %+v", got)
+	}
+
+	previous := domain.IPPureResult{Country: "HK"}
+	got = merge(Candidate{IP: "58.186.168.3", Previous: previous, CountryMissing: true}, Result{Country: "VN"}, now)
+	if got.Country != "HK" {
+		t.Fatalf("fallback overwrote existing country: %+v", got)
+	}
+}
+
 func TestClientQueriesOnlyMissingComponentsAndCoolsDownRisk(t *testing.T) {
 	var riskCalls, classCalls atomic.Int32
 	riskServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { riskCalls.Add(1); w.WriteHeader(http.StatusForbidden) }))

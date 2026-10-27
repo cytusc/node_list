@@ -99,7 +99,7 @@ func TestCompletionAndPartialRetry(t *testing.T) {
 	if n.ClassificationMissing || !n.RiskMissing {
 		t.Fatalf("successful partial information requested again: %+v", n)
 	}
-	if err := d.Save(ctx, n, Result{RiskAttempted: true, Risk: &collector.IPPureResult{IP: n.IP, Score: 10, Attributes: []string{"商业宽带"}}}, time.Hour); err != nil {
+	if err := d.Save(ctx, n, Result{RiskAttempted: true, Risk: &collector.IPPureResult{IP: n.IP, Score: 10, Country: "US", Attributes: []string{"商业宽带"}}}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	execSQL(t, d, `UPDATE node_explorer_attribute_attempts SET next_at=now()-interval '1 second'`)
