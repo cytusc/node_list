@@ -20,7 +20,7 @@ n1 = {
 nodes.append(("id-us-ss", 1, 0, n1,
     {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
     {"ip": "203.0.113.10", "addressFamily": 4, "country": "US", "checkedAt": "__NOW2M__",
-     "source": "ip.sb", "error": "", "version": 3},
+     "source": "ip.sb", "error": "", "verified": True, "version": 3},
     {"ip": "203.0.113.10", "status": "success", "source": "ippure",
      "asnOrganization": "AS15169 Google LLC", "score": 85, "humanPercent": 92.5,
      "attributes": ["residential", "isp"], "country": "US", "checkedAt": "__NOW2M__",
@@ -42,7 +42,7 @@ n2 = {
 nodes.append(("id-jp-vmess", 1, 1, n2,
     {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
     {"ip": "203.0.113.20", "addressFamily": 4, "country": "JP", "checkedAt": "__NOW2M__",
-     "source": "ipinfo", "error": "", "version": 3},
+     "source": "ipinfo", "error": "", "verified": True, "version": 3},
     {"ip": "203.0.113.20", "status": "success", "source": "ipinfo",
      "asnOrganization": "AS2516 KDDI", "score": 40, "humanPercent": 61,
      "attributes": ["business"], "country": "JP", "checkedAt": "__NOW2M__",
@@ -61,7 +61,11 @@ n3 = {
     "country": "DE", "media": [], "details": [{"k": "流量", "v": "1T"}],
     "speedTest": True, "mediaCheck": True, "checkedAt": "2026-10-18T00:00:00Z",
 }
-nodes.append(("id-de-trojan", 2, 0, n3, None, None, None, True, False))
+nodes.append(("id-de-trojan", 2, 0, n3,
+    {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
+    {"ip": "203.0.113.30", "addressFamily": 4, "country": "DE", "checkedAt": "__NOW2M__",
+     "source": "ip.sb", "error": "", "verified": True, "version": 3},
+    None, True, False))
 
 n4 = {
     "name": "\U0001F1F8\U0001F1EC 新加坡 01", "baseName": "新加坡 01", "type": "hysteria2",
@@ -72,8 +76,8 @@ n4 = {
 }
 nodes.append(("id-sg-hy2", 2, 1, n4,
     {"reachable": False, "checkedAt": "__NOW2M__", "error": "dial timeout"},
-    {"ip": "203.0.113.40", "addressFamily": 6, "country": "SG", "checkedAt": "__NOW2M__",
-     "source": "ip.sb", "error": "", "version": 3},
+    {"ip": "2001:db8::40", "addressFamily": 6, "country": "SG", "checkedAt": "__NOW2M__",
+     "source": "ip.sb", "error": "", "verified": True, "version": 3},
     None, True, False))
 
 n5 = {
@@ -83,7 +87,11 @@ n5 = {
     "media": [{"platform": "Netflix", "tag": "限自制剧"}],
     "speedTest": True, "mediaCheck": True, "checkedAt": "2026-10-18T00:00:00Z",
 }
-nodes.append(("id-hk-ss", 2, 2, n5, None, None, None, True, False))
+nodes.append(("id-hk-ss", 2, 2, n5,
+    {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
+    {"ip": "203.0.113.50", "addressFamily": 4, "country": "", "checkedAt": "__NOW2M__",
+     "source": "ip.sb", "error": "", "verified": True, "version": 3},
+    None, True, False))
 
 n6 = {
     "name": "\U0001F1FA\U0001F1F8 美国 99", "baseName": "美国 99", "type": "ss",
@@ -91,7 +99,11 @@ n6 = {
     "speed": 1048576, "country": "US", "speedTest": True, "mediaCheck": True,
     "checkedAt": "2026-10-18T00:00:00Z",
 }
-nodes.append(("id-us-retired", 2, 3, n6, None, None, None, False, False))
+nodes.append(("id-us-retired", 2, 3, n6,
+    {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
+    {"ip": "203.0.113.99", "addressFamily": 4, "country": "US", "checkedAt": "__NOW2M__",
+     "source": "ip.sb", "error": "", "verified": True, "version": 3},
+    None, False, False))
 
 n7 = {
     "name": "\U0001F1EC\U0001F1E7 英国 07", "baseName": "英国 07", "type": "vmess",
@@ -99,7 +111,11 @@ n7 = {
     "speed": 3145728, "country": "GB", "speedTest": True, "mediaCheck": True,
     "checkedAt": "2026-10-18T00:00:00Z",
 }
-nodes.append(("id-gb-unavail", 2, 4, n7, None, None, None, False, False))
+nodes.append(("id-gb-unavail", 2, 4, n7,
+    {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
+    {"ip": "203.0.113.70", "addressFamily": 4, "country": "GB", "checkedAt": "__NOW2M__",
+     "source": "ip.sb", "error": "", "verified": True, "version": 3},
+    None, False, False))
 
 out = ["BEGIN;"]
 out.append(
@@ -142,7 +158,7 @@ header = (
     "-- 集成测试数据：覆盖排序、筛选、facets、优选位、历史退役记录、不可用排除、IPv6 出口。\n"
     "-- 由 tests/fixtures/generate_seed.py 生成，不要手工编辑。\n"
     "-- 时间占位 __NOW2M__ 由 tests/fixtures/load.sh 在导入前替换成真实时间戳\n"
-    "-- （优选位判定要求连通性/出口证据在 10 分钟内，固定时间会随时间失效）。\n")
+    "-- （优选位判定要求连通性/出口证据在 45 分钟内，固定时间会随时间失效）。\n")
 with open("tests/fixtures/seed.sql", "w", encoding="utf-8", newline="\n") as f:
     f.write(header + body + "\n")
 print("ok")

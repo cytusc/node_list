@@ -14,7 +14,7 @@ declare(strict_types=1);
  *   PGHOST=127.0.0.1 PGUSER=postgres PGPASSWORD=... PGDATABASE=node_explorer_test \
  *     php tests/integration.php
  *
- * 脚本会先把夹具里的观测时间戳推到「2 分钟前」——优选位判定要求证据在 10 分钟内，
+ * 脚本会先把夹具里的观测时间戳推到「2 分钟前」——优选位判定要求证据在 45 分钟内，
  * 写死的时间戳放久了会让 preferred 排序失效，导致断言随「什么时候导入的」而飘。
  */
 
@@ -83,11 +83,11 @@ $live = new LiveResults();
 $run = static fn (array $params): array => $live->query(ResultsQueryParser::fromQuery($params));
 
 // ---------------------------------------------------------------------------
-// 1. 视图口径：只由 available 决定节点是否展示
+// 1. 视图口径：available + 近期连通性记录 + 已验证出口决定展示
 // ---------------------------------------------------------------------------
 
 $all = $run([]);
-same(5, $all['totalNodes'], 'live 视图只含 available=true 的节点');
+same(5, $all['totalNodes'], 'live 视图包含 available=true 且近期测活、出口已验证的节点');
 same(0, $all['page'], '不分页时 page=0');
 same(0, $all['limit'], '不分页时 limit=0');
 same(5, count($all['nodes']), '不分页时返回全部节点');
@@ -102,11 +102,32 @@ Db::statement("UPDATE node_explorer_node_registry SET available=true WHERE ident
 try {
     $withRetired = $run([]);
     same(6, $withRetired['totalNodes'], '历史退役记录不能覆盖测活维护的 available=true');
-    ok(in_array('🇺🇸 美国 99', array_column($withRetired['nodes'], 'name'), true), '测活恢复可用后可正常展示');
+    ok(in_array('🇺🇸 美国 99', array_column($withRetired['nodes'], 'name'), true), '近期测活与已验证出口齐全时，恢复可用后可正常展示');
 } finally {
     Db::statement("UPDATE node_explorer_node_registry SET available=false WHERE identity='id-us-retired'");
 }
 
+
+// 缺少任一发布事实都要隐藏节点；调度标记保留，以便后续探针恢复。
+foreach ([
+    '过期连通性记录' => "UPDATE node_explorer_connectivity SET checked_at=now()-interval '7 hours' WHERE identity='id-us-ss'",
+    '缺少连通性记录' => "DELETE FROM node_explorer_connectivity WHERE identity='id-us-ss'",
+    '出口未验证' => "UPDATE node_explorer_exits SET payload=jsonb_set(payload,'{verified}','false'::jsonb) WHERE identity='id-us-ss'",
+    '出口缺少验证字段' => "UPDATE node_explorer_exits SET payload=payload-'verified' WHERE identity='id-us-ss'",
+    '缺少出口记录' => "DELETE FROM node_explorer_exits WHERE identity='id-us-ss'",
+] as $reason => $sql) {
+    Db::beginTransaction();
+    try {
+        Db::statement($sql);
+        $hidden = $run([]);
+        same(4, $hidden['totalNodes'], $reason . '时不发布节点');
+        ok(!in_array('id-us-ss', array_column($hidden['nodes'], 'identity'), true), $reason . '时响应不包含该节点');
+        same(true, Db::table('node_explorer_node_registry')->where('identity', 'id-us-ss')->value('available'), $reason . '不改变调度标记');
+    } finally {
+        Db::rollBack();
+    }
+    same(5, $run([])['totalNodes'], $reason . '恢复后立即重新展示');
+}
 
 // ---------------------------------------------------------------------------
 // 2. 分页
@@ -239,14 +260,16 @@ foreach ($all['nodes'] as $node) {
 same('unsupported', $sg['ippure']['status'] ?? null, '仅 IPv6 的出口标记为 unsupported');
 ok(isset($sg['connectivity']['error']), '连通性失败原因透出');
 
-// 没有富集数据的节点不应凭空出现 ippure
+// 出口已验证但属性尚未查询的节点仍可展示，返回待查询状态。
 $hk = null;
 foreach ($all['nodes'] as $node) {
     if (($node['name'] ?? '') === '🇭🇰 香港 03') {
         $hk = $node;
     }
 }
-ok(!array_key_exists('ippure', $hk ?? []), '无出口探针数据的节点没有 ippure 字段');
+same('error', $hk['ippure']['status'] ?? null, '出口已验证但缺少属性时返回待查询状态');
+same('ippure-query', $hk['ippure']['failureStage'] ?? null, '缺少属性不等于缺少已验证出口');
+same('203.0.113.50', $hk['ippure']['ip'] ?? null, '待查询属性保留已验证出口 IP');
 
 // 标签统计和筛选必须与实际返回的详情一致，不能只读取库里的旧 attributes。
 foreach ($all['facets']['ipAttributes'] as $facet) {

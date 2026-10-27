@@ -16,7 +16,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 psql "$PGURL" -v ON_ERROR_STOP=1 -q -f "$ROOT/../backend/internal/database/schema.sql"
 
 # 种子数据里的 __NOW2M__ 必须替换成真实时间戳：优选位判定要求连通性/出口证据
-# 在 10 分钟内，写死的时间戳会随时间失效。
+# 在 45 分钟内，写死的时间戳会随时间失效。
 NOW2M="$(python3 -c 'from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)-timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
 RESOLVED="$(mktemp)"
 sed "s/__NOW2M__/$NOW2M/g" "$HERE/seed.sql" > "$RESOLVED"
