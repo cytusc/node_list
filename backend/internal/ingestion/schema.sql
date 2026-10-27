@@ -19,6 +19,11 @@ CREATE TABLE IF NOT EXISTS node_explorer_source_occurrences (
  FOREIGN KEY(source,digest) REFERENCES node_explorer_source_batches(source,digest)
 );
 CREATE INDEX IF NOT EXISTS node_explorer_source_current ON node_explorer_source_occurrences(source) WHERE current;
+-- Legacy adoption compares strict configs after removing display-only fields.
+-- Hash the JSONB text to keep the index key bounded for large node configs;
+-- the query still verifies the complete JSONB value to rule out hash collisions.
+CREATE INDEX IF NOT EXISTS node_explorer_registry_raw_config_hash
+ ON node_explorer_node_registry (md5(((node->'rawConfig')-'name'-'sub_tag')::text));
 CREATE TABLE IF NOT EXISTS node_explorer_source_links (
  source text NOT NULL, digest text NOT NULL, position integer NOT NULL,
  link text NOT NULL, origin text NOT NULL, status text NOT NULL, version text NOT NULL,

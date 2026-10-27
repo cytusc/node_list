@@ -184,7 +184,7 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 				return errors.New("invalid canonical configuration")
 			}
 			if _, opaque := material["uri"]; !opaque {
-				rows, e := tx.Query(ctx, `SELECT r.identity FROM node_explorer_node_registry r WHERE (r.node->'rawConfig')-'name'-'sub_tag'=$1::jsonb AND NOT EXISTS(SELECT 1 FROM node_explorer_source_connections c WHERE c.identity=r.identity) ORDER BY r.identity LIMIT 2`, string(material["config"]))
+				rows, e := tx.Query(ctx, `SELECT r.identity FROM node_explorer_node_registry r WHERE md5(((r.node->'rawConfig')-'name'-'sub_tag')::text)=md5($1::jsonb::text) AND (r.node->'rawConfig')-'name'-'sub_tag'=$1::jsonb AND NOT EXISTS(SELECT 1 FROM node_explorer_source_connections c WHERE c.identity=r.identity) ORDER BY r.identity LIMIT 2`, string(material["config"]))
 				if e != nil {
 					return e
 				}
