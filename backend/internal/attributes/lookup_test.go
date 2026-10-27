@@ -44,6 +44,21 @@ func TestLocationFallbackFillsOnlyMissingCountry(t *testing.T) {
 	}
 }
 
+func TestRiskCompletionReusesExistingCountry(t *testing.T) {
+	for _, country := range []string{"", "HK"} {
+		t.Run("upstream-country="+country, func(t *testing.T) {
+			previous := domain.IPPureResult{IP: "58.186.168.3", Country: "VN"}
+			got := merge(Candidate{IP: previous.IP, Previous: previous, RiskMissing: true}, Result{
+				RiskAttempted: true,
+				Risk:          &collector.IPPureResult{IP: previous.IP, Country: country, Score: 7},
+			}, time.Now())
+			if got.Country != "VN" || got.Status != "success" || got.Score != 7 {
+				t.Fatalf("existing country lost while filling risk: %+v", got)
+			}
+		})
+	}
+}
+
 func TestClientQueriesOnlyMissingComponentsAndCoolsDownRisk(t *testing.T) {
 	var riskCalls, classCalls atomic.Int32
 	riskServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { riskCalls.Add(1); w.WriteHeader(http.StatusForbidden) }))

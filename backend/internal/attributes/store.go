@@ -64,10 +64,11 @@ func (d *DB) Close() {
 	}
 }
 func (d *DB) Due(ctx context.Context, limit int) ([]Candidate, error) {
-	rows, err := d.Pool.Query(ctx, `SELECT DISTINCT e.ip,coalesce(a.payload,'{}'::jsonb),`+classMissing+`,`+riskMissing+`,`+countryMissing+`,coalesce(t.next_at,'1970-01-01'::timestamptz)
- FROM node_explorer_exits e JOIN node_explorer_node_registry n USING(identity)
+	// Deduplicate current exits before reading shared attributes and retry state.
+	rows, err := d.Pool.Query(ctx, `SELECT e.ip,coalesce(a.payload,'{}'::jsonb),`+classMissing+`,`+riskMissing+`,`+countryMissing+`,coalesce(t.next_at,'1970-01-01'::timestamptz)
+ FROM (SELECT DISTINCT e.ip FROM node_explorer_exits e JOIN node_explorer_node_registry n USING(identity) WHERE `+eligible+`) e
  LEFT JOIN node_explorer_ip_attributes a ON a.ip=e.ip AND coalesce(a.payload->>'ip',a.ip)=e.ip LEFT JOIN node_explorer_attribute_attempts t ON t.ip=e.ip
- WHERE `+eligible+` AND `+missing+` AND (t.ip IS NULL OR t.next_at<=now())
+ WHERE `+missing+` AND (t.ip IS NULL OR t.next_at<=now())
  ORDER BY coalesce(t.next_at,'1970-01-01'::timestamptz),e.ip LIMIT $1`, limit)
 	if err != nil {
 		return nil, err

@@ -152,7 +152,10 @@ func merge(n Candidate, r Result, now time.Time) domain.IPPureResult {
 		v.Status = "success"
 		v.Error = ""
 		v.FailureStage = ""
-		v.ASN, v.Organization, v.Country, v.Source = a.ASN, a.Organization, a.Country, a.Source
+		v.ASN, v.Organization, v.Source = a.ASN, a.Organization, a.Source
+		if v.Country == "" {
+			v.Country = a.Country
+		}
 		if !n.ClassificationMissing {
 			v.Attributes = append(append([]string{}, v.Attributes...), a.Attributes...)
 		} else {

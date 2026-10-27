@@ -112,6 +112,37 @@ func TestCompletionAndPartialRetry(t *testing.T) {
 		t.Fatal("availability modified", err)
 	}
 }
+
+func TestSharedIPReusesAttributesForNewNodes(t *testing.T) {
+	d := fixture(t)
+	ctx := context.Background()
+	putNode(t, d, "a", "8.8.8.8", true, true)
+	n := pending(t, d)[0]
+	if err := d.Save(ctx, n, Result{RiskAttempted: true, Risk: &collector.IPPureResult{
+		IP: n.IP, Country: "US", Attributes: []string{"住宅IP"},
+	}}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	putNode(t, d, "b", n.IP, true, true)
+	putNode(t, d, "c", n.IP, true, true)
+	// Completed shared attributes must skip queries even without a retry record.
+	execSQL(t, d, `DELETE FROM node_explorer_attribute_attempts`)
+	if v := pending(t, d); len(v) != 0 {
+		t.Fatalf("new nodes caused completed shared IP to be queried: %+v", v)
+	}
+	execSQL(t, d, `UPDATE node_explorer_ip_attributes SET payload=payload-'country'`)
+	v := pending(t, d)
+	if len(v) != 1 || v[0].IP != n.IP || !v[0].CountryMissing || v[0].ClassificationMissing || v[0].RiskMissing {
+		t.Fatalf("shared IP should only need one country lookup: %+v", v)
+	}
+	if err := d.Save(ctx, v[0], Result{Country: "US"}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, d, `DELETE FROM node_explorer_attribute_attempts`)
+	if v := pending(t, d); len(v) != 0 {
+		t.Fatalf("completed shared country was requested again: %+v", v)
+	}
+}
 func TestLateResultRequiresAnyCurrentAvailableUser(t *testing.T) {
 	for _, change := range []string{`UPDATE node_explorer_node_registry SET available=false`, `UPDATE node_explorer_node_registry SET incarnation='v2'`, `UPDATE node_explorer_exits SET ip='1.1.1.1'`, `UPDATE node_explorer_exits SET payload=payload||'{"verified":false}'`} {
 		t.Run(change, func(t *testing.T) {
