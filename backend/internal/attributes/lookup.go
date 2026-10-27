@@ -113,11 +113,11 @@ func (c *Client) Lookup(ctx context.Context, n Candidate) Result {
 			timer.Stop()
 		}
 		if ready && c.BeforeProvider != nil {
-			ready = c.BeforeProvider(ctx, "ipwhois") == nil
+			ready = c.BeforeProvider(ctx, "geolocation") == nil
 		}
 		if ready {
 			country, err := c.Geolocation.Lookup(ctx, n.IP)
-			c.geoNext = time.Now().Add(1500 * time.Millisecond)
+			c.geoNext = time.Now().Add(2 * time.Second)
 			if err != nil {
 				c.geoNext = time.Now().Add(30 * time.Minute)
 			} else {
@@ -125,7 +125,7 @@ func (c *Client) Lookup(ctx context.Context, n Candidate) Result {
 			}
 			if c.AfterProvider != nil {
 				cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-				_ = c.AfterProvider(cleanup, "ipwhois", c.geoNext)
+				_ = c.AfterProvider(cleanup, "geolocation", c.geoNext)
 				stop()
 			}
 		}

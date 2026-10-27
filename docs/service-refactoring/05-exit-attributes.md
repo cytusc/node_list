@@ -43,7 +43,7 @@
 - 缺失组件失败或未完成后默认冷却 1800 秒，自有尝试表持久化，重启不会立即重试。
 - 供应商客户端保留来源隔离、缓存、配额头和 Retry-After；冷却时间另存自有 PostgreSQL 表，重启保留。Redis 限流依赖已删除。
 - IPPure 请求序列全局串行，成功序列间隔至少 1.5 秒；失败后对该上游冷却 30 分钟，避免为每个 IP 重复放大故障。HTTP 429/5xx 重试仍受单 IP 总预算约束。
-- 免费地区补缺使用 ipwho.is 的 HTTPS API，不需要 token；同样全局串行，查询间隔至少 1.5 秒，失败后持久冷却 30 分钟。只保存国家代码供现有地区筛选和展示使用，不把单一地理库结果当成精确城市定位。
+- 免费地区补缺先使用 ipwho.is；失败或限流时回退到 IP-API，并校验响应 IP。地区查询全局串行，成功序列间隔至少 2 秒；两个来源都失败时持久冷却 30 分钟。只保存国家代码供现有地区筛选和展示使用，不把单一地理库结果当成精确城市定位。
 - 执行前重检是否仍符合输入条件；地区兜底和其他属性查询共用此限制，只处理至少一个可用节点仍在使用的有效出口 IP。提交前重新查询并对仍在使用该 IP 的一个可用节点及其出口行加共享锁，持有到提交。
 - 若最后一个可用使用者已失活、换 IP 或 incarnation 不匹配，丢弃迟到结果；若另一个可用节点仍使用同 IP，结果仍可保存。
 - 使用与旧属性 worker 一致的 PostgreSQL advisory lock，拒绝双实例；事实写入和心跳全部经持锁独占连接串行执行。所有权连接丢失后旧实例不能提交。
@@ -65,7 +65,7 @@ npm run build:attributes
 | ATTR_RETRY_SECONDS | 1800 | 10～86400 秒，仅缺失组件 |
 | IP_PROVIDERS | 空=现有全部来源 | ipinfo,ip-api,ipregistry,abuseipdb,ipapi,ip2location 子集 |
 | IPPURE_API_ORIGIN | https://api.123169.xyz | 直连风险供应商 |
-| ipwho.is | 固定 HTTPS API | 无需 token；仅在 IPPure 和已有数据均无国家代码时自动查询 |
+| ipwho.is / IP-API | 固定 API | 无需 token；仅在 IPPure 和已有数据均无国家代码时自动查询，ipwho.is 失败时使用 IP-API |
 | IPINFO_TOKEN / IP_API_PRO_KEY / IPREGISTRY_API_KEY / ABUSEIPDB_API_KEY | 空 | 对应来源凭证 |
 
 显式配置的 IP_PROVIDERS 若没有任何有效来源，启动失败。供应商现有客户端负责解析、认证和重试；部分公共源可能拒绝服务器出口，请配置供应商凭证或可用来源，不通过重新引入节点租约解决。
