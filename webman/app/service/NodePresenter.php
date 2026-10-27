@@ -59,7 +59,6 @@ final class NodePresenter
         ['connectivity',  true,  'connectivity'],
         ['exit',          true,  'exit'],
         ['lifecycle',     true,  'lifecycle'],
-        ['snapshotId',    true,  'number'],
         ['addedAt',       true,  'string'],
         ['checkedAt',     true,  'string'],
         ['speedTest',     true,  'bool'],
@@ -156,7 +155,7 @@ final class NodePresenter
     }
 
     /**
-     * 剥离凭证字段，对应 Go 的 Node.ClearCredentials + api.publicSnapshot。
+     * 剥离凭证字段，对应 Go 的 Node.ClearCredentials + 公开节点响应。
      *
      * 纵深防御：live 视图在 SQL 里已经 `- 'rawLink' - 'generatedLink' - 'rawConfig'`，这里再兜一次，
      * 避免将来视图改动或换数据源时把订阅链接/完整配置漏给浏览器。

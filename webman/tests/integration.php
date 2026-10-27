@@ -22,7 +22,6 @@ require __DIR__ . '/bootstrap.php';
 
 use app\service\LiveResults;
 use app\service\ResultsQueryParser;
-use app\service\ResultsStatus;
 use support\Db;
 
 $passed = 0;
@@ -92,7 +91,8 @@ same(5, $all['totalNodes'], 'live 视图只含 available=true 的节点');
 same(0, $all['page'], '不分页时 page=0');
 same(0, $all['limit'], '不分页时 limit=0');
 same(5, count($all['nodes']), '不分页时返回全部节点');
-same('2026-10-18T00:00:00Z', $all['checkedAt'], '批次时间透传');
+ok(!array_key_exists('checkedAt', $all), '结果不再包含批次检测时间');
+ok(!array_key_exists('snapshotId', $all['nodes'][0]), '节点响应不包含快照标识');
 
 $names = array_column($all['nodes'], 'name');
 ok(!in_array('🇺🇸 美国 99', $names, true), '历史退役且 available=false 的节点不出现在结果里');
@@ -278,34 +278,20 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// 7. 结果附属字段
-//
-// 心跳表由测试自己掌管：本机可能同时跑着别的进程（比如并排验证 Go 版时，
-// 它每 10s 写一次 api 心跳），不清空的话断言会随「谁在跑」而飘。
+// 7. 每次请求都读取当前可用状态，不缓存结果，也不附带采集器状态。
 // ---------------------------------------------------------------------------
-
-$status = new ResultsStatus();
-Db::statement('DELETE FROM node_explorer_service_status');
-$isZeroTime = static fn (string $v): bool =>
-    str_starts_with($v, '0000-12-31') || str_starts_with($v, '0001-01-01');
-
-// 附属状态聚合两个独立 IP 服务，不读取旧任务表。
-$collector = $status->collectorStatus();
-same(true, $collector['enabled'], 'collector.enabled 恒为 true');
-ok($isZeroTime($collector['lastRunAt']), 'collector.lastRunAt 用秒精度零值时间哨兵');
-same('服务尚未启动', $collector['error'], '采集器无心跳时透出错误文案');
-same(null, $status->sourceWarning(), '无 sourceWarning 时为 null');
-$cache = new \app\service\ReadCache();
-Db::insert("INSERT INTO node_explorer_service_status VALUES('exit-provision',now(),'{\"running\":true}'),('exit-attributes',now(),'{\"running\":true}')");
-$cache->forget('node-list:collector');
-same(true, $status->collectorStatus()['running'] ?? false, '两个独立 IP 服务心跳正常');
-Db::update("UPDATE node_explorer_service_status SET updated_at=now()-interval '2 minutes' WHERE service='exit-attributes'");
-$cache->forget('node-list:collector');
-same('服务心跳已过期', $status->collectorStatus()['error'] ?? '', '属性服务过期必须反映到汇总状态');
-Db::statement("DELETE FROM node_explorer_service_status WHERE service='exit-attributes'");
-$cache->forget('node-list:collector');
-same('服务尚未启动', $status->collectorStatus()['error'] ?? '', '仅出口服务正常不能掩盖属性服务缺失');
-
+$before = $run(['page' => '1', 'limit' => '50']);
+Db::statement("UPDATE node_explorer_node_registry SET available=false WHERE identity='id-us-ss'");
+try {
+    $after = $run(['page' => '1', 'limit' => '50']);
+    same($before['totalNodes'] - 1, $after['totalNodes'], '可用状态改变后下次请求立即生效');
+    ok(!in_array('id-us-ss', array_column($after['nodes'], 'identity'), true), '不可用节点不出现在响应中');
+    ok(!array_key_exists('sourceWarning', $after), '不附带来源告警');
+    ok(!array_key_exists('ippureCollector', $after), '不附带采集器状态');
+} finally {
+    Db::statement("UPDATE node_explorer_node_registry SET available=true WHERE identity='id-us-ss'");
+}
+same($before['totalNodes'], $run([])['totalNodes'], '恢复可用后下次请求立即展示');
 
 // ---------------------------------------------------------------------------
 // 结果

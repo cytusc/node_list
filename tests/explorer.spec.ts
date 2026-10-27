@@ -26,9 +26,7 @@ test("loads real local results with no browser errors", async ({
 }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  const response = await request.get(
-    "/api/results?page=1&limit=50",
-  );
+  const response = await request.get("/api/results?page=1&limit=50");
   test.skip(!response.ok(), "Local subs-check installation is not available");
   const data = await response.json();
   await page.goto("/");
@@ -105,7 +103,9 @@ test.describe("interactions and data states", () => {
     await expect(times).toContainText("添加时间2026/10/09 08:00");
     await expect(times).toContainText("最后检测时间2026/10/11 09:30");
     await expect(
-      page.locator('.node-row [data-column="time"]').filter({ hasText: "暂无记录" }),
+      page
+        .locator('.node-row [data-column="time"]')
+        .filter({ hasText: "暂无记录" }),
     ).toHaveCount(1);
     await expect(page.getByLabel("检测批次")).toHaveCount(0);
     await expect(page.getByText(/已聚合 2 轮检测/)).toHaveCount(0);
@@ -282,7 +282,9 @@ test.describe("interactions and data states", () => {
     ).toHaveCount(0);
   });
 
-  test("retains previous results after refresh fails", async ({ page }) => {
+  test("clears results after refresh fails and retries live query", async ({
+    page,
+  }) => {
     await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
         status: 503,
@@ -290,10 +292,15 @@ test.describe("interactions and data states", () => {
       }),
     );
     await page.getByRole("button", { name: "刷新结果" }).click();
-    await expect(page.getByRole("alert")).toContainText(
-      "刷新失败，当前保留上次读取的结果",
+    await expect(page.getByRole("alert")).toContainText("无法读取可用节点");
+    await expect(page.locator(".node-row")).toHaveCount(0);
+    await page.unroute("**/api/results?**");
+    await page.route("**/api/results?**", (route) =>
+      fulfillRoute(route, { json: snapshot }),
     );
+    await page.getByRole("button", { name: "重试", exact: true }).click();
     await expect(page.locator(".node-row")).toHaveCount(50);
+    await expect(page.getByRole("alert")).toHaveCount(0);
   });
 
   test("handles zero nodes and disabled speed tests", async ({ page }) => {
@@ -304,10 +311,10 @@ test.describe("interactions and data states", () => {
     );
     await page.getByRole("button", { name: "刷新结果" }).click();
     await expect(
-      page.getByRole("heading", { name: "暂无保留节点" }),
+      page.getByRole("heading", { name: "暂无可用节点" }),
     ).toBeVisible();
     await expect(page.getByLabel("最低速度，MB/s")).toHaveCount(0);
-    await expect(page.locator(".summary-line")).toContainText("测速未开启");
+    await expect(page.locator(".summary-line")).not.toContainText("测速未开启");
   });
 
   test("shows service tags only when enabled", async ({ page }) => {

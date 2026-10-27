@@ -9,7 +9,6 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
-  Clock3,
   Copy,
   ExternalLink,
   Globe2,
@@ -79,7 +78,7 @@ import {
   timeLabel,
   type NodeRecord,
   type IPPureResult,
-  type Snapshot,
+  type NodeResults,
 } from "@/lib/data";
 import { flagUrl } from "@/lib/flags";
 
@@ -379,10 +378,9 @@ const columnWidths: Record<string, number> = {
 const emptyNodes: NodeRecord[] = [];
 
 export default function App() {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [results, setResults] = useState<NodeResults | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [errorCode, setErrorCode] = useState("");
   const [query, setQuery] = useState("");
   const [countries, setCountries] = useState<string[]>([]);
   const [types, setTypes] = useState<string[]>([]);
@@ -405,7 +403,7 @@ export default function App() {
   });
   const activeRequest = useRef<AbortController | null>(null);
   const requestPending = useRef(false);
-  const nodes = snapshot?.nodes || emptyNodes;
+  const nodes = results?.nodes || emptyNodes;
   const criteria = JSON.stringify({
     query,
     countries,
@@ -467,17 +465,17 @@ export default function App() {
       if (!background) setLoading(true);
       try {
         const response = await apiFetch(resultsUrl, {
+          cache: "no-store",
           signal: controller.signal,
         });
         const body = await response.json();
         if (controller.signal.aborted) return;
         if (!response.ok) {
-          setErrorCode(body.code || "");
           throw new Error(body.error || "读取失败，请稍后重试");
         }
         if (!Array.isArray(body.nodes))
-          throw new Error("结果格式无效，请检查检测结果文件");
-        setSnapshot(body);
+          throw new Error("接口返回的节点数据格式无效");
+        setResults(body);
         setPageState({
           pageIndex: body.page - 1,
           pageSize: body.limit,
@@ -485,17 +483,17 @@ export default function App() {
         });
         if (!background) setSelected(null);
         setError("");
-        setErrorCode("");
         if (!body.speedTest && sorting[0]?.id === "speed")
           setSorting([{ id: "name", desc: false }]);
         if (!body.mediaCheck) setMedia([]);
         if (!body.speedTest) setMinSpeed("");
-        if (announce) toast.success("已刷新聚合检测结果");
+        if (announce) toast.success("已刷新可用节点");
       } catch (e) {
-        if (!controller.signal.aborted)
-          setError(
-            e instanceof Error ? e.message : "无法连接本地服务，请稍后重试",
-          );
+        if (!controller.signal.aborted) {
+          setResults(null);
+          setSelected(null);
+          setError(e instanceof Error ? e.message : "无法连接服务，请稍后重试");
+        }
       } finally {
         if (activeRequest.current === controller) {
           requestPending.current = false;
@@ -514,16 +512,16 @@ export default function App() {
     };
   }, [load]);
 
-  const maxSpeed = snapshot?.summary.maxSpeed || 0;
-  const summary = snapshot?.summary || { countries: 0, median: 0 };
-  const totalNodes = snapshot?.totalNodes || 0;
-  const total = snapshot?.total || 0;
-  const regionOptions = snapshot?.facets.country || [];
-  const typeOptions = snapshot?.facets.type || [];
-  const networkOptions = snapshot?.facets.network || [];
-  const ipSourceOptions = snapshot?.facets.ipSource || [];
-  const ipAttributeOptions = snapshot?.facets.ipAttributes || [];
-  const mediaOptions = (snapshot?.facets.media || []).map((option) => ({
+  const maxSpeed = results?.summary.maxSpeed || 0;
+  const summary = results?.summary || { countries: 0, median: 0 };
+  const totalNodes = results?.totalNodes || 0;
+  const total = results?.total || 0;
+  const regionOptions = results?.facets.country || [];
+  const typeOptions = results?.facets.type || [];
+  const networkOptions = results?.facets.network || [];
+  const ipSourceOptions = results?.facets.ipSource || [];
+  const ipAttributeOptions = results?.facets.ipAttributes || [];
+  const mediaOptions = (results?.facets.media || []).map((option) => ({
     ...option,
     label: platforms[option.value] || option.value,
   }));
@@ -616,7 +614,7 @@ export default function App() {
           <IPPureMetric result={row.original.ippure} metric={key} />
         ),
       })),
-      ...(snapshot?.mediaCheck
+      ...(results?.mediaCheck
         ? [
             {
               id: "media",
@@ -639,7 +637,7 @@ export default function App() {
             },
           ]
         : []),
-      ...(snapshot?.speedTest
+      ...(results?.speedTest
         ? [
             {
               accessorKey: "speed",
@@ -664,7 +662,7 @@ export default function App() {
         cell: ({ row }) => <CopyNodeButton node={row.original} />,
       },
     ],
-    [maxSpeed, snapshot?.speedTest, snapshot?.mediaCheck],
+    [maxSpeed, results?.speedTest, results?.mediaCheck],
   );
   const table = useReactTable({
     data: nodes,
@@ -737,30 +735,20 @@ export default function App() {
               <h1>
                 节点浏览器
                 <span className="title-count">
-                  {snapshot ? totalNodes : "—"}
+                  {results ? totalNodes : "—"}
                 </span>
               </h1>
-              <p>找到适合你的连接。</p>
-            </div>
-            <div className="snapshot-time">
-              <Clock3 className="size-3.5" />
-              <span>
-                最近检测{" "}
-                <time>
-                  {snapshot?.checkedAt ? timeLabel(snapshot.checkedAt) : "—"}
-                </time>
-                <small>北京时间</small>
-              </span>
+              <p>实时展示数据库中的可用节点。</p>
             </div>
           </div>
           <div className="summary-line">
             <span>
               <Globe2 />
-              覆盖 <strong>{snapshot ? summary.countries : "—"}</strong> 个地区
+              覆盖 <strong>{results ? summary.countries : "—"}</strong> 个地区
             </span>
-            <i />
-            {snapshot?.speedTest ? (
+            {results?.speedTest ? (
               <>
+                <i />
                 <span>
                   <Zap />
                   最高速度 <strong>{speedParts(maxSpeed).value}</strong>{" "}
@@ -772,37 +760,15 @@ export default function App() {
                   {speedParts(summary.median).unit}
                 </span>
               </>
-            ) : (
-              <span>测速{snapshot ? "未开启" : "数据加载中"}</span>
-            )}
-            <span className="summary-note">
-              <Info className="size-3.5" />
-              {snapshot?.mediaCheck
-                ? "已启用服务解锁检测"
-                : snapshot
-                  ? "未启用服务解锁检测"
-                  : "正在读取检测结果"}
-            </span>
+            ) : null}
           </div>
         </section>
 
-        {snapshot?.sourceWarning && !error && (
-          <div role="status" className="error-banner">
-            <CircleAlert className="size-5 shrink-0" />
-            结果文件暂时无法读取，当前展示数据库中保存的检测结果。
-          </div>
-        )}
         {error && (
           <div role="alert" className="error-banner">
             <CircleAlert className="size-5 shrink-0" />
             <div>
-              <strong>
-                {snapshot
-                  ? "刷新失败，当前保留上次读取的结果"
-                  : errorCode === "NO_RESULTS"
-                    ? "尚无检测结果"
-                    : "无法读取检测结果"}
-              </strong>
+              <strong>无法读取可用节点</strong>
               <p>{error}</p>
             </div>
             <Button
@@ -858,7 +824,7 @@ export default function App() {
                 selected={ipAttributes}
                 onChange={setIpAttributes}
               />
-              {snapshot?.mediaCheck && (
+              {results?.mediaCheck && (
                 <FilterMenu
                   label="服务解锁"
                   icon={<Radio className="size-4" />}
@@ -867,7 +833,7 @@ export default function App() {
                   onChange={setMedia}
                 />
               )}
-              {snapshot?.speedTest && (
+              {results?.speedTest && (
                 <label className="speed-filter">
                   <Zap className="size-3.5" />
                   <input
@@ -909,7 +875,7 @@ export default function App() {
                   }}
                 >
                   <option value="preferred-desc">住宅 IP 优先</option>
-                  {snapshot?.speedTest && (
+                  {results?.speedTest && (
                     <>
                       <option value="speed-desc">速度最高</option>
                       <option value="speed-asc">速度最低</option>
@@ -1153,7 +1119,7 @@ export default function App() {
                           {countryName(row.original.country)}
                         </span>
                       </div>
-                      {snapshot?.speedTest && (
+                      {results?.speedTest && (
                         <Speed value={row.original.speed} max={maxSpeed} />
                       )}
                     </div>
@@ -1167,20 +1133,18 @@ export default function App() {
                 <Search className="size-7" />
               </span>
               <h2>
-                {error && !snapshot
-                  ? "等待检测结果"
+                {error && !results
+                  ? "暂时无法加载节点"
                   : totalNodes
                     ? "没有匹配的节点"
-                    : snapshot?.checkedAt
-                      ? "暂无保留节点"
-                      : "尚无检测结果"}
+                    : "暂无可用节点"}
               </h2>
               <p>
-                {error && !snapshot
+                {error && !results
                   ? "连接恢复后，点击刷新重新读取。"
                   : totalNodes
                     ? "尝试减少筛选条件，或换一个关键词。"
-                    : "请在 subs-check 完成检测后刷新此页面。"}
+                    : "数据库中暂无可用节点，请稍后刷新。"}
               </p>
               {activeCount > 0 && (
                 <Button variant="outline" onClick={reset}>
@@ -1192,7 +1156,7 @@ export default function App() {
           <div className="pagination-bar">
             <span>
               {total
-                ? `显示 ${((snapshot?.page || 1) - 1) * pageSize + 1}–${Math.min((snapshot?.page || 1) * pageSize, total)}，共 ${total} 个`
+                ? `显示 ${((results?.page || 1) - 1) * pageSize + 1}–${Math.min((results?.page || 1) * pageSize, total)}，共 ${total} 个`
                 : "显示 0 个节点"}
             </span>
             <div>
@@ -1276,7 +1240,7 @@ export default function App() {
                     {selected.type.toUpperCase()}
                   </Badge>
                   <Features node={selected} />
-                  {(selected.speedTest ?? snapshot?.speedTest) && (
+                  {(selected.speedTest ?? results?.speedTest) && (
                     <Speed value={selected.speed} max={maxSpeed} />
                   )}
                 </div>
@@ -1435,15 +1399,12 @@ export default function App() {
                       ? selected.ippure.error
                       : selected.ippure?.status === "error"
                         ? selected.ippure.error
-                        : snapshot?.ippureCollector?.error ||
-                          (snapshot?.ippureCollector?.enabled === false
-                            ? "IPPure 检测服务未启用，请配置独立代理检测服务。"
-                            : "尚无 IPPure 结果；IP 属性服务会独立补充查询，页面会自动更新。同一出口 IP 共享属性结果。")}
+                        : "暂无 IP 属性数据。"}
                   </p>
                 )}
                 <IPTypeDetails result={selected.ippure} />
                 <h3>服务解锁</h3>
-                {(selected.mediaCheck ?? snapshot?.mediaCheck) ? (
+                {(selected.mediaCheck ?? results?.mediaCheck) ? (
                   selected.media?.length ? (
                     <dl>
                       {selected.media.map((m, i) => (

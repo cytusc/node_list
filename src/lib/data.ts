@@ -58,7 +58,6 @@ export type NodeRecord = {
   lifecycle?: { status: string; reason?: string; retiredAt?: string };
   ippure?: IPPureResult;
   checkedAt?: string;
-  snapshotId?: number;
   speedTest?: boolean;
   mediaCheck?: boolean;
   name: string;
@@ -80,14 +79,8 @@ export type NodeRecord = {
   media?: MediaTag[];
   details?: { k: string; v: string }[];
 };
-export type HistoryItem = {
-  id: number;
-  checkedAt?: string;
-  importedAt: string;
-  nodeCount: number;
-};
 type FacetOption = { value: string; label: string; count: number };
-export type Snapshot = {
+export type NodeResults = {
   total: number;
   totalNodes: number;
   page: number;
@@ -102,15 +95,6 @@ export type Snapshot = {
     ipAttributes: FacetOption[];
     media: FacetOption[];
   };
-  ippureCollector?: {
-    enabled: boolean;
-    running?: boolean;
-    error?: string | null;
-  };
-  id?: number;
-  batchCount?: number;
-  sourceWarning?: string | null;
-  checkedAt?: string;
   speedTest: boolean;
   mediaCheck: boolean;
   nodes: NodeRecord[];

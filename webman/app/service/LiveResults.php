@@ -16,25 +16,9 @@ use support\Log;
 use Throwable;
 
 /**
- * 实时结果视图（node_explorer_live_*）的读取实现。
- *
- * 早期版本把「元数据 + facets + 过滤 + 排序 + 分页 + 载荷选取」压成一条巨型
- * CTE/ JOIN SQL。那条 SQL 慢的根因不是缺索引，而是把 node_explorer_live_nodes
- * 视图塞进 JOIN 内侧按主键逐行取值 —— PostgreSQL 不会把 identity 过滤下推到内层
- * 视图，于是对每一页的每一行都重算整张视图（limit=50 时实测 50×1317≈65850 次
- * 节点处理，12s/请求）。Go 版当年踩过、注释专门警告过这个坑，PHP 版又写回去了。
- *
- * 现在改成「数据库只取数，PHP 处理」的分层写法（也是用户明确要求的方向）：
- *
- *   1. 一条极简的扁平 SELECT 从 node_explorer_live_facts 取出过滤/排序/facet
- *      需要的派生列（jsonb 拆解在 SQL 里一次性做完，视图整体只扫一遍）；
- *   2. 按当页命中的 identity 再取一次 node_explorer_live_nodes 的 payload
- *      （按 identity 过滤是视图设计支持的高效路径，不会触发逐行重算）；
- *   3. 过滤 / 排序 / 分页 / facets / summary / 响应组装全部在 PHP 内存里完成。
- *
- * 这套写法没有一条应用层 JOIN，DB 侧只是两个独立的单表（视图）扫描，
- * 生产实测从 11s+ 降到亚秒级。契约（字段顺序、omitempty、凭证剥离、facet 桶序）
- * 与 Go 版逐字节一致，由 tests/integration.php 与 tests/run.php 守住。
+ * 每次请求读取数据库实时视图，只展示 available=true 的节点。
+ * 先读取筛选所需的字段，再按当页 identity 获取展示数据，避免逐行重算视图。
+ * 请求内使用一致的数据库读事务，保证统计、分页和节点数据对应同一次读取。
  */
 final class LiveResults
 {
@@ -42,32 +26,26 @@ final class LiveResults
      * 执行一次结果查询。
      *
      * @param ResultsQuery|null $q null 表示「不分页、不过滤，整份返回」
-     * @return array<string, mixed> 响应体（不含 ippureCollector / sourceWarning）
+     * @return array<string, mixed> 实时节点列表、统计和筛选项
      * @throws ApiError 数据库读失败 → 503 READ_FAILED
      */
     public function query(?ResultsQuery $q): array
     {
         try {
-            $rawFacts = $this->factsQuery()->get()->all();
+            return Db::connection()->transaction(function () use ($q): array {
+                if (Db::connection()->transactionLevel() === 1) {
+                    Db::statement('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+                }
+                $allRows = $this->normalizeFacts($this->factsQuery()->get()->all());
+                $now = new DateTimeImmutable();
+                [$pageRows, $total, $page, $limit] = $this->resolvePage($allRows, $q, $now);
+                $payloads = $this->fetchPayloadsById(array_column($pageRows, 'identity'));
+                return $this->buildBody($allRows, $pageRows, $payloads, $total, $page, $limit, $now);
+            });
         } catch (Throwable $e) {
-            // 与 Go 一致：只记录，不把 SQL 细节透给前端。
-            Log::error('live results facts query failed: ' . $e->getMessage());
+            Log::error('live results query failed: ' . $e->getMessage());
             throw ApiError::readFailed();
         }
-
-        $now = new DateTimeImmutable();
-        $allRows = $this->normalizeFacts($rawFacts);
-
-        [$pageRows, $total, $page, $limit] = $this->resolvePage($allRows, $q, $now);
-
-        try {
-            $payloads = $this->fetchPayloadsById(array_column($pageRows, 'identity'));
-        } catch (Throwable $e) {
-            Log::error('live results payloads query failed: ' . $e->getMessage());
-            throw ApiError::readFailed();
-        }
-
-        return $this->buildBody($allRows, $pageRows, $payloads, $total, $page, $limit, $now);
     }
 
     /** facts 查询基于的视图（供测试断言「不含 JOIN」）。 */
@@ -92,7 +70,7 @@ final class LiveResults
     private function factsQuery()
     {
         return Db::table(self::factsTable())->select([
-            'identity', 'snapshot_id', 'node_index', 'country', 'ip_status',
+            'identity', 'country', 'ip_status',
             Db::raw("coalesce(nullif(btrim(node->>'rawLink'),''),btrim(node->>'generatedLink'),'')<>'' AS has_original_link"),
             Db::raw("coalesce(nullif(country,''),'unknown') AS region"),
             Db::raw("node->>'name' AS name"),
@@ -108,7 +86,6 @@ final class LiveResults
             Db::raw("coalesce((node->>'udp')::boolean,false) AS udp"),
             Db::raw("(node->>'speedTest')::boolean AS speed_test"),
             Db::raw("(node->>'mediaCheck')::boolean AS media_check"),
-            Db::raw("node->>'checkedAt' AS checked_at"),
             Db::raw("attributes->>'ip' AS attributes_ip"),
             Db::raw("attributes->>'source' AS ip_source"),
             Db::raw("attributes->>'asnOrganization' AS asn_organization"),
@@ -151,8 +128,6 @@ final class LiveResults
             $rows[] = [
                 'identity' => $f->identity,
                 'has_original_link' => self::toBool($f->has_original_link ?? false),
-                'snapshot_id' => (int)$f->snapshot_id,
-                'node_index' => (int)$f->node_index,
                 'country' => $f->country ?? '',
                 'region' => $f->region ?? ($f->country ?? ''),
                 'name' => $f->name ?? '',
@@ -168,7 +143,6 @@ final class LiveResults
                 'udp' => self::toBool($f->udp ?? false),
                 'speed_test' => self::toBool($f->speed_test ?? false),
                 'media_check' => self::toBool($f->media_check ?? false),
-                'checked_at' => $f->checked_at ?? '',
                 'attributes_ip' => $f->attributes_ip ?? '',
                 'ip_status' => $f->ip_status ?? '',
                 'ip_source' => $f->ip_source ?? '',
@@ -238,7 +212,6 @@ final class LiveResults
         $speeds = [];
         $speedTest = false;
         $mediaCheck = false;
-        $checkedAt = '';
 
         foreach ($allRows as $r) {
             $c = $r['country'] ?? '';
@@ -255,9 +228,6 @@ final class LiveResults
             if ($r['media_check']) {
                 $mediaCheck = true;
             }
-            if (($r['checked_at'] ?? '') > $checkedAt) {
-                $checkedAt = $r['checked_at'];
-            }
         }
 
         $facetEntries = $this->computeFacets($allRows);
@@ -273,12 +243,7 @@ final class LiveResults
         }
         unset($node);
 
-        // 字段顺序与 Go 的 resultsResponse 一致：CheckedAt 带 omitempty（空值不输出），
-        // 其后依次 speedTest / mediaCheck / totalNodes / summary / facets / nodes / total / page / limit。
         $body = [];
-        if ($checkedAt !== '') {
-            $body['checkedAt'] = $checkedAt;
-        }
         $body['speedTest'] = $speedTest;
         $body['mediaCheck'] = $mediaCheck;
         $body['totalNodes'] = $totalNodes;
@@ -405,9 +370,7 @@ final class LiveResults
             $keys[] = [$this->keyExtractor($k), $q->direction->sql(), $k->isNumeric() ? 'numeric' : 'natural'];
         }
 
-        // 默认稳定排序位：snapshot_id DESC, node_index ASC, identity ASC。
-        $keys[] = [fn (array $r): mixed => $r['snapshot_id'], 'DESC', 'numeric'];
-        $keys[] = [fn (array $r): mixed => $r['node_index'], 'ASC', 'numeric'];
+        // 用节点标识保证分页排序稳定。
         $keys[] = [fn (array $r): mixed => $r['identity'], 'ASC', 'natural'];
 
         return $keys;
