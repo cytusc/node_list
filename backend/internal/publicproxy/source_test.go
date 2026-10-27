@@ -65,7 +65,7 @@ func TestRejectInvalidLists(t *testing.T) {
 
 type recordingIngestor struct {
 	batches []domain.SourceBatch
-	err       error
+	err     error
 }
 
 func (i *recordingIngestor) Import(_ context.Context, s domain.SourceBatch) error {
