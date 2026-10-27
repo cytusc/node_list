@@ -73,6 +73,8 @@ import {
   mediaPlatform,
   mediaValue,
   plainName,
+  protocolLabel,
+  lastCheckedAt,
   platforms,
   speedParts,
   timeLabel,
@@ -314,17 +316,7 @@ function Speed({ value, max }: { value: number; max: number }) {
   );
 }
 function NodeTimes({ node }: { node: NodeRecord }) {
-  const checkedAt = [
-    node.checkedAt,
-    node.connectivity?.checkedAt,
-    node.exit?.checkedAt,
-    node.ippure?.checkedAt,
-    node.ippure?.classification?.checkedAt,
-  ]
-    .filter(
-      (date): date is string => !!date && Number.isFinite(Date.parse(date)),
-    )
-    .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+  const checkedAt = lastCheckedAt(node);
   const label = (date?: string) =>
     date && Number.isFinite(Date.parse(date)) ? timeLabel(date) : "暂无记录";
   return (
@@ -473,7 +465,28 @@ export default function App() {
         if (!response.ok) {
           throw new Error(body.error || "读取失败，请稍后重试");
         }
-        if (!Array.isArray(body.nodes))
+        if (
+          !body ||
+          !Array.isArray(body.nodes) ||
+          !body.nodes.every(
+            (node: unknown) =>
+              node !== null && typeof node === "object" && !Array.isArray(node),
+          ) ||
+          !body.summary ||
+          !body.facets ||
+          ![
+            "country",
+            "type",
+            "network",
+            "ipSource",
+            "ipAttributes",
+            "media",
+          ].every((key) => Array.isArray(body.facets[key])) ||
+          !Number.isSafeInteger(body.page) ||
+          body.page < 1 ||
+          !Number.isSafeInteger(body.limit) ||
+          body.limit < 1
+        )
           throw new Error("接口返回的节点数据格式无效");
         setResults(body);
         setPageState({
@@ -490,8 +503,10 @@ export default function App() {
         if (announce) toast.success("已刷新可用节点");
       } catch (e) {
         if (!controller.signal.aborted) {
-          setResults(null);
-          setSelected(null);
+          if (!background) {
+            setResults(null);
+            setSelected(null);
+          }
           setError(e instanceof Error ? e.message : "无法连接服务，请稍后重试");
         }
       } finally {
@@ -590,7 +605,7 @@ export default function App() {
               variant="outline"
               className={`protocol-badge protocol-${row.original.type}`}
             >
-              {row.original.type.toUpperCase()}
+              {protocolLabel(row.original.type)}
             </Badge>
             <small>{row.original.network?.toUpperCase() || "—"}</small>
           </div>
@@ -768,8 +783,9 @@ export default function App() {
           <div role="alert" className="error-banner">
             <CircleAlert className="size-5 shrink-0" />
             <div>
-              <strong>无法读取可用节点</strong>
+              <strong>{results ? "节点刷新失败" : "无法读取可用节点"}</strong>
               <p>{error}</p>
+              {results && <p>当前展示上次成功查询的数据，可能已发生变化。</p>}
             </div>
             <Button
               variant="outline"
@@ -1113,7 +1129,7 @@ export default function App() {
                     <div className="mobile-node-bottom">
                       <div>
                         <Badge variant="outline" className="protocol-badge">
-                          {row.original.type.toUpperCase()}
+                          {protocolLabel(row.original.type)}
                         </Badge>
                         <span className="text-xs text-muted-foreground">
                           {countryName(row.original.country)}
@@ -1231,13 +1247,13 @@ export default function App() {
                   {plainName(selected)}
                 </SheetTitle>
                 <SheetDescription>
-                  最近检测 · {timeLabel(selected.checkedAt)}
+                  最近检测 · {timeLabel(lastCheckedAt(selected))}
                 </SheetDescription>
               </SheetHeader>
               <div className="detail-content">
                 <div className="detail-overview">
                   <Badge variant="outline" className="protocol-badge">
-                    {selected.type.toUpperCase()}
+                    {protocolLabel(selected.type)}
                   </Badge>
                   <Features node={selected} />
                   {(selected.speedTest ?? results?.speedTest) && (

@@ -120,7 +120,9 @@ test.describe("interactions and data states", () => {
       .getByRole("textbox", { name: "搜索节点", exact: true })
       .fill("Current node");
     await page.locator(".node-name").first().click();
-    await expect(page.getByRole("dialog")).toContainText("2026/10/10 08:00");
+    await expect(page.getByRole("dialog")).toContainText(
+      "最近检测 · 2026/10/11 09:30",
+    );
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "刷新结果" }).click();
     await expect(page.locator(".title-count")).toHaveText("2");
@@ -171,6 +173,83 @@ test.describe("interactions and data states", () => {
     await page.getByLabel("每页节点数").selectOption("20");
     await resized;
     await expect(page.locator(".node-row")).toHaveCount(20);
+  });
+
+  test("sorting and details stay usable when node fields are missing", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.route("**/api/results?**", (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get("sort") === "name") {
+        return fulfillRoute(route, {
+          json: {
+            ...results,
+            nodes: [
+              {
+                ...results.nodes[0],
+                name: undefined,
+                baseName: "",
+                type: undefined,
+                network: undefined,
+              },
+            ],
+          },
+        });
+      }
+      return fulfillRoute(route, { json: results });
+    });
+
+    await page.getByRole("button", { name: "按节点 / 服务器排序" }).click();
+    await expect(page.locator(".node-row")).toHaveCount(1);
+    await expect(page.locator(".node-name").first()).toContainText(
+      "未命名节点",
+    );
+    await expect(page.locator(".node-row")).toContainText("未知协议");
+    await page.locator(".node-name").first().click();
+    await expect(page.getByRole("dialog")).toContainText("未命名节点");
+    await expect(page.getByRole("dialog")).toContainText("未知协议");
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps nodes and details during failed background refreshes and recovers", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    let failure: "network" | "shape" | null = null;
+    await page.route("**/api/results?**", (route) => {
+      if (failure === "network") return route.abort("failed");
+      if (failure === "shape") return route.fulfill({ json: { nodes: [] } });
+      return fulfillRoute(route, { json: results });
+    });
+    await page.clock.install();
+    await page.reload();
+    await expect(page.locator(".node-row")).toHaveCount(50);
+    await page.locator(".node-name").first().click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+
+    for (const cause of ["network", "shape"] as const) {
+      failure = cause;
+      await page.clock.fastForward(5000);
+      await expect(
+        page.getByRole("alert", { includeHidden: true }),
+      ).toContainText(
+        cause === "shape" ? "接口返回的节点数据格式无效" : "节点刷新失败",
+      );
+      await expect(page.locator(".node-row")).toHaveCount(50);
+      await expect(page.getByRole("dialog")).toBeVisible();
+    }
+
+    failure = null;
+    await page.clock.fastForward(5000);
+    await expect(page.getByRole("alert", { includeHidden: true })).toHaveCount(
+      0,
+    );
+    await expect(page.locator(".node-row")).toHaveCount(50);
+    await expect(page.getByRole("dialog")).toBeVisible();
+    expect(errors).toEqual([]);
   });
 
   test("combines filters and opens accessible details", async ({ page }) => {
