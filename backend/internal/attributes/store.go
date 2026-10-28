@@ -148,7 +148,7 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, retry time.Duratio
 	if _, err = tx.Exec(ctx, `UPDATE node_explorer_exits e SET pinned_attributes=$2
  FROM node_explorer_node_registry n
  WHERE e.identity=n.identity AND e.ip=$1 AND n.available AND e.payload->>'verified'='true'
- AND ($2->>'status'='success' OR jsonb_array_length(coalesce($2->'classification'->'types','[]'::jsonb))>0)`, n.IP, b); err != nil {
+ AND ($2::jsonb->>'status'='success' OR jsonb_array_length(coalesce($2::jsonb->'classification'->'types','[]'::jsonb))>0)`, n.IP, b); err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO node_explorer_attribute_attempts VALUES($1,$2,$3)
