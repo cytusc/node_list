@@ -18,7 +18,7 @@ import (
 func TestFailedLookupPreservesSuccessfulComponents(t *testing.T) {
 	old := domain.IPPureResult{IP: "8.8.8.8", Status: "success", Score: 10, CheckedAt: "old", Attributes: []string{"商业宽带"}}
 	v := merge(Candidate{IP: old.IP, Previous: old, ClassificationMissing: true}, Result{RiskAttempted: true, RiskError: "timeout"}, time.Now())
-	if v.Status != "success" || v.Score != 10 || v.CheckedAt != "old" || v.RiskQueryError != "timeout" {
+	if v.Status != "success" || v.Score != 10 || v.CheckedAt != "old" || v.RiskQueryError != "" {
 		t.Fatalf("successful fields lost %+v", v)
 	}
 }

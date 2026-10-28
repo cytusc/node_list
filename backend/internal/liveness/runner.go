@@ -188,7 +188,7 @@ func (r *Runner) Run(parent context.Context) error {
 			}
 			done.result.Fallback = done.task.fallback
 			interval := r.Interval
-			if !done.result.Valid() {
+			if !done.result.Valid() || done.result.Status == "unreachable" {
 				interval = r.Retry
 			}
 			write, stop := context.WithTimeout(ctx, 5*time.Second)

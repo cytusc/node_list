@@ -44,6 +44,8 @@ curl --fail http://127.0.0.1:3001/api/health
 
 首次启动执行 `psql -v ON_ERROR_STOP=1 -f backend/internal/database/schema.sql`。旧版本升级必须先停机备份，再执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/016-retire-legacy.sql`，然后执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/017-remove-snapshots.sql`；详见 [清理与迁移记录](docs/service-refactoring/11-project-cleanup.md)。升级至节点归属地固定版本时，部署新出口服务前执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/020-pin-node-country.sql`，以保留现有出口已确认的归属地。
 
+升级至保留探测结果版本时，先停止测活和出口服务，再执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/021-preserve-observations.sql`，最后启动新服务。迁移会保留仍然有效的测活摘要，避免无关链接变化造成重复探测。
+
 `deploy/node-list.service`、`deploy/node-list-update.service` 和 timer 可安装到 systemd。`deploy/update.sh` 会同步更新五个应用服务，健康检查失败时回滚对应版本。`NODE_EXPLORER_AUTO_UPDATE=false` 可关闭应用自动更新。
 
 ## 来源与当前状态

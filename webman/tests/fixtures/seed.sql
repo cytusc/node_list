@@ -27,5 +27,5 @@ INSERT INTO node_explorer_exits (identity,ip,version,checked_at,payload) VALUES 
 INSERT INTO node_explorer_node_registry (identity,node,available) VALUES ('id-gb-unavail',$json${"name":"🇬🇧 英国 07","baseName":"英国 07","type":"vmess","server":"198.51.100.70","port":443,"tls":true,"udp":false,"network":"ws","speed":3145728,"country":"GB","speedTest":true,"mediaCheck":true,"checkedAt":"2026-10-18T00:00:00Z"}$json$,false);
 INSERT INTO node_explorer_connectivity (identity,checked_at,payload) VALUES ('id-gb-unavail', now()-interval '2 minutes', $json${"reachable":true,"checkedAt":"__NOW2M__","error":""}$json$);
 INSERT INTO node_explorer_exits (identity,ip,version,checked_at,payload) VALUES ('id-gb-unavail','203.0.113.70',3,now()-interval '2 minutes',$json${"ip":"203.0.113.70","addressFamily":4,"country":"GB","checkedAt":"__NOW2M__","source":"ip.sb","error":"","verified":true}$json$);
-UPDATE node_explorer_connectivity c SET payload=c.payload || jsonb_build_object('incarnation',n.incarnation,'configDigest',md5(n.node::text)) FROM node_explorer_node_registry n WHERE n.identity=c.identity;
+UPDATE node_explorer_connectivity c SET payload=c.payload || jsonb_build_object('incarnation',n.incarnation,'configDigest',md5((n.node - 'rawLink' - 'generatedLink')::text)) FROM node_explorer_node_registry n WHERE n.identity=c.identity;
 COMMIT;

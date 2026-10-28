@@ -52,9 +52,10 @@ WITH observed AS (
  WHERE n.available
  AND c.payload->>'reachable'='true'
  AND c.payload->>'incarnation'=n.incarnation
- AND c.payload->>'configDigest'=md5(n.node::text)
+ AND c.payload->>'configDigest'=md5((n.node - 'rawLink' - 'generatedLink')::text)
  AND c.checked_at>now()-interval '6 hours'
  AND e.identity IS NOT NULL AND e.payload->>'verified'='true'
+ AND e.checked_at>now()-interval '6 hours'
 )
 SELECT observed.*,
  CASE WHEN observed_country ~ '^[a-zA-Z]{2}$' THEN
@@ -75,7 +76,8 @@ WITH facts AS (
  'failureStage',CASE WHEN exit_ip<>'' THEN 'ippure-query' ELSE 'exit-ip' END,
  'error',CASE WHEN exit_ip<>'' THEN 'IP 属性待查询' ELSE coalesce(exit_payload->>'error','') END))
  || jsonb_build_object('exitIPSource',exit_payload->>'source','exitIPMode','proxy-echo',
- 'exitIPVersion',3,'addressFamily',exit_payload->'addressFamily','country',observed_country)
+ 'exitIPVersion',3,'addressFamily',exit_payload->'addressFamily',
+ 'country',coalesce(attributes->>'country',exit_payload->>'country',''))
  || CASE WHEN exit_ip<>'' AND exit_payload->>'addressFamily'='6' THEN
  jsonb_build_object('status','unsupported','failureStage','unsupported-ipv6','error','仅 IPv6，暂无评分')
  ELSE '{}'::jsonb END END AS ippure

@@ -83,7 +83,8 @@ func run() error {
 	if raw := os.Getenv("IP_PROVIDERS"); raw != "" && classification.Providers == nil {
 		return fmt.Errorf("IP_PROVIDERS contains no supported provider")
 	}
-	classification.BeforeProvider, classification.AfterProvider = db.BeforeProvider, db.AfterProvider
+	// Classification failures only affect in-memory pacing, not persisted data.
+	classification.BeforeProvider = db.BeforeProvider
 	client := attributes.NewClient(classification, runtimeenv.Env("IPPURE_API_ORIGIN", "https://api.123169.xyz"))
 	client.BeforeProvider, client.AfterProvider = db.BeforeProvider, db.AfterProvider
 	runner := attributes.Runner{Store: db, Lookup: client, Workers: workers, Timeout: duration, Retry: time.Duration(retry) * time.Second}

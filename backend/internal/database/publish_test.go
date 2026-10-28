@@ -30,7 +30,7 @@ func TestLiveFactsRequireRecentVerdictAndVerifiedExit(t *testing.T) {
   ('scheduling-off',now(),'{"reachable":true}');
  INSERT INTO node_explorer_connectivity
  SELECT identity,now(),'{"reachable":true}' FROM node_explorer_node_registry WHERE identity IN ('negative','changed','replaced','legacy');
- UPDATE node_explorer_connectivity c SET payload=c.payload || jsonb_build_object('incarnation',n.incarnation,'configDigest',md5(n.node::text))
+ UPDATE node_explorer_connectivity c SET payload=c.payload || jsonb_build_object('incarnation',n.incarnation,'configDigest',md5((n.node - 'rawLink' - 'generatedLink')::text))
  FROM node_explorer_node_registry n WHERE c.identity=n.identity AND n.identity<>'legacy';
  UPDATE node_explorer_connectivity SET payload=payload || '{"reachable":false}' WHERE identity='negative';
  UPDATE node_explorer_node_registry SET node='{"changed":true}' WHERE identity='changed';

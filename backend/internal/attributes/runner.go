@@ -33,6 +33,7 @@ func (r Runner) Run(parent context.Context) error {
 	}
 	results := make(chan completed, r.Workers)
 	active := map[string]bool{}
+	failedUntil := map[string]time.Time{}
 	var wg sync.WaitGroup
 	defer func() {
 		cancel()
@@ -51,13 +52,18 @@ func (r Runner) Run(parent context.Context) error {
 			return nil
 		}
 		check, stop := context.WithTimeout(ctx, 5*time.Second)
-		nodes, err := r.Store.Due(check, r.Workers*2)
+		for ip, until := range failedUntil {
+			if !time.Now().Before(until) {
+				delete(failedUntil, ip)
+			}
+		}
+		nodes, err := r.Store.Due(check, r.Workers*2+len(failedUntil))
 		stop()
 		if err != nil {
 			return err
 		}
 		for _, n := range nodes {
-			if active[n.IP] {
+			if active[n.IP] || time.Now().Before(failedUntil[n.IP]) {
 				continue
 			}
 			if len(active) >= r.Workers {
@@ -105,6 +111,13 @@ func (r Runner) Run(parent context.Context) error {
 			}
 			// Retry stale inputs on the next poll, not a tight loop.
 			if c.skip {
+				continue
+			}
+			if !c.r.hasData(c.n.IP) {
+				failedUntil[c.n.IP] = time.Now().Add(r.Retry)
+				if err := fill(); err != nil {
+					return err
+				}
 				continue
 			}
 			delay := r.Retry

@@ -70,6 +70,8 @@ func TestAvailabilityOwnershipAndStaleResults(t *testing.T) {
 	check(true)
 	check(true)
 	save("unreachable", false)
+	check(true)
+	save("unreachable", false)
 	check(false)
 	if _, err = pool.Exec(ctx, "UPDATE node_explorer_node_registry SET node=node || '{\"name\":\"changed\"}'::jsonb WHERE identity=$1", n.Identity); err != nil {
 		t.Fatal(err)

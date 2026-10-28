@@ -95,6 +95,9 @@ func (d *DB) Current(ctx context.Context, n Candidate) (bool, error) {
 	return ok, err
 }
 func (d *DB) Save(ctx context.Context, n Candidate, r Result, retry time.Duration) error {
+	if !r.hasData(n.IP) {
+		return nil
+	}
 	tx, err := d.owner.Begin(ctx)
 	if err != nil {
 		return err

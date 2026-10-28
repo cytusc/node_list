@@ -79,8 +79,8 @@ SELECT reason,count(*) AS total FROM (
  WHEN c.checked_at IS NULL OR c.checked_at<=now()-interval '6 hours' THEN 'expired'
  WHEN c.payload->>'reachable' IS DISTINCT FROM 'true'
    OR c.payload->>'incarnation' IS DISTINCT FROM n.incarnation
-   OR c.payload->>'configDigest' IS DISTINCT FROM md5(n.node::text) THEN 'unverified'
- WHEN e.payload->>'verified' IS DISTINCT FROM 'true' THEN 'unverifiedExit'
+   OR c.payload->>'configDigest' IS DISTINCT FROM md5((n.node - 'rawLink' - 'generatedLink')::text) THEN 'unverified'
+ WHEN e.payload->>'verified' IS DISTINCT FROM 'true' OR e.checked_at<=now()-interval '6 hours' THEN 'unverifiedExit'
  ELSE 'published' END AS reason
  FROM node_explorer_node_registry n
  LEFT JOIN node_explorer_connectivity c USING(identity)

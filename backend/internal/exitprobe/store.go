@@ -54,9 +54,9 @@ func (d *DB) Close() {
 	}
 }
 func (d *DB) Due(ctx context.Context, limit int) ([]Candidate, error) {
-	rows, err := d.Pool.Query(ctx, `SELECT n.identity,n.incarnation,md5(n.node::text),n.node FROM node_explorer_node_registry n
+	rows, err := d.Pool.Query(ctx, `SELECT n.identity,n.incarnation,md5((n.node - 'rawLink' - 'generatedLink')::text),n.node FROM node_explorer_node_registry n
  LEFT JOIN node_explorer_exit_attempts a USING(identity)
- WHERE n.available AND (a.identity IS NULL OR a.incarnation<>n.incarnation OR a.digest<>md5(n.node::text) OR a.next_at<=now())
+ WHERE n.available AND (a.identity IS NULL OR a.incarnation<>n.incarnation OR a.digest<>md5((n.node - 'rawLink' - 'generatedLink')::text) OR a.next_at<=now())
  ORDER BY coalesce(a.next_at,'-infinity'::timestamptz),n.identity LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -74,7 +74,7 @@ func (d *DB) Due(ctx context.Context, limit int) ([]Candidate, error) {
 }
 func (d *DB) Current(ctx context.Context, n Candidate) (bool, error) {
 	var ok bool
-	err := d.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_explorer_node_registry WHERE identity=$1 AND available AND incarnation=$2 AND md5(node::text)=$3)`, n.Identity, n.Incarnation, n.Digest).Scan(&ok)
+	err := d.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_explorer_node_registry WHERE identity=$1 AND available AND incarnation=$2 AND md5((node - 'rawLink' - 'generatedLink')::text)=$3)`, n.Identity, n.Incarnation, n.Digest).Scan(&ok)
 	return ok, err
 }
 func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Duration) error {
@@ -94,7 +94,7 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 		_ = tx.Rollback(cleanup)
 	}()
 	var id string
-	err = tx.QueryRow(ctx, `SELECT identity FROM node_explorer_node_registry WHERE identity=$1 AND available AND incarnation=$2 AND md5(node::text)=$3 FOR UPDATE`, n.Identity, n.Incarnation, n.Digest).Scan(&id)
+	err = tx.QueryRow(ctx, `SELECT identity FROM node_explorer_node_registry WHERE identity=$1 AND available AND incarnation=$2 AND md5((node - 'rawLink' - 'generatedLink')::text)=$3 FOR UPDATE`, n.Identity, n.Incarnation, n.Digest).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -123,6 +123,11 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 		}
 	}
 	previous.IP = oldIP // Canonical column may predate a matching payload field.
+	// A failed echo is an attempt, not a new exit observation. Keep the last
+	// verified result and its original timestamp; the attempt remains retryable.
+	if r.Error != "" && previous.Verified && previous.Incarnation == n.Incarnation {
+		return tx.Commit(ctx)
+	}
 	// Preserve the last confirmed location before replacing the exit mapping.
 	// Capture only the matching old IP's attributes, never the new IP's type.
 	_, err = tx.Exec(ctx, `UPDATE node_explorer_exits e SET pinned_country=upper(c.country)

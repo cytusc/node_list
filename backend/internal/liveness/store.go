@@ -18,10 +18,10 @@ type Candidate struct {
 
 // These are input and output contracts, not calls into other services.
 // available is an output only: even previously unreachable nodes are scheduled.
-const dueSQL = `SELECT n.identity,n.incarnation,md5(n.node::text),n.node
+const dueSQL = `SELECT n.identity,n.incarnation,md5((n.node - 'rawLink' - 'generatedLink')::text),n.node
  FROM node_explorer_node_registry n
  LEFT JOIN node_explorer_liveness_attempts a USING(identity)
- WHERE (a.identity IS NULL OR a.incarnation<>n.incarnation OR a.digest<>md5(n.node::text) OR a.next_at<=now())
+ WHERE (a.identity IS NULL OR a.incarnation<>n.incarnation OR a.digest<>md5((n.node - 'rawLink' - 'generatedLink')::text) OR a.next_at<=now())
  -- Interleave three available nodes with one other node. Neither group can
  -- starve the other, and an empty group leaves all slots to the remaining one.
  ORDER BY (row_number() OVER (PARTITION BY n.available ORDER BY coalesce(a.next_at,'-infinity'::timestamptz),n.identity)-1)
@@ -119,7 +119,7 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 	}()
 	var id string
 	err = tx.QueryRow(ctx, `SELECT identity FROM node_explorer_node_registry
- WHERE identity=$1 AND incarnation=$2 AND md5(node::text)=$3 FOR UPDATE`, n.Identity, n.Incarnation, n.Digest).Scan(&id)
+ WHERE identity=$1 AND incarnation=$2 AND md5((node - 'rawLink' - 'generatedLink')::text)=$3 FOR UPDATE`, n.Identity, n.Incarnation, n.Digest).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -160,7 +160,9 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
  checked_at=EXCLUDED.checked_at,next_at=EXCLUDED.next_at,payload=EXCLUDED.payload`, id, n.Incarnation, n.Digest, r.CheckedAt, time.Now().Add(delay), b); err != nil {
 		return err
 	}
-	if r.Valid() {
+	// One failed round can be transient. Keep the last positive verdict until
+	// a second consecutive failure; its timestamp still enforces freshness.
+	if r.Valid() && (r.Reachable || r.FailureStreak >= 2) {
 		state := map[string]any{"reachable": r.Reachable, "checkedAt": r.CheckedAt, "probeTarget": r.ProbeTarget, "targets": r.Targets, "engine": r.Engine, "latencyMs": r.LatencyMS, "status": r.Status, "incarnation": n.Incarnation, "configDigest": n.Digest}
 		if !r.Reachable {
 			state["error"] = "target_unreachable"

@@ -26,6 +26,18 @@ type Result struct {
 	RiskAttempted bool
 	Country       string
 }
+
+func (r Result) hasData(ip string) bool {
+	if r.Risk != nil && r.Risk.IP == ip || len(r.Country) == 2 && r.Country[0] >= 'A' && r.Country[0] <= 'Z' && r.Country[1] >= 'A' && r.Country[1] <= 'Z' {
+		return true
+	}
+	for _, e := range r.Evidence {
+		if e.IP == ip && e.QueryStatus == "success" && (e.ASN != "" || e.ASNType != "" || e.UsageType != "" || e.CompanyType != "" || e.Hosting != nil) {
+			return true
+		}
+	}
+	return false
+}
 type Lookup interface {
 	Lookup(context.Context, Candidate) Result
 }
@@ -89,7 +101,7 @@ func (c *Client) Lookup(ctx context.Context, n Candidate) Result {
 			} else {
 				r.Risk = v
 			}
-			if c.AfterProvider != nil {
+			if err == nil && c.AfterProvider != nil {
 				cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 				_ = c.AfterProvider(cleanup, "ippure", c.riskNext)
 				stop()
@@ -123,7 +135,7 @@ func (c *Client) Lookup(ctx context.Context, n Candidate) Result {
 			} else {
 				r.Country = country
 			}
-			if c.AfterProvider != nil {
+			if err == nil && c.AfterProvider != nil {
 				cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 				_ = c.AfterProvider(cleanup, "geolocation", c.geoNext)
 				stop()
@@ -136,52 +148,65 @@ func (c *Client) Lookup(ctx context.Context, n Candidate) Result {
 }
 func merge(n Candidate, r Result, now time.Time) domain.IPPureResult {
 	v := n.Previous
+	classificationUpdated := false
 	v.IP = n.IP
 	stamp := now.UTC().Format(time.RFC3339Nano)
 	if v.Status == "" {
 		v.Status = "error"
 		v.Error = "IP 风险属性待查询"
 	}
-	if r.RiskAttempted {
-		v.RiskQueryAttemptAt = stamp
-		v.RiskQueryStatus = "query-failed"
-		v.RiskQueryError = r.RiskError
-	}
-	if r.Risk != nil {
+	if r.Risk != nil && r.Risk.IP == n.IP {
 		a := r.Risk
 		v.Status = "success"
 		v.Error = ""
 		v.FailureStage = ""
-		v.ASN, v.Organization, v.Source = a.ASN, a.Organization, a.Source
+		if a.ASN != "" {
+			v.ASN = a.ASN
+		}
+		if a.Organization != "" {
+			v.Organization = a.Organization
+		}
+		if a.Source != "" {
+			v.Source = a.Source
+		}
 		if v.Country == "" {
 			v.Country = a.Country
 		}
-		if !n.ClassificationMissing {
-			v.Attributes = append(append([]string{}, v.Attributes...), a.Attributes...)
-		} else {
-			v.Attributes = append([]string{}, a.Attributes...)
-		}
+		v.Attributes = append(append([]string{}, v.Attributes...), a.Attributes...)
 		v.Score, v.Label = a.Score, a.Label
-		v.HumanPercent, v.BotPercent = a.HumanPercent, a.BotPercent
-		v.TrafficRatioStatus, v.TrafficRatioError = a.TrafficRatioStatus, a.TrafficRatioError
-		v.CheckedAt, v.RiskQueryCheckedAt, v.TrafficRatioCheckedAt = stamp, stamp, stamp
-		v.RiskQueryStatus, v.RiskQueryError, v.QueryMode = "success", "", "direct"
+		if a.HumanPercent != nil && a.BotPercent != nil {
+			v.HumanPercent, v.BotPercent = a.HumanPercent, a.BotPercent
+			v.TrafficRatioStatus, v.TrafficRatioError = a.TrafficRatioStatus, a.TrafficRatioError
+			v.TrafficRatioCheckedAt = stamp
+		}
+		v.CheckedAt, v.RiskQueryCheckedAt = stamp, stamp
+		v.RiskQueryAttemptAt, v.RiskQueryStatus, v.RiskQueryError, v.QueryMode = stamp, "success", "", "direct"
 		e := ipcheck.IPPureEvidence(n.IP, a.Attributes, stamp)
 		e.QueryStatus = "success"
 		r.Evidence = append(r.Evidence, e)
 	}
-	if v.Country == "" && r.Country != "" {
+	if v.Country == "" && len(r.Country) == 2 && r.Country[0] >= 'A' && r.Country[0] <= 'Z' && r.Country[1] >= 'A' && r.Country[1] <= 'Z' {
 		v.Country = r.Country
 	}
 	if n.ClassificationMissing {
-		evidence := r.Evidence
-		if v.Classification != nil {
-			evidence = append(append([]ipcheck.Evidence{}, v.Classification.Evidence...), evidence...)
+		var evidence []ipcheck.Evidence
+		for _, e := range r.Evidence {
+			if e.QueryStatus == "success" && e.IP == n.IP {
+				evidence = append(evidence, e)
+			}
 		}
-		votes := ipcheck.Score(n.IP, evidence, now)
-		v.Classification = &votes
+		if len(evidence) > 0 {
+			if v.Classification != nil {
+				evidence = append(append([]ipcheck.Evidence{}, v.Classification.Evidence...), evidence...)
+			}
+			votes := ipcheck.Score(n.IP, evidence, now)
+			if len(votes.Types) > 0 {
+				v.Classification = &votes
+				classificationUpdated = true
+			}
+		}
 	}
-	if v.Classification != nil && (len(v.Classification.Types) > 0 || n.ClassificationMissing) {
+	if v.Classification != nil && len(v.Classification.Types) > 0 && (classificationUpdated || r.Risk != nil && r.Risk.IP == n.IP) {
 		v.Attributes = v.Classification.Attributes(v.Attributes)
 	}
 	if ip, err := netip.ParseAddr(n.IP); err == nil && ip.Is6() {

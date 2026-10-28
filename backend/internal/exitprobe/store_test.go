@@ -31,7 +31,8 @@ func fixture(t *testing.T) *DB {
 	t.Cleanup(pool.Close)
 	// Only public input/output contracts exist: no snapshots, Redis or task services.
 	_, err = pool.Exec(context.Background(), `CREATE TABLE node_explorer_node_registry(identity text PRIMARY KEY,incarnation text NOT NULL,node jsonb NOT NULL,available boolean NOT NULL);
- CREATE TABLE node_explorer_exits(identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity),ip text NOT NULL,version bigint NOT NULL DEFAULT 1,checked_at timestamptz NOT NULL,payload jsonb NOT NULL);
+ CREATE TABLE node_explorer_exits(identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity),ip text NOT NULL,version bigint NOT NULL DEFAULT 1,checked_at timestamptz NOT NULL,payload jsonb NOT NULL,pinned_country text);
+ CREATE TABLE node_explorer_ip_attributes(ip text PRIMARY KEY,checked_at timestamptz NOT NULL,payload jsonb NOT NULL);
  CREATE TABLE node_explorer_service_status(service text PRIMARY KEY,updated_at timestamptz NOT NULL,payload jsonb NOT NULL);
  INSERT INTO node_explorer_node_registry VALUES('up','v1','{"name":"one"}',true),('down','v1','{}',false);`)
 	if err != nil {
@@ -100,7 +101,7 @@ func TestExitFailureAndRefreshHaveNoOtherResponsibilities(t *testing.T) {
 		t.Fatalf("initial %+v", v)
 	}
 	save(Result{Error: "echo_failed"})
-	if v := read(); v.Verified || v.IP != "8.8.8.8" || v.FailureStreak != 1 || v.Version != 1 {
+	if v := read(); !v.Verified || v.IP != "8.8.8.8" || v.Version != 1 {
 		t.Fatalf("failed %+v", v)
 	}
 	save(Result{IP: "1.1.1.1"})

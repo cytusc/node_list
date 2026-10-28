@@ -151,7 +151,7 @@ for (ident, sid, idx, node, conn, exitp, attr, avail, hist) in nodes:
             "('%s',now()-interval '2 minutes',%s);" % (attr["ip"], j(attr)))
 
 out.append("UPDATE node_explorer_connectivity c SET payload=c.payload || "
-           "jsonb_build_object('incarnation',n.incarnation,'configDigest',md5(n.node::text)) "
+           "jsonb_build_object('incarnation',n.incarnation,'configDigest',md5((n.node - 'rawLink' - 'generatedLink')::text)) "
            "FROM node_explorer_node_registry n WHERE n.identity=c.identity;")
 out.append("COMMIT;")
 

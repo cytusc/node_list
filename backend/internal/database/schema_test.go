@@ -17,7 +17,7 @@ func TestRetirementPreservesFactsAndIsRepeatable(t *testing.T) {
  INSERT INTO node_explorer_snapshots(id,fingerprint,imported_at,node_count,payload) VALUES(1,'fixture','now',1,'{}');
  INSERT INTO node_explorer_node_registry(identity,node,snapshot_id,node_index,available) VALUES('kept','{"rawLink":"fixture","name":"kept"}',1,0,true);
  INSERT INTO node_explorer_snapshot_members VALUES(1,0,'kept');
- INSERT INTO node_explorer_connectivity SELECT identity,now(),jsonb_build_object('reachable',true,'incarnation',incarnation,'configDigest',md5(node::text)) FROM node_explorer_node_registry WHERE identity='kept';
+ INSERT INTO node_explorer_connectivity SELECT identity,now(),jsonb_build_object('reachable',true,'incarnation',incarnation,'configDigest',md5((node - 'rawLink' - 'generatedLink')::text)) FROM node_explorer_node_registry WHERE identity='kept';
  INSERT INTO node_explorer_exits VALUES('kept','192.0.2.1',7,now(),'{"ip":"192.0.2.1","verified":true}');
  INSERT INTO node_explorer_ip_attributes VALUES('192.0.2.1',now(),'{"ip":"192.0.2.1","status":"success"}');
  ALTER TABLE node_explorer_node_registry ADD COLUMN historical_residential boolean DEFAULT true, ADD COLUMN connection_key text DEFAULT 'legacy', ADD COLUMN source_at timestamptz DEFAULT now();
@@ -107,7 +107,7 @@ func TestRemoveSnapshotsPreservesCurrentFacts(t *testing.T) {
  INSERT INTO node_explorer_snapshots VALUES(1,'fixture',NULL,'now',1,'{}');
  INSERT INTO node_explorer_node_registry(identity,node,available) VALUES('kept','{"name":"kept","rawLink":"private-link"}',true);
  INSERT INTO node_explorer_snapshot_members VALUES(1,0,'kept');
- INSERT INTO node_explorer_connectivity SELECT identity,now(),jsonb_build_object('reachable',true,'incarnation',incarnation,'configDigest',md5(node::text)) FROM node_explorer_node_registry WHERE identity='kept';
+ INSERT INTO node_explorer_connectivity SELECT identity,now(),jsonb_build_object('reachable',true,'incarnation',incarnation,'configDigest',md5((node - 'rawLink' - 'generatedLink')::text)) FROM node_explorer_node_registry WHERE identity='kept';
  INSERT INTO node_explorer_exits VALUES('kept','192.0.2.1',7,now(),'{"ip":"192.0.2.1","verified":true}');
  INSERT INTO node_explorer_ip_attributes VALUES('192.0.2.1',now(),'{"ip":"192.0.2.1","status":"success"}');
  CREATE TABLE node_explorer_source_batches(source text,digest text,snapshot_id int NOT NULL,PRIMARY KEY(source,digest));
