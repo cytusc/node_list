@@ -153,7 +153,8 @@ func TestLateResultRequiresAnyCurrentAvailableUser(t *testing.T) {
 			if ok, err := d.Current(context.Background(), n); err != nil || ok {
 				t.Fatal("stale input accepted", ok, err)
 			}
-			if err := d.Save(context.Background(), n, Result{}, time.Hour); err != nil {
+			result := Result{Country: "US"}
+			if err := d.Save(context.Background(), n, result, time.Hour); err != nil {
 				t.Fatal(err)
 			}
 			var count int
@@ -162,7 +163,7 @@ func TestLateResultRequiresAnyCurrentAvailableUser(t *testing.T) {
 				t.Fatal("stale write")
 			}
 			putNode(t, d, "b", "8.8.8.8", true, true)
-			if err := d.Save(context.Background(), n, Result{}, time.Hour); err != nil {
+			if err := d.Save(context.Background(), n, result, time.Hour); err != nil {
 				t.Fatal(err)
 			}
 			d.Pool.QueryRow(context.Background(), `SELECT count(*) FROM node_explorer_ip_attributes`).Scan(&count)
@@ -204,7 +205,7 @@ func TestOwnershipLossPreventsCommitAndDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if err := d.Save(ctx, n, Result{}, time.Hour); err == nil {
+	if err := d.Save(ctx, n, Result{Country: "US"}, time.Hour); err == nil {
 		t.Fatal("lost owner saved")
 	}
 	if err := other.Heartbeat(ctx, false); err != nil {
