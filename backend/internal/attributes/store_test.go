@@ -31,7 +31,7 @@ func fixture(t *testing.T) *DB {
 	t.Cleanup(pool.Close)
 	// Only public input/output contracts exist: no snapshots, Redis or task services.
 	_, err = pool.Exec(context.Background(), `CREATE TABLE node_explorer_node_registry(identity text PRIMARY KEY,incarnation text NOT NULL,node jsonb NOT NULL,available boolean NOT NULL);
- CREATE TABLE node_explorer_exits(identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity),ip text NOT NULL,version bigint NOT NULL DEFAULT 1,checked_at timestamptz NOT NULL,payload jsonb NOT NULL);
+ CREATE TABLE node_explorer_exits(identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity),ip text NOT NULL,version bigint NOT NULL DEFAULT 1,checked_at timestamptz NOT NULL,payload jsonb NOT NULL,pinned_attributes jsonb);
  CREATE TABLE node_explorer_ip_attributes(ip text PRIMARY KEY,checked_at timestamptz NOT NULL,payload jsonb NOT NULL);
  CREATE TABLE node_explorer_service_status(service text PRIMARY KEY,updated_at timestamptz NOT NULL,payload jsonb NOT NULL);`)
 
