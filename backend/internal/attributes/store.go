@@ -142,6 +142,15 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, retry time.Duratio
 	if err != nil {
 		return err
 	}
+	// Keep the last successful result on each node while it still uses this IP.
+	// A later exit-IP change can then retain the result as explicitly stale;
+	// upstream failures never reach this write path because hasData rejected them.
+	if _, err = tx.Exec(ctx, `UPDATE node_explorer_exits e SET pinned_attributes=$2
+ FROM node_explorer_node_registry n
+ WHERE e.identity=n.identity AND e.ip=$1 AND n.available AND e.payload->>'verified'='true'
+ AND ($2->>'status'='success' OR jsonb_array_length(coalesce($2->'classification'->'types','[]'::jsonb))>0)`, n.IP, b); err != nil {
+		return err
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO node_explorer_attribute_attempts VALUES($1,$2,$3)
  ON CONFLICT(ip) DO UPDATE SET checked_at=EXCLUDED.checked_at,next_at=EXCLUDED.next_at`, n.IP, now, now.Add(retry))
 	if err != nil {
