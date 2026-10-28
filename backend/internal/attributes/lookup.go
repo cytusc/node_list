@@ -38,6 +38,7 @@ func (r Result) hasData(ip string) bool {
 	}
 	return false
 }
+
 type Lookup interface {
 	Lookup(context.Context, Candidate) Result
 }
