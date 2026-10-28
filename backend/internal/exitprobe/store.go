@@ -123,6 +123,16 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 		}
 	}
 	previous.IP = oldIP // Canonical column may predate a matching payload field.
+	// Preserve the last confirmed location before replacing the exit mapping.
+	// Capture only the matching old IP's attributes, never the new IP's type.
+	_, err = tx.Exec(ctx, `UPDATE node_explorer_exits e SET pinned_country=upper(c.country)
+ FROM LATERAL (SELECT coalesce(
+   (SELECT nullif(a.payload->>'country','') FROM node_explorer_ip_attributes a
+    WHERE a.ip=$2 AND a.payload->>'ip'=$2),nullif($3::jsonb->>'country','')) AS country) c
+ WHERE e.identity=$1 AND e.pinned_country IS NULL AND c.country ~ '^[a-zA-Z]{2}$'`, id, oldIP, old)
+	if err != nil {
+		return err
+	}
 	v := domain.ExitState{Incarnation: n.Incarnation, IP: r.IP, Endpoint: r.Endpoint, Source: "echo", Verified: r.Error == "" && r.IP != "", CheckedAt: r.CheckedAt.Format(time.RFC3339Nano), ProbeMillis: r.Millis, Error: r.Error, Version: max(1, version)}
 	if v.Verified {
 		if version > 0 && previous.IP != v.IP {

@@ -42,7 +42,7 @@ curl --fail http://127.0.0.1:3001/api/health
 
 默认 `COMPOSE_FILE=compose.yaml:compose.subs-check.yaml`，包含五个应用服务和可选上游 subs-check。已有 subs-check 时可只使用 `compose.yaml`。数据库是已有外部服务，不自动新建。只有来源服务挂载订阅目录；测活和出口服务使用私有内核，不发布代理端口。Web 默认绑定 `127.0.0.1:3001`，可用 `BIND_ADDRESS`／`WEB_PORT` 调整。
 
-首次启动执行 `psql -v ON_ERROR_STOP=1 -f backend/internal/database/schema.sql`。旧版本升级必须先停机备份，再执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/016-retire-legacy.sql`，然后执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/017-remove-snapshots.sql`；详见 [清理与迁移记录](docs/service-refactoring/11-project-cleanup.md)。
+首次启动执行 `psql -v ON_ERROR_STOP=1 -f backend/internal/database/schema.sql`。旧版本升级必须先停机备份，再执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/016-retire-legacy.sql`，然后执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/017-remove-snapshots.sql`；详见 [清理与迁移记录](docs/service-refactoring/11-project-cleanup.md)。升级至节点归属地固定版本时，部署新出口服务前执行 `psql -v ON_ERROR_STOP=1 -f deploy/sql/020-pin-node-country.sql`，以保留现有出口已确认的归属地。
 
 `deploy/node-list.service`、`deploy/node-list-update.service` 和 timer 可安装到 systemd。`deploy/update.sh` 会同步更新五个应用服务，健康检查失败时回滚对应版本。`NODE_EXPLORER_AUTO_UPDATE=false` 可关闭应用自动更新。
 

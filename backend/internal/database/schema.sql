@@ -27,6 +27,7 @@ CREATE INDEX IF NOT EXISTS node_explorer_connectivity_reference
 CREATE INDEX IF NOT EXISTS node_explorer_exits_ip ON node_explorer_exits(ip);
 CREATE INDEX IF NOT EXISTS node_explorer_registry_available ON node_explorer_node_registry(identity) WHERE available;
 ALTER TABLE node_explorer_node_registry ADD COLUMN IF NOT EXISTS first_seen_at timestamptz NOT NULL DEFAULT now(), ADD COLUMN IF NOT EXISTS last_available_at timestamptz, ADD COLUMN IF NOT EXISTS incarnation text NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text);
+ALTER TABLE node_explorer_exits ADD COLUMN IF NOT EXISTS pinned_country text;
 -- Raw current facts remain an ordinary view, so an identity restriction can
 -- reach the base tables before any public node JSON is rendered.
 CREATE OR REPLACE VIEW node_explorer_live_facts AS
@@ -34,7 +35,7 @@ WITH observed AS (
  SELECT n.identity,n.first_seen_at,n.node,c.payload AS connectivity,
  e.payload AS exit_payload,e.version AS exit_version,e.ip AS exit_ip,
  CASE WHEN e.identity IS NOT NULL AND e.ip<>'' AND a.payload->>'ip'=e.ip THEN a.payload END AS attributes,
- CASE WHEN e.identity IS NOT NULL THEN coalesce(
+ CASE WHEN e.identity IS NOT NULL THEN coalesce(e.pinned_country,
  CASE WHEN a.payload->>'ip'=e.ip THEN nullif(a.payload->>'country','') END,e.payload->>'country','') END AS observed_country
  FROM node_explorer_node_registry n
  LEFT JOIN node_explorer_connectivity c USING(identity)
