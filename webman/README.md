@@ -22,6 +22,12 @@ PHP / webman 负责登录、节点查询和服务监控。采集、测活、出�
 - `/api/services`：独立服务监控页面使用，实时读取当前心跳，页面每 15 秒重新请求。
 - 其余路由见 `config/route.php`；旧历史与订阅下载接口不可用。
 
+## 对外接口
+
+`GET /api/open/v1/countries` 返回可用国家及节点数，`GET /api/open/v1/nodes?country=HK&mode=standard&page=1` 返回指定国家的可用节点与分享链接，每页固定 10 条。标准模式按住宅、风险度升序、人类比例占优、原生逐级排序。
+
+接口使用独立 `OPEN_API_APP_ID / OPEN_API_SECRET` 和 HMAC-SHA256 验签，PostgreSQL 原子 nonce 防重放；未配置默认关闭。升级先执行 `deploy/sql/023-open-api.sql`，数据库账号需要 nonce 表读写权限。配置、签名规范、字段和调用示例见 [对外接口文档](../docs/open-api.md)。
+
 `Heartbeat` 随请求节流写入 API 自身心跳，不影响节点状态。
 
 ## 本地运行与验证
@@ -33,6 +39,7 @@ composer install
 php start.php start
 php tests/run.php
 php tests/auth.php
+php tests/open-api.php
 ```
 
 数据库配置使用 `PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD`。监听地址使用 `API_LISTEN`，或 `API_HOST/API_PORT`；进程数使用 `API_WORKERS`。
@@ -42,6 +49,7 @@ php tests/auth.php
 ```bash
 PGURL='postgresql://postgres:test_password@127.0.0.1:5432/node_explorer_test' bash tests/fixtures/load.sh
 PGHOST=127.0.0.1 PGDATABASE=node_explorer_test PGUSER=postgres PGPASSWORD=test_password php tests/integration.php
+PGHOST=127.0.0.1 PGDATABASE=node_explorer_test PGUSER=postgres PGPASSWORD=test_password php tests/open-api-integration.php
 ```
 
 数据库表和实时视图以 `backend/internal/database/schema.sql` 为准。

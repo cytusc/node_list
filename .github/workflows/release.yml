@@ -80,6 +80,7 @@ jobs:
           composer install --working-dir=webman --no-interaction --no-progress --quiet
           php webman/tests/run.php
           php webman/tests/auth.php
+          php webman/tests/open-api.php
           # 独立库：集成夹具会 TRUNCATE 相关表，不能和 Go 测试/冒烟共用 node_explorer_test
           psql "postgresql://postgres:test_password@127.0.0.1:5432/postgres" \
             -c "DROP DATABASE IF EXISTS node_explorer_webman_test" \
@@ -88,6 +89,8 @@ jobs:
             bash webman/tests/fixtures/load.sh
           PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=test_password \
             PGDATABASE=node_explorer_webman_test php webman/tests/integration.php
+          PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=test_password \
+            PGDATABASE=node_explorer_webman_test php webman/tests/open-api-integration.php
       - uses: actions/upload-artifact@v4
         with:
           name: frontend-dist

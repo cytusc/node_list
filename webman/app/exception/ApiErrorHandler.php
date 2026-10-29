@@ -37,7 +37,8 @@ final class ApiErrorHandler extends Handler
 
     public function render(Request $request, Throwable $exception): Response
     {
-        $noStore = in_array($request->path(), self::NO_STORE_PATHS, true);
+        $noStore = in_array($request->path(), self::NO_STORE_PATHS, true)
+            || str_starts_with($request->path(), '/api/open/');
 
         if ($exception instanceof ApiError) {
             return JsonResponse::error($exception->status, $exception->getMessage(), $exception->errorCode, $noStore);

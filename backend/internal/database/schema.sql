@@ -21,6 +21,13 @@ CREATE TABLE IF NOT EXISTS node_explorer_service_status (
   service text PRIMARY KEY, updated_at timestamptz NOT NULL,
   payload jsonb NOT NULL DEFAULT '{}'
 );
+-- Shared by PHP workers/instances; no node facts are written by the open API.
+CREATE TABLE IF NOT EXISTS node_explorer_open_api_nonces (
+  app_id varchar(64) NOT NULL, nonce varchar(128) NOT NULL,
+  expires_at bigint NOT NULL, PRIMARY KEY (app_id,nonce)
+);
+CREATE INDEX IF NOT EXISTS node_explorer_open_api_nonces_expiry
+  ON node_explorer_open_api_nonces(expires_at);
 CREATE INDEX IF NOT EXISTS node_explorer_connectivity_reference
   ON node_explorer_connectivity (checked_at DESC,identity)
   WHERE payload->>'reachable'='true';

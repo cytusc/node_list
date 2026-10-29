@@ -13,9 +13,9 @@
     "build:source": "go -C backend build -o node-source ./cmd/node-source",
     "dev:source": "go -C backend run ./cmd/node-source",
     "start": "php webman/start.php start",
-    "test": "php webman/tests/run.php && php webman/tests/auth.php",
+    "test": "php webman/tests/run.php && php webman/tests/auth.php && php webman/tests/open-api.php",
     "test:backend": "go -C backend vet ./... && go -C backend test -race ./...",
-    "test:api": "php webman/composer.phar install --working-dir=webman --no-interaction && php webman/tests/run.php && php webman/tests/auth.php",
+    "test:api": "composer install --working-dir=webman --no-interaction && npm test",
     "test:e2e": "playwright test"
   },
   "dependencies": {

@@ -34,13 +34,18 @@ Route::group('/api', function () {
     Route::get('/results', [ResultsController::class, 'index'])->name('api.results')->middleware([app\middleware\Authenticate::class]);
     Route::post('/nodes/link', [app\controller\NodeLinkController::class, 'index'])->middleware([app\middleware\Authenticate::class]);
 
+    Route::group('/open/v1', function () {
+        Route::get('/countries', [app\controller\OpenApiController::class, 'countries']);
+        Route::get('/nodes', [app\controller\OpenApiController::class, 'nodes']);
+    })->middleware([app\middleware\OpenApiAuthenticate::class]);
+
     // 订阅下载是显式 404 占位（"订阅下载暂不可用。"），语义是「功能未开」
     // 而不是「路径写错」，所以必须保留具名路由、不能交给兜底。
     Route::any('/downloads', [DownloadController::class, 'unavailable'])->name('api.downloads');
     Route::any('/download', [DownloadController::class, 'unavailable'])->name('api.download');
 
     // 其余 /api/* 一律「接口不存在。」
-    Route::any('/[{path:.+}]', static fn (Request $request) => JsonResponse::error(404, '接口不存在。'))
+    Route::any('/[{path:.+}]', static fn (Request $request) => JsonResponse::error(404, '接口不存在。', '', str_starts_with($request->path(), '/api/open/')))
         ->name('api.notfound');
 })->middleware([AccessLog::class]);
 
@@ -58,7 +63,7 @@ Route::get('/login', [StaticController::class, 'root']);
 // 「打开一个不存在的静态路径」时看到它，改动没意义但差异也没必要留。
 Route::fallback(function (Request $request) {
     if (str_starts_with($request->path(), '/api/')) {
-        return JsonResponse::error(404, '接口不存在。');
+        return JsonResponse::error(404, '接口不存在。', '', str_starts_with($request->path(), '/api/open/'));
     }
     return new Response(404, [
         'Content-Type' => 'text/plain; charset=utf-8',
