@@ -119,6 +119,7 @@ test.describe("interactions and data states", () => {
     await page
       .getByRole("textbox", { name: "搜索节点", exact: true })
       .fill("Current node");
+    await expect(page.locator(".node-row")).toHaveCount(1);
     await page.locator(".node-name").first().click();
     await expect(page.getByRole("dialog")).toContainText(
       "最近检测 · 2026/10/11 09:30",
@@ -232,7 +233,7 @@ test.describe("interactions and data states", () => {
 
     for (const cause of ["network", "shape"] as const) {
       failure = cause;
-      await page.clock.fastForward(5000);
+      await page.clock.fastForward(cause === "network" ? 5000 : 10000);
       await expect(
         page.getByRole("alert", { includeHidden: true }),
       ).toContainText(
@@ -243,13 +244,62 @@ test.describe("interactions and data states", () => {
     }
 
     failure = null;
-    await page.clock.fastForward(5000);
+    await page.clock.fastForward(20000);
     await expect(page.getByRole("alert", { includeHidden: true })).toHaveCount(
       0,
     );
     await expect(page.locator(".node-row")).toHaveCount(50);
     await expect(page.getByRole("dialog")).toBeVisible();
     expect(errors).toEqual([]);
+  });
+
+  test("debounces typing while filters still apply immediately", async ({
+    page,
+  }) => {
+    await page.clock.install();
+    const queries: string[] = [];
+    await page.route("**/api/results?**", (route) => {
+      queries.push(new URL(route.request().url()).searchParams.get("q") || "");
+      return fulfillRoute(route, { json: results });
+    });
+    const search = page.getByRole("textbox", { name: "搜索节点", exact: true });
+    await search.fill("N");
+    await page.clock.runFor(100);
+    await search.fill("Node 6");
+    await page.clock.runFor(299);
+    expect(queries).toEqual([]);
+    await page.clock.runFor(1);
+    await expect(page.locator(".result-count")).toContainText("5");
+    expect(queries).toEqual(["Node 6"]);
+
+    await page.getByRole("button", { name: "协议筛选", exact: true }).click();
+    await page.getByRole("option", { name: /VLESS/ }).click();
+    await expect.poll(() => queries.length).toBe(2);
+  });
+
+  test("backs off failed polls and manual refresh restores the normal interval", async ({
+    page,
+  }) => {
+    await page.clock.install();
+    let requests = 0;
+    let failing = true;
+    await page.route("**/api/results?**", (route) => {
+      requests++;
+      return failing
+        ? route.fulfill({ status: 503, json: { error: "暂不可用" } })
+        : fulfillRoute(route, { json: results });
+    });
+    await page.clock.fastForward(5000);
+    await expect(page.getByRole("alert")).toContainText("暂不可用");
+    expect(requests).toBe(1);
+    await page.clock.runFor(5000);
+    expect(requests).toBe(1);
+    failing = false;
+    await page.getByRole("button", { name: "刷新结果", exact: true }).click();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    expect(requests).toBe(2);
+    await page.clock.runFor(5000);
+    await expect.poll(() => requests).toBe(3);
   });
 
   test("combines filters and opens accessible details", async ({ page }) => {

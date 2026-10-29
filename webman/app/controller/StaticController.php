@@ -33,6 +33,9 @@ final class StaticController
                 'X-Content-Type-Options' => 'nosniff',
             ], "404 page not found\n");
         }
-        return new Response(200, ['Content-Type' => 'text/html; charset=utf-8'], (string)file_get_contents($file));
+        return new Response(200, [
+            'Content-Type' => 'text/html; charset=utf-8',
+            'Cache-Control' => 'no-cache',
+        ], (string)file_get_contents($file));
     }
 }

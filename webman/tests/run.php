@@ -500,6 +500,7 @@ same(0, JsonResponse::number(null), 'null → 0');
 // ---------------------------------------------------------------------------
 
 require __DIR__ . '/monitor.php';
+require __DIR__ . '/static-cache.php';
 
 $total = $passed + count($failed);
 if ($failed !== []) {

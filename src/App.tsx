@@ -1,4 +1,5 @@
 import { apiFetch } from "@/lib/api";
+import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
@@ -381,6 +382,8 @@ export default function App() {
   const [ipAttributes, setIpAttributes] = useState<string[]>([]);
   const [media, setMedia] = useState<string[]>([]);
   const [minSpeed, setMinSpeed] = useState("");
+  const debouncedQuery = useDebouncedValue(query);
+  const debouncedMinSpeed = useDebouncedValue(minSpeed);
   const [selected, setSelected] = useState<NodeRecord | null>(null);
   const [sorting, setSorting] = useState<SortingState>([
     { id: "preferred", desc: true },
@@ -395,16 +398,18 @@ export default function App() {
   });
   const activeRequest = useRef<AbortController | null>(null);
   const requestPending = useRef(false);
+  const pollFailures = useRef(0);
+  const nextPollAt = useRef(0);
   const nodes = results?.nodes || emptyNodes;
   const criteria = JSON.stringify({
-    query,
+    query: debouncedQuery,
     countries,
     types,
     networks,
     ipSources,
     ipAttributes,
     media,
-    minSpeed,
+    minSpeed: debouncedMinSpeed,
     sorting,
   });
   const [pageState, setPageState] = useState({
@@ -421,7 +426,7 @@ export default function App() {
     page: String(pageIndex + 1),
     limit: String(pageSize),
   });
-  if (query.trim()) params.set("q", query.trim());
+  if (debouncedQuery.trim()) params.set("q", debouncedQuery.trim());
   for (const [key, values] of [
     ["country", countries],
     ["type", types],
@@ -432,7 +437,7 @@ export default function App() {
   ] as const) {
     if (values.length) params.set(key, values.join(","));
   }
-  if (minSpeed) params.set("minSpeed", minSpeed);
+  if (debouncedMinSpeed) params.set("minSpeed", debouncedMinSpeed);
   if (sorting[0]) {
     params.set("sort", sorting[0].id);
     params.set("direction", sorting[0].desc ? "desc" : "asc");
@@ -449,7 +454,13 @@ export default function App() {
 
   const load = useCallback(
     async (announce = false, background = false) => {
-      if (background && (document.hidden || requestPending.current)) return;
+      if (
+        background &&
+        (document.hidden ||
+          requestPending.current ||
+          Date.now() < nextPollAt.current)
+      )
+        return;
       requestPending.current = true;
       activeRequest.current?.abort();
       const controller = new AbortController();
@@ -488,21 +499,36 @@ export default function App() {
           body.limit < 1
         )
           throw new Error("接口返回的节点数据格式无效");
-        setResults(body);
-        setPageState({
-          pageIndex: body.page - 1,
-          pageSize: body.limit,
-          criteria,
+        pollFailures.current = 0;
+        nextPollAt.current = 0;
+        setResults((previous) =>
+          JSON.stringify(previous) === JSON.stringify(body) ? previous : body,
+        );
+        setPageState((previous) => {
+          const next = {
+            pageIndex: body.page - 1,
+            pageSize: body.limit,
+            criteria,
+          };
+          return previous.pageIndex === next.pageIndex &&
+            previous.pageSize === next.pageSize &&
+            previous.criteria === criteria
+            ? previous
+            : next;
         });
         if (!background) setSelected(null);
         setError("");
         if (!body.speedTest && sorting[0]?.id === "speed")
           setSorting([{ id: "name", desc: false }]);
-        if (!body.mediaCheck) setMedia([]);
+        if (!body.mediaCheck)
+          setMedia((previous) => (previous.length ? [] : previous));
         if (!body.speedTest) setMinSpeed("");
         if (announce) toast.success("已刷新可用节点");
       } catch (e) {
         if (!controller.signal.aborted) {
+          pollFailures.current = Math.min(pollFailures.current + 1, 4);
+          nextPollAt.current =
+            Date.now() + Math.min(5000 * 2 ** pollFailures.current, 60000);
           if (!background) {
             setResults(null);
             setSelected(null);
@@ -704,7 +730,11 @@ export default function App() {
     <div className="app-shell">
       <header className="site-header">
         <div className="header-inner">
-          <a href="/" className="brand" aria-label="节点浏览器首页">
+          <a
+            href="/"
+            className="brand"
+            aria-label="Node Explorer 节点浏览器首页"
+          >
             <span className="brand-mark">
               <Network className="size-5" />
             </span>
