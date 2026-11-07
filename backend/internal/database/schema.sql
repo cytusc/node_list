@@ -46,8 +46,8 @@ WITH observed AS (
    THEN a.payload
    WHEN e.pinned_attributes IS NOT NULL THEN e.pinned_attributes || jsonb_build_object('stale',true,'currentExitIP',e.ip)
    WHEN e.identity IS NOT NULL AND e.ip<>'' AND a.payload->>'ip'=e.ip THEN a.payload END AS attributes,
- CASE WHEN e.identity IS NOT NULL THEN coalesce(e.pinned_country,
- CASE WHEN a.payload->>'ip'=e.ip THEN nullif(a.payload->>'country','') END,e.payload->>'country','') END AS observed_country
+ CASE WHEN e.identity IS NOT NULL THEN coalesce(
+ CASE WHEN a.payload->>'ip'=e.ip THEN nullif(a.payload->>'country','') END,e.pinned_country,e.payload->>'country','') END AS observed_country
  FROM node_explorer_node_registry n
  LEFT JOIN node_explorer_connectivity c USING(identity)
  LEFT JOIN node_explorer_exits e USING(identity)
