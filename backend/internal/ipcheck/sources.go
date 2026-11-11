@@ -30,6 +30,9 @@ type Client struct {
 	// a two-second tolerance used to abandon nearly every multi-source lookup
 	// and the missing type evidence then stayed missing for a whole day.
 	ProviderWait time.Duration
+	// Pace overrides the default 1500ms spacing between requests to the same quota key.
+	// Used in tests and low-latency environments to eliminate simulated sleep delays.
+	Pace time.Duration
 	// Providers restricts the fan-out to the given sources, in the order they
 	// are queried. Empty means every known source. Sources without credentials
 	// can never answer, so a deployment is expected to narrow this list instead
@@ -281,6 +284,9 @@ func (c *Client) lookup(ctx context.Context, provider, ip string) Evidence {
 	// the upstream instead of a fixed interval. Without this the last request
 	// of a window and the first of the next land together and one of them 429s.
 	pace := 1500 * time.Millisecond
+	if c.Pace > 0 {
+		pace = c.Pace
+	}
 	if err == nil {
 		if d, ok := quotaHeaders(resp.Header, pace); ok {
 			pace = d

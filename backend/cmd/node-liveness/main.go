@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/liveness"
+	"github.com/cytusc/node_list/backend/internal/runtimeenv"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,6 +42,7 @@ func main() {
 func run() error {
 	health := flag.Bool("health", false, "check independent liveness heartbeat")
 	flag.Parse()
+	runtimeenv.LoadEnv(runtimeenv.Root())
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	// pgx reads standard PG* variables, including TLS configuration. No business

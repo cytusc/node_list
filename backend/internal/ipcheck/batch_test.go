@@ -89,6 +89,7 @@ func TestAttributesWaveEquivalence(t *testing.T) {
 	ips := []string{"198.51.100.10", "198.51.100.11", "198.51.100.12"}
 	client := func(counter *atomic.Int32) *Client {
 		c := NewClient("", "", "registry", "")
+		c.Pace = time.Millisecond
 		c.HTTP = &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
 			// Lookup fans out over six sources concurrently, so the counter the
 			// mock increments must be atomic under -race.

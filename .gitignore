@@ -32,7 +32,12 @@ scripts/
 reports/.dsh-ops-update-651c76543915baf76d861d472449782f90e379dbb38b94f231c133d9b851a9da.lock
 
 backend/node-source
-
-/node-exit
-
-/backend/node-attributes
+backend/node-exit
+backend/node-attributes
+backend/node-liveness
+node-source
+node-exit
+node-attributes
+node-liveness
+报告.json
+.workbuddy-ai/*

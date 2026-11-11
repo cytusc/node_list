@@ -39,8 +39,6 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 # Standalone liveness starts a private kernel for each probe.
 FROM ghcr.io/xtls/xray-core:26.10.21 AS xray
 FROM metacubex/mihomo:v1.19.27 AS mihomo
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS probe-bin
-COPY --from=mihomo /mihomo /out/mihomo
 
 # PHP dependencies come from the lock file only, so editing a source file does
 # not invalidate this layer.
@@ -98,7 +96,7 @@ COPY --from=backend --chown=node:node /out/node-attributes /usr/local/bin/node-a
 COPY --from=backend --chown=node:node /out/node-exit /usr/local/bin/node-exit
 COPY --from=backend --chown=node:node /out/node-source /usr/local/bin/node-source
 COPY --from=backend --chown=node:node /out/node-liveness /usr/local/bin/node-liveness
-COPY --from=probe-bin --chown=node:node /out/mihomo /usr/local/bin/mihomo
+COPY --from=mihomo --chown=node:node /mihomo /usr/local/bin/mihomo
 COPY --from=xray --chown=node:node /usr/local/bin/xray /usr/local/bin/xray
 USER node
 EXPOSE 3001

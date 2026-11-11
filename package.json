@@ -10,6 +10,8 @@
     "dev:attributes": "go -C backend run ./cmd/node-attributes",
     "build:exit": "go -C backend build -o node-exit ./cmd/node-exit",
     "dev:exit": "go -C backend run ./cmd/node-exit",
+    "build:liveness": "go -C backend build -o node-liveness ./cmd/node-liveness",
+    "dev:liveness": "go -C backend run ./cmd/node-liveness",
     "build:source": "go -C backend build -o node-source ./cmd/node-source",
     "dev:source": "go -C backend run ./cmd/node-source",
     "start": "php webman/start.php start",

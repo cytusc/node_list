@@ -85,6 +85,7 @@ func TestNetworkTypeSourcesUseConfiguredCredentialsAndPublicDefaults(t *testing.
 	calls := map[string]int{}
 	var mu sync.Mutex
 	c := NewClient("", "", "registry-fixture", "abuse-fixture")
+	c.Pace = time.Millisecond
 	c.HTTP = &http.Client{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -133,6 +134,7 @@ func TestNetworkTypeSourcesUseConfiguredCredentialsAndPublicDefaults(t *testing.
 		t.Fatalf("incorrect optional source types: %+v", r)
 	}
 	public := NewClient("", "")
+	public.Pace = time.Millisecond
 	public.HTTP = c.HTTP
 	publicEvidence := public.Lookup(context.Background(), "8.8.8.8")
 	public.Lookup(context.Background(), "8.8.8.8")

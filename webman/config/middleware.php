@@ -2,11 +2,10 @@
 /**
  * 全局中间件。
  *
- * 全局访问日志；节点与监控路由另挂 Authenticate，登录端点限制尝试次数。
+ * 接口访问日志挂在 config/route.php 的 /api 路由组上，避免静态资源污染日志。
  */
 
 return [
     '' => [
-        app\middleware\AccessLog::class,
     ],
 ];

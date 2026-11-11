@@ -91,7 +91,7 @@ final class LiveResults
             Db::raw("(attributes->>'score')::double precision AS ip_score"),
             Db::raw("(attributes->>'humanPercent')::double precision AS human_percent"),
             Db::raw("attributes->'classification' AS classification"),
-            Db::raw("to_jsonb(ARRAY(SELECT jsonb_array_elements_text(coalesce(nullif(attributes->'attributes','null'::jsonb),'[]'::jsonb)))) AS ip_attributes"),
+            Db::raw("CASE WHEN jsonb_typeof(attributes->'attributes') = 'array' THEN attributes->'attributes' ELSE '[]'::jsonb END AS ip_attributes"),
             Db::raw("coalesce((connectivity->>'reachable')::boolean,false) AS reachable"),
             Db::raw("connectivity->>'error' AS connectivity_error"),
             Db::raw("connectivity->>'checkedAt' AS connectivity_at"),
