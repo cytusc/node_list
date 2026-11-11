@@ -1,14 +1,10 @@
-// Package domain holds the node model, the stable connection identities and the
-// shared result metadata. It mirrors the semantics of the previous JavaScript
-// server exactly: identities are persisted across deployments, so any change in
-// hashing or ordering would orphan the existing enrichment and retirement rows.
+// Package domain contains shared node JSON models and legacy share-link decoding.
 package domain
 
 import (
 	"encoding/json"
+
 	"github.com/cytusc/node_list/backend/internal/ipcheck"
-	"sort"
-	"strings"
 )
 
 // Detail is one upstream key/value summary row.
@@ -25,8 +21,8 @@ type Media struct {
 	Tag      string
 }
 
-// UnmarshalJSON accepts platform/Platform and tag/Tag while keeping the original
-// payload so snapshots round-trip byte for byte.
+// UnmarshalJSON accepts platform/Platform and tag/Tag while preserving
+// the original upstream payload.
 func (m *Media) UnmarshalJSON(data []byte) error {
 	m.raw = append(json.RawMessage(nil), data...)
 	var lower struct {
@@ -51,7 +47,7 @@ func (m *Media) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON re-emits the original bytes; snapshots must not be normalised.
+// MarshalJSON re-emits the original bytes; upstream payloads keep their original shape.
 func (m Media) MarshalJSON() ([]byte, error) {
 	if len(m.raw) > 0 {
 		return m.raw, nil
@@ -70,22 +66,28 @@ type IPPureResult struct {
 	CheckedAt string `json:"checkedAt"`
 	Attempts  int    `json:"attempts"`
 
-	Status                string   `json:"status,omitempty"`
-	IP                    string   `json:"ip,omitempty"`
-	ASN                   string   `json:"asn,omitempty"`
-	Organization          string   `json:"asnOrganization,omitempty"`
-	Source                string   `json:"source,omitempty"`
-	Attributes            []string `json:"attributes,omitempty"`
-	HumanPercent          *float64 `json:"humanPercent,omitempty"`
-	BotPercent            *float64 `json:"botPercent,omitempty"`
-	TrafficRatioStatus    string   `json:"trafficRatioStatus,omitempty"`
-	TrafficRatioError     string   `json:"trafficRatioError,omitempty"`
-	RiskQueryStatus       string   `json:"riskQueryStatus,omitempty"`
-	RiskQueryError        string   `json:"riskQueryError,omitempty"`
-	RiskQueryCheckedAt    string   `json:"riskQueryCheckedAt,omitempty"`
-	TrafficRatioCheckedAt string   `json:"trafficRatioCheckedAt,omitempty"`
-	Score                 float64  `json:"score,omitempty"`
-	Label                 string   `json:"label,omitempty"`
+	Status             string   `json:"status,omitempty"`
+	IP                 string   `json:"ip,omitempty"`
+	ASN                string   `json:"asn,omitempty"`
+	Organization       string   `json:"asnOrganization,omitempty"`
+	Source             string   `json:"source,omitempty"`
+	Attributes         []string `json:"attributes,omitempty"`
+	HumanPercent       *float64 `json:"humanPercent,omitempty"`
+	BotPercent         *float64 `json:"botPercent,omitempty"`
+	TrafficRatioStatus string   `json:"trafficRatioStatus,omitempty"`
+	TrafficRatioError  string   `json:"trafficRatioError,omitempty"`
+	// RiskQueryStatus is the outcome of the last attempt; RiskQueryError is its
+	// reason. The verdict below keeps its own timestamps, so a refusal never
+	// makes an older answer look freshly checked: RiskQueryCheckedAt is when a
+	// risk answer was actually obtained, RiskQueryAttemptAt is when the last
+	// attempt — successful or not — finished.
+	RiskQueryStatus       string  `json:"riskQueryStatus,omitempty"`
+	RiskQueryError        string  `json:"riskQueryError,omitempty"`
+	RiskQueryCheckedAt    string  `json:"riskQueryCheckedAt,omitempty"`
+	RiskQueryAttemptAt    string  `json:"riskQueryAttemptAt,omitempty"`
+	TrafficRatioCheckedAt string  `json:"trafficRatioCheckedAt,omitempty"`
+	Score                 float64 `json:"score,omitempty"`
+	Label                 string  `json:"label,omitempty"`
 
 	Country       string `json:"country,omitempty"`
 	AddressFamily int    `json:"addressFamily,omitempty"`
@@ -118,7 +120,7 @@ type ExitIPAttempt struct {
 	Code      string `json:"code,omitempty"`
 }
 
-// Node is one detected connection inside a snapshot.
+// Node describes a connection and its current observed facts.
 type Node struct {
 	shape jsonShape
 
@@ -130,55 +132,37 @@ type Node struct {
 	SNI      string `json:"sni,omitempty"`
 	// Programmatically created nodes render TLS/UDP/Speed by default. Decoded
 	// nodes additionally preserve the source's absent/zero/null distinctions.
-	TLS            bool        `json:"tls"`
-	Reality        bool        `json:"reality,omitempty"`
-	UDP            bool        `json:"udp"`
-	Network        string      `json:"network,omitempty"`
-	Speed          float64     `json:"speed"`
-	Country        string      `json:"country,omitempty"`
-	ClaimedCountry string      `json:"claimedCountry,omitempty"`
-	IP             string      `json:"ip,omitempty"`
-	IPRisk         string      `json:"ipRisk,omitempty"`
-	Media          []Media     `json:"media,omitempty"`
-	SubTag         string      `json:"subTag,omitempty"`
-	Details        []Detail    `json:"details,omitempty"`
-	RawLink        string      `json:"rawLink,omitempty"`
-	RawConfig      ProxyConfig `json:"rawConfig,omitempty"`
+	TLS            bool     `json:"tls"`
+	Reality        bool     `json:"reality,omitempty"`
+	UDP            bool     `json:"udp"`
+	Network        string   `json:"network,omitempty"`
+	Speed          float64  `json:"speed"`
+	Country        string   `json:"country,omitempty"`
+	ClaimedCountry string   `json:"claimedCountry,omitempty"`
+	IP             string   `json:"ip,omitempty"`
+	IPRisk         string   `json:"ipRisk,omitempty"`
+	Media          []Media  `json:"media,omitempty"`
+	SubTag         string   `json:"subTag,omitempty"`
+	Details        []Detail `json:"details,omitempty"`
+	RawLink        string   `json:"rawLink,omitempty"`
+	// GeneratedLink is converted from config only when no upstream URI exists.
+	GeneratedLink string      `json:"generatedLink,omitempty"`
+	RawConfig     ProxyConfig `json:"rawConfig,omitempty"`
 
-	// Enrichment and presentation state. Never part of a snapshot fingerprint.
+	// Enrichment and presentation state. Excluded from connection deduplication.
 	IPPure       *IPPureResult      `json:"ippure,omitempty"`
 	Connectivity *ConnectivityState `json:"connectivity,omitempty"`
 	Exit         *ExitState         `json:"exit,omitempty"`
 	Lifecycle    *LifecycleState    `json:"lifecycle,omitempty"`
 
-	// Runtime coordinates. The aggregate view publishes the batch each node
-	// came from, so those three are pointers and stay absent from a
-	// single-batch view — the JavaScript store only attaches them while folding.
-	SnapshotID *int   `json:"snapshotId,omitempty"`
 	Index      int    `json:"-"`
+	AddedAt    string `json:"addedAt,omitempty"`
 	CheckedAt  string `json:"checkedAt,omitempty"`
 	SpeedTest  *bool  `json:"speedTest,omitempty"`
 	MediaCheck *bool  `json:"mediaCheck,omitempty"`
 }
 
-// Batch reports the originating snapshot id, or 0 outside the aggregate view.
-func (n Node) Batch() int {
-	if n.SnapshotID == nil {
-		return 0
-	}
-	return *n.SnapshotID
-}
-
-// SpeedTested reports whether the originating batch ran a speed test. Outside
-// the aggregate view the flag is unknown and reported as false.
-func (n Node) SpeedTested() bool { return n.SpeedTest != nil && *n.SpeedTest }
-
-// MediaChecked reports whether the originating batch ran a media check.
-func (n Node) MediaChecked() bool { return n.MediaCheck != nil && *n.MediaCheck }
-
-// ProxyConfig is a Mihomo outbound definition. Keeping it as an ordered-free
-// map is deliberate: Go marshals map keys sorted, which reproduces the
-// canonicalisation the JavaScript identity used.
+// ProxyConfig is the upstream proxy configuration.
 type ProxyConfig map[string]any
 
 // UnmarshalJSON accepts a port published as either a string or a number.
@@ -225,19 +209,6 @@ func (n Node) MarshalJSON() ([]byte, error) {
 }
 
 // ClearCredentials removes both the values and their JSON presence. Public
-// responses and snapshot identities must exclude even empty credential fields.
-func (n *Node) ClearCredentials() {
-	n.RawLink = ""
-	n.RawConfig = nil
-	for i, f := range nodeJSONFields {
-		if f.name == "rawLink" || f.name == "rawConfig" {
-			bit := uint64(1) << i
-			n.shape.present &^= bit
-			n.shape.nulls &^= bit
-		}
-	}
-}
-
 func (r *IPPureResult) UnmarshalJSON(data []byte) error {
 	type plain IPPureResult
 	var decoded plain
@@ -273,106 +244,8 @@ func (r IPPureResult) MarshalJSON() ([]byte, error) {
 	return marshalJSONShape(plain(r), shape, ippureJSONFields)
 }
 
-// Snapshot is one detection batch.
-type Snapshot struct {
-	ID         int    `json:"-"`
-	CheckedAt  string `json:"checkedAt,omitempty"`
-	SpeedTest  bool   `json:"speedTest"`
-	MediaCheck bool   `json:"mediaCheck"`
-	Nodes      []Node `json:"nodes"`
-
-	// SourceWarning is surfaced to the UI when the upstream files were unreadable.
-	SourceWarning string `json:"sourceWarning,omitempty"`
-	// BatchCount is filled by the aggregate projection.
-	BatchCount int `json:"batchCount,omitempty"`
-}
-
-// Clone returns a shallow copy with independent node backing storage so callers
-// can attach enrichment without mutating a shared cache.
-func (s Snapshot) Clone() Snapshot {
-	out := s
-	out.Nodes = make([]Node, len(s.Nodes))
-	copy(out.Nodes, s.Nodes)
-	return out
-}
-
-// Fields is the archived field whitelist: results files carry extra upstream
-// columns that must not become part of a stored snapshot.
-var Fields = []string{
-	"name", "baseName", "type", "server", "port", "sni", "tls", "reality",
-	"udp", "network", "speed", "country", "ip", "ipRisk", "media", "subTag",
-	"details", "rawLink", "rawConfig",
-}
-
-// MediaPlatform mirrors the upstream accessor that tolerates both key casings.
-func MediaPlatform(m Media) string {
-	if m.Platform != "" {
-		return m.Platform
-	}
-	return m.Tag
-}
-
-func MediaValue(m Media) string {
-	if m.Tag != "" {
-		return m.Tag
-	}
-	return m.Platform
-}
-
-// MediaPlatforms lists the distinct platforms with at least one successful tag.
-func MediaPlatforms(n Node) []string {
-	seen := make(map[string]struct{}, len(n.Media))
-	out := make([]string, 0, len(n.Media))
-	for _, m := range n.Media {
-		p := MediaPlatform(m)
-		if p == "" || MediaValue(m) == "" {
-			continue
-		}
-		if _, ok := seen[p]; ok {
-			continue
-		}
-		seen[p] = struct{}{}
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// HasMedia reports whether the node unlocked the given platform.
-func HasMedia(n Node, platform string) bool {
-	for _, m := range n.Media {
-		if MediaPlatform(m) == platform && MediaValue(m) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// ApplyExitCountry replaces the source-claimed region with the verified exit
-// country, preserving the original claim for the mismatch badge.
-func ApplyExitCountry(n *Node) {
-	country := ""
-	if n.IPPure != nil {
-		country = n.IPPure.Country
-	}
-	if country == "" || len(country) != 2 || !isAlpha(country) {
-		return
-	}
-	verified := strings.ToUpper(country)
-	if n.Country != "" && strings.ToUpper(n.Country) != verified {
-		n.ClaimedCountry = n.Country
-		n.Country = verified
-	} else if n.Country == "" {
-		n.Country = verified
-	}
-}
-
-func isAlpha(s string) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
-			return false
-		}
-	}
-	return true
+// SourceBatch is a transient upstream fetch; only its nodes enter ingestion.
+type SourceBatch struct {
+	CheckedAt string `json:"checkedAt,omitempty"`
+	Nodes     []Node `json:"nodes"`
 }

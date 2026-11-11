@@ -1,5 +1,5 @@
 import { fulfillRoute } from "./results-fixture";
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./authenticated-fixture";
 
 test("shows business usage independently of residential votes and company type", async ({
   page,

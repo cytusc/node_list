@@ -1,0 +1,25 @@
+{
+  "appliedAt": "2026-10-26 12:41:49.682431+00",
+  "before": {
+    "total": 9005,
+    "available": 903
+  },
+  "backupAt": "2026-10-26 12:39:33.731895+00",
+  "deleted": {
+    "node_explorer_connectivity": 349,
+    "node_explorer_exits": 941,
+    "node_explorer_fast_results": 349,
+    "node_explorer_probe_results": 143,
+    "node_explorer_current_nodes": 2,
+    "node_explorer_work": 7220,
+    "node_explorer_ippure_results": 0,
+    "node_explorer_snapshot_members": 6,
+    "node_explorer_node_registry": 3288
+  },
+  "affected_snapshots": 5,
+  "after": {
+    "total": 5717,
+    "available": 897,
+    "missing": 0
+  }
+}

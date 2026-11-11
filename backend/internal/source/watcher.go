@@ -32,6 +32,8 @@ type Watcher struct {
 	sweep  time.Duration
 	ingest func(context.Context) error
 
+	cancel  context.CancelFunc
+	done    chan struct{}
 	runMu   sync.Mutex
 	mu      sync.Mutex
 	timer   *time.Timer
@@ -82,7 +84,10 @@ func (w *Watcher) Start(ctx context.Context) error {
 		watched[dir] = struct{}{}
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+	w.cancel, w.done = cancel, make(chan struct{})
 	go func() {
+		defer close(w.done)
 		defer observer.Close()
 		defer func() {
 			w.mu.Lock()
@@ -166,3 +171,14 @@ func (w *Watcher) Stats() (runs, events int64, lastRun time.Time) {
 // Trigger runs ingestion immediately. Used by the polling fallback when
 // inotify is unavailable.
 func (w *Watcher) Trigger(ctx context.Context) { w.trigger(ctx) }
+
+// Close cancels file events and drains callbacks before ownership is released.
+func (w *Watcher) Close() {
+	if w.cancel == nil {
+		return
+	}
+	w.cancel()
+	<-w.done
+	w.runMu.Lock()
+	w.runMu.Unlock()
+}

@@ -2,7 +2,7 @@ import type { Route } from "@playwright/test";
 import {
   paginateResults,
   parseResultsQuery,
-} from "../legacy/node-server/results-query.js";
+} from "./results-query-fixture.js";
 
 export function fulfillRoute(
   route: Route,

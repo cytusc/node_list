@@ -1,0 +1,8 @@
+{
+  "name": "node-source-converter",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.14.0" },
+  "scripts": { "test": "node --test converter.test.mjs" },
+  "dependencies": { "canonicalize": "2.1.0", "dotenv": "16.4.7", "yaml": "2.8.1" }
+}

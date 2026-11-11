@@ -1,3 +1,5 @@
+import { apiFetch } from "@/lib/api";
+import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
@@ -8,11 +10,9 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
-  Clock3,
   Copy,
   ExternalLink,
   Globe2,
-  Info,
   Layers3,
   ListFilter,
   Loader2,
@@ -37,6 +37,7 @@ import {
   type PaginationState,
 } from "@tanstack/react-table";
 import { toast, Toaster } from "sonner";
+import { CopyNodeButton } from "@/components/copy-node-button";
 import { copyText } from "@/lib/clipboard";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -50,13 +51,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
-import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
@@ -66,243 +60,32 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FilterMenu } from "@/components/filter-menu";
+import { NodeDetailSheet } from "@/components/node-detail-sheet";
+import {
+  Flag,
+  Features,
+  Speed,
+  NodeTimes,
+  IPPureSummary,
+  IPPureMetric,
+  ippureMetrics,
+  type IPPureMetricName,
+} from "@/components/node-table-helpers";
 import {
   countryName,
-  detailLabels,
   mediaPlatform,
   mediaValue,
   plainName,
+  protocolLabel,
+  lastCheckedAt,
   platforms,
   speedParts,
   timeLabel,
   type NodeRecord,
   type IPPureResult,
-  type Snapshot,
+  type NodeResults,
 } from "@/lib/data";
-import { flagUrl } from "@/lib/flags";
 
-type IPPureMetricName =
-  "asnOrganization" | "source" | "attributes" | "score" | "ratio";
-const ippureMetrics: {
-  key: IPPureMetricName;
-  label: string;
-  column: string;
-}[] = [
-  { key: "asnOrganization", label: "ASN 组织", column: "asnOrganization" },
-  { key: "source", label: "IP 来源", column: "ipSource" },
-  { key: "attributes", label: "IP 属性", column: "ipAttributes" },
-  { key: "score", label: "IPPure 系数", column: "ippure" },
-  { key: "ratio", label: "人机流量比", column: "trafficRatio" },
-];
-const ipTypeProviders: Record<string, string> = {
-  ippure: "IPPure",
-  ipinfo: "IPinfo",
-  "ip-api": "IP-API",
-  ipregistry: "IPregistry",
-  abuseipdb: "AbuseIPDB",
-  ipapi: "ipapi.is",
-  ip2location: "IP2Location",
-};
-
-function IPTypeDetails({ result }: { result?: IPPureResult }) {
-  const classification = result?.classification;
-  if (!classification) return null;
-  const types = Object.keys(ipTypeProviders).map((provider) => ({
-    provider,
-    ...classification.types?.find((type) => type.provider === provider),
-  }));
-  return (
-    <section aria-label="IP 类型数据来源">
-      <h3>IP 类型属性</h3>
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-sm">
-          <thead className="text-muted-foreground">
-            <tr>
-              <th scope="col" className="py-2 pr-3 font-medium">
-                数据库
-              </th>
-              <th scope="col" className="py-2 pr-3 font-medium">
-                使用类型
-              </th>
-              <th scope="col" className="py-2 font-medium">
-                公司类型
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {types.map((type) => (
-              <tr key={type.provider} className="border-t border-border">
-                <th scope="row" className="py-2 pr-3 font-medium">
-                  {ipTypeProviders[type.provider] || type.provider}
-                </th>
-                <td className="py-2 pr-3">
-                  {type.usageType ||
-                    (type.companyType ? "—" : "未取得有效类型")}
-                </td>
-                <td className="py-2">{type.companyType || "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <p className="detail-note">
-        各数据库独立判断使用类型和公司类型；来源不一致时保留各自结果。未取得有效类型表示尚未采集、请求失败或未返回类型，不参与汇总判断。
-      </p>
-    </section>
-  );
-}
-
-function IPPureMetric({
-  result,
-  metric,
-}: {
-  result?: IPPureResult;
-  metric: IPPureMetricName;
-}) {
-  if (metric === "attributes" && result?.classification) {
-    const sources = result.classification.types
-      ?.map(
-        (type) =>
-          `${ipTypeProviders[type.provider] || type.provider}：使用类型 ${type.usageType || (type.companyType ? "—" : "未取得有效类型")}；公司类型 ${type.companyType || "—"}`,
-      )
-      .join("\n");
-    return (
-      <span title={sources}>
-        {result.attributes?.join(" · ") || "类型未知"}
-      </span>
-    );
-  }
-  if (result?.status !== "success")
-    return (
-      <span className="text-muted-foreground" title={result?.error}>
-        {result?.status === "unsupported"
-          ? result.failureStage === "share-link"
-            ? "连接配置不支持"
-            : "仅 IPv6，暂无评分"
-          : result?.status === "error"
-            ? result.ip
-              ? "风险查询失败"
-              : result.githubReachable
-                ? "节点可达，探测受限"
-                : result.failureStage === "ippure-query"
-                  ? "风险查询失败"
-                  : "出口探测失败"
-            : "待检测"}
-      </span>
-    );
-  if (metric === "asnOrganization")
-    return <span>{result.asnOrganization || "待补采"}</span>;
-  if (metric === "source") return <span>{result.source || "—"}</span>;
-  if (metric === "attributes")
-    return <span>{result.attributes?.join(" · ") || "—"}</span>;
-  if (metric === "score")
-    return (
-      <div className="ippure-metric">
-        <span>
-          {result.score}% {result.label}
-        </span>
-        <div
-          className="ippure-list-scale"
-          role="img"
-          aria-label={`IPPure 系数 ${result.score}% ${result.label}，越低越纯净`}
-        >
-          <span style={{ left: `${result.score}%` }} />
-        </div>
-      </div>
-    );
-  if (result.humanPercent == null || result.botPercent == null)
-    return (
-      <span className="text-muted-foreground">
-        {trafficRatioMessage(result.trafficRatioStatus)}
-      </span>
-    );
-  return (
-    <div className="ippure-metric">
-      <div className="ippure-ratio-values">
-        <span>human {result.humanPercent}%</span>
-        <span>bot {result.botPercent}%</span>
-      </div>
-      <div
-        className="ippure-ratio-track"
-        role="img"
-        aria-label={`人机流量比 human ${result.humanPercent}% / bot ${result.botPercent}%`}
-      >
-        <span style={{ left: `${result.humanPercent}%` }} />
-      </div>
-    </div>
-  );
-}
-
-function trafficRatioMessage(status?: IPPureResult["trafficRatioStatus"]) {
-  if (status === "query-failed") return "查询失败，稍后重试";
-  if (status === "no-data") return "上游暂无统计";
-  return "统计数据不足";
-}
-
-function IPPureSummary({ result }: { result?: IPPureResult }) {
-  return (
-    <div className="ippure-summary">
-      {ippureMetrics.map(({ key, label }) => (
-        <div className="ippure-summary-row" key={key}>
-          <span>{label}</span>
-          <div>
-            <IPPureMetric result={result} metric={key} />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function Flag({ code }: { code?: string }) {
-  const url = flagUrl(code);
-  return url ? (
-    <img
-      src={url}
-      alt={countryName(code)}
-      className="node-flag"
-      loading="lazy"
-      width="25"
-      height="18"
-    />
-  ) : (
-    <Globe2 aria-label="未知地区" className="size-5 text-muted-foreground" />
-  );
-}
-function Features({ node }: { node: NodeRecord }) {
-  return (
-    <div className="feature-tags">
-      {node.reality ? (
-        <span className="feature-tag reality">Reality</span>
-      ) : (
-        node.tls && <span className="feature-tag tls">TLS</span>
-      )}
-      {node.udp && <span className="feature-tag">UDP</span>}
-      {!node.tls && !node.reality && !node.udp && (
-        <span className="text-muted-foreground">—</span>
-      )}
-    </div>
-  );
-}
-function Speed({ value, max }: { value: number; max: number }) {
-  const s = speedParts(value);
-  return (
-    <div className="speed-cell">
-      <span className="speed-number">
-        {s.value} <small>{s.unit}</small>
-      </span>
-      {value > 0 && (
-        <span className="speed-track" aria-hidden="true">
-          <span
-            style={{
-              width: `${Math.max(2, Math.min(100, (value / (max || 1)) * 100))}%`,
-            }}
-          />
-        </span>
-      )}
-    </div>
-  );
-}
 async function copy(text: string, source: HTMLElement) {
   try {
     await copyText(text, source);
@@ -317,30 +100,32 @@ const columnLabels: Record<string, string> = {
   type: "协议 / 传输",
   media: "服务解锁",
   speed: "下载速度",
+  time: "时间",
+  copy: "复制",
   ...Object.fromEntries(
     ippureMetrics.map(({ column, label }) => [column, label]),
   ),
 };
 const columnWidths: Record<string, number> = {
-  country: 130,
+  country: 100,
   name: 155,
-  type: 130,
-  asnOrganization: 160,
-  ipSource: 100,
-  ipAttributes: 110,
-  ippure: 150,
-  trafficRatio: 205,
-  media: 160,
-  speed: 125,
-  actions: 44,
+  type: 98,
+  asnOrganization: 128,
+  ipSource: 80,
+  ipAttributes: 95,
+  ippure: 100,
+  trafficRatio: 120,
+  media: 120,
+  speed: 100,
+  time: 150,
+  copy: 48,
 };
 const emptyNodes: NodeRecord[] = [];
 
 export default function App() {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [results, setResults] = useState<NodeResults | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [errorCode, setErrorCode] = useState("");
   const [query, setQuery] = useState("");
   const [countries, setCountries] = useState<string[]>([]);
   const [types, setTypes] = useState<string[]>([]);
@@ -349,6 +134,8 @@ export default function App() {
   const [ipAttributes, setIpAttributes] = useState<string[]>([]);
   const [media, setMedia] = useState<string[]>([]);
   const [minSpeed, setMinSpeed] = useState("");
+  const debouncedQuery = useDebouncedValue(query);
+  const debouncedMinSpeed = useDebouncedValue(minSpeed);
   const [selected, setSelected] = useState<NodeRecord | null>(null);
   const [sorting, setSorting] = useState<SortingState>([
     { id: "preferred", desc: true },
@@ -363,16 +150,18 @@ export default function App() {
   });
   const activeRequest = useRef<AbortController | null>(null);
   const requestPending = useRef(false);
-  const nodes = snapshot?.nodes || emptyNodes;
+  const pollFailures = useRef(0);
+  const nextPollAt = useRef(0);
+  const nodes = results?.nodes || emptyNodes;
   const criteria = JSON.stringify({
-    query,
+    query: debouncedQuery,
     countries,
     types,
     networks,
     ipSources,
     ipAttributes,
     media,
-    minSpeed,
+    minSpeed: debouncedMinSpeed,
     sorting,
   });
   const [pageState, setPageState] = useState({
@@ -389,7 +178,7 @@ export default function App() {
     page: String(pageIndex + 1),
     limit: String(pageSize),
   });
-  if (query.trim()) params.set("q", query.trim());
+  if (debouncedQuery.trim()) params.set("q", debouncedQuery.trim());
   for (const [key, values] of [
     ["country", countries],
     ["type", types],
@@ -400,7 +189,7 @@ export default function App() {
   ] as const) {
     if (values.length) params.set(key, values.join(","));
   }
-  if (minSpeed) params.set("minSpeed", minSpeed);
+  if (debouncedMinSpeed) params.set("minSpeed", debouncedMinSpeed);
   if (sorting[0]) {
     params.set("sort", sorting[0].id);
     params.set("direction", sorting[0].desc ? "desc" : "asc");
@@ -417,43 +206,87 @@ export default function App() {
 
   const load = useCallback(
     async (announce = false, background = false) => {
-      if (background && (document.hidden || requestPending.current)) return;
+      if (
+        background &&
+        (document.hidden ||
+          requestPending.current ||
+          Date.now() < nextPollAt.current)
+      )
+        return;
       requestPending.current = true;
       activeRequest.current?.abort();
       const controller = new AbortController();
       activeRequest.current = controller;
       if (!background) setLoading(true);
       try {
-        const response = await fetch(resultsUrl, {
+        const response = await apiFetch(resultsUrl, {
+          cache: "no-store",
           signal: controller.signal,
         });
         const body = await response.json();
         if (controller.signal.aborted) return;
         if (!response.ok) {
-          setErrorCode(body.code || "");
           throw new Error(body.error || "读取失败，请稍后重试");
         }
-        if (!Array.isArray(body.nodes))
-          throw new Error("结果格式无效，请检查检测结果文件");
-        setSnapshot(body);
-        setPageState({
-          pageIndex: body.page - 1,
-          pageSize: body.limit,
-          criteria,
+        if (
+          !body ||
+          !Array.isArray(body.nodes) ||
+          !body.nodes.every(
+            (node: unknown) =>
+              node !== null && typeof node === "object" && !Array.isArray(node),
+          ) ||
+          !body.summary ||
+          !body.facets ||
+          ![
+            "country",
+            "type",
+            "network",
+            "ipSource",
+            "ipAttributes",
+            "media",
+          ].every((key) => Array.isArray(body.facets[key])) ||
+          !Number.isSafeInteger(body.page) ||
+          body.page < 1 ||
+          !Number.isSafeInteger(body.limit) ||
+          body.limit < 1
+        )
+          throw new Error("接口返回的节点数据格式无效");
+        pollFailures.current = 0;
+        nextPollAt.current = 0;
+        setResults((previous) =>
+          JSON.stringify(previous) === JSON.stringify(body) ? previous : body,
+        );
+        setPageState((previous) => {
+          const next = {
+            pageIndex: body.page - 1,
+            pageSize: body.limit,
+            criteria,
+          };
+          return previous.pageIndex === next.pageIndex &&
+            previous.pageSize === next.pageSize &&
+            previous.criteria === criteria
+            ? previous
+            : next;
         });
         if (!background) setSelected(null);
         setError("");
-        setErrorCode("");
         if (!body.speedTest && sorting[0]?.id === "speed")
           setSorting([{ id: "name", desc: false }]);
-        if (!body.mediaCheck) setMedia([]);
+        if (!body.mediaCheck)
+          setMedia((previous) => (previous.length ? [] : previous));
         if (!body.speedTest) setMinSpeed("");
-        if (announce) toast.success("已刷新聚合检测结果");
+        if (announce) toast.success("已刷新可用节点");
       } catch (e) {
-        if (!controller.signal.aborted)
-          setError(
-            e instanceof Error ? e.message : "无法连接本地服务，请稍后重试",
-          );
+        if (!controller.signal.aborted) {
+          pollFailures.current = Math.min(pollFailures.current + 1, 4);
+          nextPollAt.current =
+            Date.now() + Math.min(5000 * 2 ** pollFailures.current, 60000);
+          if (!background) {
+            setResults(null);
+            setSelected(null);
+          }
+          setError(e instanceof Error ? e.message : "无法连接服务，请稍后重试");
+        }
       } finally {
         if (activeRequest.current === controller) {
           requestPending.current = false;
@@ -472,16 +305,16 @@ export default function App() {
     };
   }, [load]);
 
-  const maxSpeed = snapshot?.summary.maxSpeed || 0;
-  const summary = snapshot?.summary || { countries: 0, median: 0 };
-  const totalNodes = snapshot?.totalNodes || 0;
-  const total = snapshot?.total || 0;
-  const regionOptions = snapshot?.facets.country || [];
-  const typeOptions = snapshot?.facets.type || [];
-  const networkOptions = snapshot?.facets.network || [];
-  const ipSourceOptions = snapshot?.facets.ipSource || [];
-  const ipAttributeOptions = snapshot?.facets.ipAttributes || [];
-  const mediaOptions = (snapshot?.facets.media || []).map((option) => ({
+  const maxSpeed = results?.summary.maxSpeed || 0;
+  const summary = results?.summary || { countries: 0, median: 0 };
+  const totalNodes = results?.totalNodes || 0;
+  const total = results?.total || 0;
+  const regionOptions = results?.facets.country || [];
+  const typeOptions = results?.facets.type || [];
+  const networkOptions = results?.facets.network || [];
+  const ipSourceOptions = results?.facets.ipSource || [];
+  const ipAttributeOptions = results?.facets.ipAttributes || [];
+  const mediaOptions = (results?.facets.media || []).map((option) => ({
     ...option,
     label: platforms[option.value] || option.value,
   }));
@@ -550,7 +383,7 @@ export default function App() {
               variant="outline"
               className={`protocol-badge protocol-${row.original.type}`}
             >
-              {row.original.type.toUpperCase()}
+              {protocolLabel(row.original.type)}
             </Badge>
             <small>{row.original.network?.toUpperCase() || "—"}</small>
           </div>
@@ -574,7 +407,7 @@ export default function App() {
           <IPPureMetric result={row.original.ippure} metric={key} />
         ),
       })),
-      ...(snapshot?.mediaCheck
+      ...(results?.mediaCheck
         ? [
             {
               id: "media",
@@ -597,7 +430,7 @@ export default function App() {
             },
           ]
         : []),
-      ...(snapshot?.speedTest
+      ...(results?.speedTest
         ? [
             {
               accessorKey: "speed",
@@ -609,27 +442,20 @@ export default function App() {
           ]
         : []),
       {
-        id: "actions",
-        header: "",
+        id: "time",
+        header: "时间",
+        enableSorting: false,
+        cell: ({ row }) => <NodeTimes node={row.original} />,
+      },
+      {
+        id: "copy",
+        header: "复制",
         enableSorting: false,
         enableHiding: false,
-        cell: ({ row }) => (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="detail-button"
-            aria-label={`查看 ${plainName(row.original)} 详情`}
-            onClick={(e) => {
-              e.stopPropagation();
-              setSelected(row.original);
-            }}
-          >
-            <ArrowUpRight className="size-4" />
-          </Button>
-        ),
+        cell: ({ row }) => <CopyNodeButton node={row.original} />,
       },
     ],
-    [maxSpeed, snapshot?.speedTest, snapshot?.mediaCheck],
+    [maxSpeed, results?.speedTest, results?.mediaCheck],
   );
   const table = useReactTable({
     data: nodes,
@@ -656,7 +482,11 @@ export default function App() {
     <div className="app-shell">
       <header className="site-header">
         <div className="header-inner">
-          <a href="/" className="brand" aria-label="节点浏览器首页">
+          <a
+            href="/"
+            className="brand"
+            aria-label="Node Explorer 节点浏览器首页"
+          >
             <span className="brand-mark">
               <Network className="size-5" />
             </span>
@@ -702,30 +532,20 @@ export default function App() {
               <h1>
                 节点浏览器
                 <span className="title-count">
-                  {snapshot ? totalNodes : "—"}
+                  {results ? totalNodes : "—"}
                 </span>
               </h1>
-              <p>找到适合你的连接。</p>
-            </div>
-            <div className="snapshot-time">
-              <Clock3 className="size-3.5" />
-              <span>
-                最近检测{" "}
-                <time>
-                  {snapshot?.checkedAt ? timeLabel(snapshot.checkedAt) : "—"}
-                </time>
-                <small>北京时间</small>
-              </span>
+              <p>实时展示数据库中的可用节点。</p>
             </div>
           </div>
           <div className="summary-line">
             <span>
               <Globe2 />
-              覆盖 <strong>{snapshot ? summary.countries : "—"}</strong> 个地区
+              覆盖 <strong>{results ? summary.countries : "—"}</strong> 个地区
             </span>
-            <i />
-            {snapshot?.speedTest ? (
+            {results?.speedTest ? (
               <>
+                <i />
                 <span>
                   <Zap />
                   最高速度 <strong>{speedParts(maxSpeed).value}</strong>{" "}
@@ -737,38 +557,17 @@ export default function App() {
                   {speedParts(summary.median).unit}
                 </span>
               </>
-            ) : (
-              <span>测速{snapshot ? "未开启" : "数据加载中"}</span>
-            )}
-            <span className="summary-note">
-              <Info className="size-3.5" />
-              {snapshot?.mediaCheck
-                ? "已启用服务解锁检测"
-                : snapshot
-                  ? "未启用服务解锁检测"
-                  : "正在读取检测结果"}
-            </span>
+            ) : null}
           </div>
         </section>
 
-        {snapshot?.sourceWarning && !error && (
-          <div role="status" className="error-banner">
-            <CircleAlert className="size-5 shrink-0" />
-            结果文件暂时无法读取，当前展示数据库中保存的检测结果。
-          </div>
-        )}
         {error && (
           <div role="alert" className="error-banner">
             <CircleAlert className="size-5 shrink-0" />
             <div>
-              <strong>
-                {snapshot
-                  ? "刷新失败，当前保留上次读取的结果"
-                  : errorCode === "NO_RESULTS"
-                    ? "尚无检测结果"
-                    : "无法读取检测结果"}
-              </strong>
+              <strong>{results ? "节点刷新失败" : "无法读取可用节点"}</strong>
               <p>{error}</p>
+              {results && <p>当前展示上次成功查询的数据，可能已发生变化。</p>}
             </div>
             <Button
               variant="outline"
@@ -823,7 +622,7 @@ export default function App() {
                 selected={ipAttributes}
                 onChange={setIpAttributes}
               />
-              {snapshot?.mediaCheck && (
+              {results?.mediaCheck && (
                 <FilterMenu
                   label="服务解锁"
                   icon={<Radio className="size-4" />}
@@ -832,7 +631,7 @@ export default function App() {
                   onChange={setMedia}
                 />
               )}
-              {snapshot?.speedTest && (
+              {results?.speedTest && (
                 <label className="speed-filter">
                   <Zap className="size-3.5" />
                   <input
@@ -874,7 +673,7 @@ export default function App() {
                   }}
                 >
                   <option value="preferred-desc">住宅 IP 优先</option>
-                  {snapshot?.speedTest && (
+                  {results?.speedTest && (
                     <>
                       <option value="speed-desc">速度最高</option>
                       <option value="speed-asc">速度最低</option>
@@ -1030,7 +829,12 @@ export default function App() {
                           <TableHead
                             key={h.id}
                             data-column={h.column.id}
-                            style={{ width: columnWidths[h.column.id] || 150 }}
+                            style={{
+                              width:
+                                h.column.id === "name"
+                                  ? undefined
+                                  : columnWidths[h.column.id] || 150,
+                            }}
                           >
                             {h.column.getCanSort() ? (
                               <button
@@ -1101,16 +905,19 @@ export default function App() {
                       {row.original.server}:{row.original.port}
                     </span>
                     <IPPureSummary result={row.original.ippure} />
+                    {table.getColumn("time")?.getIsVisible() && (
+                      <NodeTimes node={row.original} />
+                    )}
                     <div className="mobile-node-bottom">
                       <div>
                         <Badge variant="outline" className="protocol-badge">
-                          {row.original.type.toUpperCase()}
+                          {protocolLabel(row.original.type)}
                         </Badge>
                         <span className="text-xs text-muted-foreground">
                           {countryName(row.original.country)}
                         </span>
                       </div>
-                      {snapshot?.speedTest && (
+                      {results?.speedTest && (
                         <Speed value={row.original.speed} max={maxSpeed} />
                       )}
                     </div>
@@ -1124,20 +931,18 @@ export default function App() {
                 <Search className="size-7" />
               </span>
               <h2>
-                {error && !snapshot
-                  ? "等待检测结果"
+                {error && !results
+                  ? "暂时无法加载节点"
                   : totalNodes
                     ? "没有匹配的节点"
-                    : snapshot?.checkedAt
-                      ? "暂无保留节点"
-                      : "尚无检测结果"}
+                    : "暂无可用节点"}
               </h2>
               <p>
-                {error && !snapshot
+                {error && !results
                   ? "连接恢复后，点击刷新重新读取。"
                   : totalNodes
                     ? "尝试减少筛选条件，或换一个关键词。"
-                    : "请在 subs-check 完成检测后刷新此页面。"}
+                    : "数据库中暂无可用节点，请稍后刷新。"}
               </p>
               {activeCount > 0 && (
                 <Button variant="outline" onClick={reset}>
@@ -1149,7 +954,7 @@ export default function App() {
           <div className="pagination-bar">
             <span>
               {total
-                ? `显示 ${((snapshot?.page || 1) - 1) * pageSize + 1}–${Math.min((snapshot?.page || 1) * pageSize, total)}，共 ${total} 个`
+                ? `显示 ${((results?.page || 1) - 1) * pageSize + 1}–${Math.min((results?.page || 1) * pageSize, total)}，共 ${total} 个`
                 : "显示 0 个节点"}
             </span>
             <div>
@@ -1195,233 +1000,14 @@ export default function App() {
           </div>
         </section>
       </main>
-      <Sheet
-        open={!!selected}
-        onOpenChange={(open) => {
-          if (!open) setSelected(null);
-        }}
-      >
-        <SheetContent className="node-sheet w-full sm:max-w-lg">
-          {selected && (
-            <>
-              <SheetHeader>
-                <div className="detail-region">
-                  <Flag code={selected.country} />
-                  {countryName(selected.country)}
-                  {selected.claimedCountry &&
-                    selected.country &&
-                    selected.claimedCountry.toUpperCase() !==
-                      selected.country.toUpperCase() && (
-                      <Badge
-                        variant="outline"
-                        className="border-amber-500 text-amber-600"
-                      >
-                        来源标注 {countryName(selected.claimedCountry)}
-                      </Badge>
-                    )}
-                </div>
-                <SheetTitle className="break-all text-xl">
-                  {plainName(selected)}
-                </SheetTitle>
-                <SheetDescription>
-                  最近检测 · {timeLabel(selected.checkedAt)}
-                </SheetDescription>
-              </SheetHeader>
-              <div className="detail-content">
-                <div className="detail-overview">
-                  <Badge variant="outline" className="protocol-badge">
-                    {selected.type.toUpperCase()}
-                  </Badge>
-                  <Features node={selected} />
-                  {(selected.speedTest ?? snapshot?.speedTest) && (
-                    <Speed value={selected.speed} max={maxSpeed} />
-                  )}
-                </div>
-                <h3>连接信息</h3>
-                <dl>
-                  {[
-                    ["完整名称", selected.name],
-                    ["服务器", selected.server],
-                    ["端口", selected.port],
-                    ["传输方式", selected.network],
-                    ["SNI", selected.sni],
-                    ["出口 IP", selected.ippure?.ip],
-                    ["上游检测 IP", selected.ip],
-                    ["来源标签", selected.subTag],
-                    ["IP 风险", selected.ipRisk],
-                  ]
-                    .filter(([, v]) => v)
-                    .map(([label, value]) => (
-                      <div className="detail-field" key={label}>
-                        <dt>{label}</dt>
-                        <dd>
-                          {value}
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="size-6 shrink-0"
-                            aria-label={`复制${label}`}
-                            onClick={(event) =>
-                              void copy(value!, event.currentTarget)
-                            }
-                          >
-                            <Copy className="size-3" />
-                          </Button>
-                        </dd>
-                      </div>
-                    ))}
-                </dl>
-                <p className="detail-note">
-                  <Info className="size-3.5" />
-                  TLS、UDP 等标签表示节点配置特性。
-                </p>
-                {!!selected.details?.length && (
-                  <>
-                    <h3>协议参数</h3>
-                    <dl>
-                      {selected.details.map((d, i) => (
-                        <div className="detail-field" key={`${d.k}-${i}`}>
-                          <dt>{detailLabels[d.k] || d.k}</dt>
-                          <dd>{d.v}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  </>
-                )}
-                <h3>节点检查</h3>
-                <dl>
-                  {[
-                    [
-                      "连通性",
-                      selected.connectivity
-                        ? selected.connectivity.reachable
-                          ? "可用"
-                          : selected.connectivity.error || "不可用"
-                        : "待检查",
-                    ],
-                    ["测活时间", timeLabel(selected.connectivity?.checkedAt)],
-                    ["出口检查时间", timeLabel(selected.exit?.checkedAt)],
-                    [
-                      "IP 属性时间",
-                      timeLabel(selected.ippure?.classification?.checkedAt),
-                    ],
-                  ].map(([label, value]) => (
-                    <div className="detail-field" key={label}>
-                      <dt>{label}</dt>
-                      <dd>{value}</dd>
-                    </div>
-                  ))}
-                </dl>
-                <h3>IPPure 检测</h3>
-                {selected.ippure?.ip && (
-                  <dl>
-                    <div className="detail-field">
-                      <dt>检测出口 IP</dt>
-                      <dd>{selected.ippure.ip}</dd>
-                    </div>
-                    {selected.ippure.exitIPSource && (
-                      <div className="detail-field">
-                        <dt>出口查询服务</dt>
-                        <dd>{selected.ippure.exitIPSource}</dd>
-                      </div>
-                    )}
-                  </dl>
-                )}
-                {selected.ippure?.status === "success" ? (
-                  <>
-                    <dl>
-                      {[
-                        ["ASN", selected.ippure.asn || "待补采"],
-                        [
-                          "ASN 组织",
-                          selected.ippure.asnOrganization || "待补采",
-                        ],
-                        [
-                          "出口国家",
-                          selected.ippure.country
-                            ? `${countryName(selected.ippure.country)}（${selected.ippure.country.toUpperCase()}）`
-                            : "待补采",
-                        ],
-                        [
-                          "人机流量比",
-                          selected.ippure.humanPercent == null
-                            ? trafficRatioMessage(
-                                selected.ippure.trafficRatioStatus,
-                              )
-                            : `human ${selected.ippure.humanPercent}% / bot ${selected.ippure.botPercent}%`,
-                        ],
-                        ["IP 来源", selected.ippure.source],
-                        ["IP 属性", selected.ippure.attributes?.join(" · ")],
-                        [
-                          "IPPure 系数",
-                          `${selected.ippure.score}% ${selected.ippure.label}`,
-                        ],
-                        ["检测时间", timeLabel(selected.ippure.checkedAt)],
-                      ].map(([label, value]) => (
-                        <div className="detail-field" key={label}>
-                          <dt>{label}</dt>
-                          <dd>{value}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                    <div
-                      className="ippure-scale"
-                      aria-label={`IPPure 系数 ${selected.ippure.score}%`}
-                    >
-                      <div className="ippure-track">
-                        <span style={{ left: `${selected.ippure.score}%` }} />
-                      </div>
-                      <div className="ippure-ticks">
-                        {[0, 15, 25, 40, 50, 70, 100].map((n) => (
-                          <span key={n} style={{ left: `${n}%` }}>
-                            {n}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                    <p className="detail-note">
-                      系数越低越纯净；人机流量比为 IPPure 提供的 ASN
-                      流量统计。按该节点访问出口查询服务得到的 IP 查询，IPPure
-                      请求可经其他可用节点转发。
-                    </p>
-                  </>
-                ) : (
-                  <p className="detail-note">
-                    {selected.ippure?.status === "unsupported"
-                      ? selected.ippure.error
-                      : selected.ippure?.status === "error"
-                        ? selected.ippure.error
-                        : snapshot?.ippureCollector?.error ||
-                          (snapshot?.ippureCollector?.enabled === false
-                            ? "IPPure 检测服务未启用，请配置独立代理检测服务。"
-                            : "尚无 IPPure 结果；IP 属性服务会独立补充查询，页面会自动更新。同一出口 IP 共享属性结果。")}
-                  </p>
-                )}
-                <IPTypeDetails result={selected.ippure} />
-                <h3>服务解锁</h3>
-                {(selected.mediaCheck ?? snapshot?.mediaCheck) ? (
-                  selected.media?.length ? (
-                    <dl>
-                      {selected.media.map((m, i) => (
-                        <div className="detail-field" key={i}>
-                          <dt>
-                            {platforms[mediaPlatform(m)] || mediaPlatform(m)}
-                          </dt>
-                          <dd>{mediaValue(m) || "未返回解锁标签"}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  ) : (
-                    <p className="detail-note">该节点没有服务解锁记录。</p>
-                  )
-                ) : (
-                  <p className="detail-note">未启用服务解锁检测。</p>
-                )}
-              </div>
-            </>
-          )}
-        </SheetContent>
-      </Sheet>
+      <NodeDetailSheet
+        selected={selected}
+        onClose={() => setSelected(null)}
+        maxSpeed={maxSpeed}
+        speedTest={results?.speedTest}
+        mediaCheck={results?.mediaCheck}
+        onCopy={(text, trigger) => void copy(text, trigger)}
+      />
       <Toaster
         position="bottom-right"
         theme={dark ? "dark" : "light"}

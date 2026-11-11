@@ -58,7 +58,7 @@ final class JsonResponse
      * 数字规范化：整数值的浮点按整数输出。
      *
      * Go 的 float64 走 encoding/json 时 443.0 会写成 443，而 PHP 的 json_encode
-     * 会写成 443.0。前端 JSON.parse 结果相同，但接口字节与快照指纹要一致，
+     * 会写成 443.0。前端 JSON.parse 结果相同，但接口的数值格式应保持一致，
      * 所以所有数值出口都经过这里。
      */
     public static function number(float|int|string|null $value): int|float

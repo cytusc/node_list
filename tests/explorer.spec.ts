@@ -1,7 +1,7 @@
 import { fulfillRoute } from "./results-fixture";
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./authenticated-fixture";
 
-const snapshot = {
+const results = {
   checkedAt: "2026-10-11T08:06:01+08:00",
   speedTest: true,
   mediaCheck: false,
@@ -26,9 +26,7 @@ test("loads real local results with no browser errors", async ({
 }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  const response = await request.get(
-    "/api/results?page=1&limit=50",
-  );
+  const response = await request.get("/api/results?page=1&limit=50");
   test.skip(!response.ok(), "Local subs-check installation is not available");
   const data = await response.json();
   await page.goto("/");
@@ -54,7 +52,7 @@ test("loads real local results with no browser errors", async ({
 test.describe("interactions and data states", () => {
   test.beforeEach(async ({ page }) => {
     await page.route("**/api/results?**", (route) =>
-      fulfillRoute(route, { json: snapshot }),
+      fulfillRoute(route, { json: results }),
     );
     await page.route("**/api/downloads", (route) =>
       fulfillRoute(route, {
@@ -63,7 +61,7 @@ test.describe("interactions and data states", () => {
             id: "clash",
             label: "Clash 节点",
             available: true,
-            updatedAt: snapshot.checkedAt,
+            updatedAt: results.checkedAt,
           },
         ],
       }),
@@ -78,22 +76,37 @@ test.describe("interactions and data states", () => {
     await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
         json: {
-          ...snapshot,
+          ...results,
           batchCount: 2,
           nodes: [
             {
-              ...snapshot.nodes[0],
+              ...results.nodes[0],
+              addedAt: "2026-10-09T00:00:00Z",
               checkedAt: "2026-10-10T00:00:00Z",
+              connectivity: {
+                checkedAt: "2026-10-11T01:30:00Z",
+                reachable: true,
+              },
               name: "Current node",
               baseName: "Current node",
             },
-            snapshot.nodes[1],
+            results.nodes[1],
           ],
         },
       }),
     );
     await page.getByRole("button", { name: "刷新结果" }).click();
     await expect(page.locator(".title-count")).toHaveText("2");
+    const times = page
+      .locator('.node-row [data-column="time"]')
+      .filter({ hasText: "2026/10/09" });
+    await expect(times).toContainText("添加时间2026/10/09 08:00");
+    await expect(times).toContainText("最后检测时间2026/10/11 09:30");
+    await expect(
+      page
+        .locator('.node-row [data-column="time"]')
+        .filter({ hasText: "暂无记录" }),
+    ).toHaveCount(1);
     await expect(page.getByLabel("检测批次")).toHaveCount(0);
     await expect(page.getByText(/已聚合 2 轮检测/)).toHaveCount(0);
     await expect(page.getByText("订阅下载仍使用最新生成的文件。")).toHaveCount(
@@ -106,8 +119,11 @@ test.describe("interactions and data states", () => {
     await page
       .getByRole("textbox", { name: "搜索节点", exact: true })
       .fill("Current node");
+    await expect(page.locator(".node-row")).toHaveCount(1);
     await page.locator(".node-name").first().click();
-    await expect(page.getByRole("dialog")).toContainText("2026/10/10 08:00");
+    await expect(page.getByRole("dialog")).toContainText(
+      "最近检测 · 2026/10/11 09:30",
+    );
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "刷新结果" }).click();
     await expect(page.locator(".title-count")).toHaveText("2");
@@ -158,6 +174,132 @@ test.describe("interactions and data states", () => {
     await page.getByLabel("每页节点数").selectOption("20");
     await resized;
     await expect(page.locator(".node-row")).toHaveCount(20);
+  });
+
+  test("sorting and details stay usable when node fields are missing", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.route("**/api/results?**", (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get("sort") === "name") {
+        return fulfillRoute(route, {
+          json: {
+            ...results,
+            nodes: [
+              {
+                ...results.nodes[0],
+                name: undefined,
+                baseName: "",
+                type: undefined,
+                network: undefined,
+              },
+            ],
+          },
+        });
+      }
+      return fulfillRoute(route, { json: results });
+    });
+
+    await page.getByRole("button", { name: "按节点 / 服务器排序" }).click();
+    await expect(page.locator(".node-row")).toHaveCount(1);
+    await expect(page.locator(".node-name").first()).toContainText(
+      "未命名节点",
+    );
+    await expect(page.locator(".node-row")).toContainText("未知协议");
+    await page.locator(".node-name").first().click();
+    await expect(page.getByRole("dialog")).toContainText("未命名节点");
+    await expect(page.getByRole("dialog")).toContainText("未知协议");
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps nodes and details during failed background refreshes and recovers", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    let failure: "network" | "shape" | null = null;
+    await page.route("**/api/results?**", (route) => {
+      if (failure === "network") return route.abort("failed");
+      if (failure === "shape") return route.fulfill({ json: { nodes: [] } });
+      return fulfillRoute(route, { json: results });
+    });
+    await page.clock.install();
+    await page.reload();
+    await expect(page.locator(".node-row")).toHaveCount(50);
+    await page.locator(".node-name").first().click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+
+    for (const cause of ["network", "shape"] as const) {
+      failure = cause;
+      await page.clock.fastForward(cause === "network" ? 5000 : 10000);
+      await expect(
+        page.getByRole("alert", { includeHidden: true }),
+      ).toContainText(
+        cause === "shape" ? "接口返回的节点数据格式无效" : "节点刷新失败",
+      );
+      await expect(page.locator(".node-row")).toHaveCount(50);
+      await expect(page.getByRole("dialog")).toBeVisible();
+    }
+
+    failure = null;
+    await page.clock.fastForward(20000);
+    await expect(page.getByRole("alert", { includeHidden: true })).toHaveCount(
+      0,
+    );
+    await expect(page.locator(".node-row")).toHaveCount(50);
+    await expect(page.getByRole("dialog")).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test("debounces typing while filters still apply immediately", async ({
+    page,
+  }) => {
+    await page.clock.install();
+    const queries: string[] = [];
+    await page.route("**/api/results?**", (route) => {
+      queries.push(new URL(route.request().url()).searchParams.get("q") || "");
+      return fulfillRoute(route, { json: results });
+    });
+    const search = page.getByRole("textbox", { name: "搜索节点", exact: true });
+    await search.fill("N");
+    await page.clock.runFor(100);
+    await search.fill("Node 6");
+    await page.clock.runFor(299);
+    expect(queries).toEqual([]);
+    await page.clock.runFor(1);
+    await expect(page.locator(".result-count")).toContainText("5");
+    expect(queries).toEqual(["Node 6"]);
+
+    await page.getByRole("button", { name: "协议筛选", exact: true }).click();
+    await page.getByRole("option", { name: /VLESS/ }).click();
+    await expect.poll(() => queries.length).toBe(2);
+  });
+
+  test("backs off failed polls and manual refresh restores the normal interval", async ({
+    page,
+  }) => {
+    await page.clock.install();
+    let requests = 0;
+    let failing = true;
+    await page.route("**/api/results?**", (route) => {
+      requests++;
+      return failing
+        ? route.fulfill({ status: 503, json: { error: "暂不可用" } })
+        : fulfillRoute(route, { json: results });
+    });
+    await page.clock.fastForward(5000);
+    await expect(page.getByRole("alert")).toContainText("暂不可用");
+    expect(requests).toBe(1);
+    await page.clock.runFor(5000);
+    expect(requests).toBe(1);
+    failing = false;
+    await page.getByRole("button", { name: "刷新结果", exact: true }).click();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    expect(requests).toBe(2);
+    await page.clock.runFor(5000);
+    await expect.poll(() => requests).toBe(3);
   });
 
   test("combines filters and opens accessible details", async ({ page }) => {
@@ -269,7 +411,9 @@ test.describe("interactions and data states", () => {
     ).toHaveCount(0);
   });
 
-  test("retains previous results after refresh fails", async ({ page }) => {
+  test("clears results after refresh fails and retries live query", async ({
+    page,
+  }) => {
     await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
         status: 503,
@@ -277,24 +421,32 @@ test.describe("interactions and data states", () => {
       }),
     );
     await page.getByRole("button", { name: "刷新结果" }).click();
-    await expect(page.getByRole("alert")).toContainText(
-      "刷新失败，当前保留上次读取的结果",
+    await expect(page.getByRole("alert")).toContainText("无法读取可用节点");
+    await expect(page.locator(".node-row")).toHaveCount(0);
+    await page.unroute("**/api/results?**");
+    await page.route("**/api/results?**", (route) =>
+      fulfillRoute(route, { json: results }),
     );
+    // Dispatch immediately: the automatic live poll may also recover the page.
+    await page
+      .getByRole("button", { name: "重试", exact: true })
+      .dispatchEvent("click");
     await expect(page.locator(".node-row")).toHaveCount(50);
+    await expect(page.getByRole("alert")).toHaveCount(0);
   });
 
   test("handles zero nodes and disabled speed tests", async ({ page }) => {
     await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
-        json: { ...snapshot, speedTest: false, nodes: [] },
+        json: { ...results, speedTest: false, nodes: [] },
       }),
     );
     await page.getByRole("button", { name: "刷新结果" }).click();
     await expect(
-      page.getByRole("heading", { name: "暂无保留节点" }),
+      page.getByRole("heading", { name: "暂无可用节点" }),
     ).toBeVisible();
     await expect(page.getByLabel("最低速度，MB/s")).toHaveCount(0);
-    await expect(page.locator(".summary-line")).toContainText("测速未开启");
+    await expect(page.locator(".summary-line")).not.toContainText("测速未开启");
   });
 
   test("shows service tags only when enabled", async ({ page }) => {
@@ -304,14 +456,14 @@ test.describe("interactions and data states", () => {
     await page.route("**/api/results?**", (route) =>
       fulfillRoute(route, {
         json: {
-          ...snapshot,
+          ...results,
           mediaCheck: true,
           nodes: [
             {
-              ...snapshot.nodes[0],
+              ...results.nodes[0],
               media: [{ platform: "openai", tag: "GPT⁺-US" }],
             },
-            snapshot.nodes[1],
+            results.nodes[1],
           ],
         },
       }),

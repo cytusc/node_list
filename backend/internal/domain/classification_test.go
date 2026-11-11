@@ -2,9 +2,10 @@ package domain
 
 import (
 	"encoding/json"
-	"github.com/cytusc/node_list/backend/internal/ipcheck"
 	"reflect"
 	"testing"
+
+	"github.com/cytusc/node_list/backend/internal/ipcheck"
 )
 
 func TestStoredZeroResidentialTieIsReclassifiedWithoutRefreshingEvidence(t *testing.T) {
@@ -33,15 +34,5 @@ func TestClassificationSurvivesRiskFailureAndJSON(t *testing.T) {
 	}
 	if restored.IPPure.Classification == nil || restored.IPPure.Classification.State != "residential" {
 		t.Fatalf("classification lost: %s", raw)
-	}
-	if SortValue(restored, "ipAttributes") != "住宅IP" {
-		t.Fatal("classified attributes missing from sort")
-	}
-	meta := ResultsMetadata(Snapshot{Nodes: []Node{restored}})
-	if len(meta.Facets.IPAttributes) != 1 || meta.Facets.IPAttributes[0].Value != "住宅IP" || meta.Facets.IPAttributes[0].Count != 1 {
-		t.Fatalf("wrong facets: %+v", meta.Facets)
-	}
-	if len(meta.Facets.IPSource) != 0 {
-		t.Fatal("failed risk source should not appear")
 	}
 }

@@ -1,0 +1,31 @@
+{
+  "sampleCapturedAt": "2026-10-26 12:20:05.732398+00",
+  "input": 8942,
+  "version": "strict-v1/sub-store-2.44.2",
+  "counts": {
+    "accepted": 8385,
+    "generated_verified": 6439,
+    "conflict": 0,
+    "original": 1946
+  },
+  "rejections": {
+    "unrepresentable": 513,
+    "incomplete": 15,
+    "invalid": 29
+  },
+  "acceptedTypes": {
+    "http": 5879,
+    "vless": 1166,
+    "socks5": 574,
+    "hysteria2": 174,
+    "trojan": 106,
+    "vmess": 280,
+    "ss": 198,
+    "anytls": 2,
+    "tuic": 4,
+    "hysteria": 2
+  },
+  "uniqueAcceptedFingerprints": 8206,
+  "duplicateOccurrences": 179,
+  "note": "Historical pre-cleanup sample only; offline conversion, no production writes or connectivity tests."
+}

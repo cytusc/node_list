@@ -8,7 +8,7 @@ import (
 )
 
 // jsonShape distinguishes an absent property from an explicit zero or null.
-// Value semantics keep snapshot clones independent without copying a map.
+// Value semantics keep decoded node copies independent without copying a map.
 type jsonShape struct {
 	present uint64
 	nulls   uint64
@@ -72,7 +72,7 @@ func jsonEmpty(v reflect.Value) bool {
 
 // marshalJSONShape keeps the ordinary encoder path for normal payloads. Only
 // exceptional shapes need a second pass. Fields retain declaration order so
-// snapshot fingerprints do not depend on map iteration or sorted JSON keys.
+// serialized nodes do not depend on map iteration or sorted JSON keys.
 func marshalJSONShape(value any, shape jsonShape, fields []jsonField) ([]byte, error) {
 	encoded, err := marshalJSON(value)
 	if err != nil || !shape.decoded {

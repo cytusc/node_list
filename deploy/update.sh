@@ -62,7 +62,8 @@ PYVERSION
   local targets=("$service")
   if [[ "$service" == node-explorer ]]; then
     # Read the deployed service topology instead of assuming legacy roles.
-    mapfile -t targets < <(compose config --format json | python3 -c '
+    targets=()
+    while IFS= read -r target; do targets+=("$target"); done < <(compose config --format json | python3 -c '
 import json,sys
 config=json.load(sys.stdin)
 for name, service in config["services"].items():

@@ -92,33 +92,6 @@ final class ResultsQueryParser
     }
 
     /**
-     * /api/history 的分页参数（Go 的 parsePaging）。
-     *
-     * 该接口在当前契约里不可达（live 模式不注册），保留实现是为了将来
-     * 恢复归档视图时不必重写校验规则。
-     *
-     * @param array<string, mixed> $params
-     * @return array{0:int, 1:int} [limit, offset]
-     * @throws ApiError
-     */
-    public static function paging(array $params): array
-    {
-        $limit = self::positiveInt(self::raw($params, 'limit'), 50);
-        if ($limit > 200) {
-            throw ApiError::invalidQuery('历史分页参数无效。');
-        }
-        $rawOffset = self::raw($params, 'offset');
-        $offset = 0;
-        if ($rawOffset !== null && $rawOffset !== '') {
-            if (!preg_match('/^[+-]?[0-9]+$/', $rawOffset) || (int)$rawOffset < 0) {
-                throw ApiError::invalidQuery('历史分页参数无效。');
-            }
-            $offset = (int)$rawOffset;
-        }
-        return [$limit, $offset];
-    }
-
-    /**
      * 取原始值，保留「键不存在」与「值为空串」的区分（对应 url.Values.Has/Get）。
      * 数组参数取首值，与 Go 的 Values.Get 行为一致。
      *

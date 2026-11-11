@@ -32,7 +32,7 @@ if (config('database.connections') !== null) {
     Webman\Database\Initializer::init(config('database'));
 }
 
-// runtime 目录（日志/缓存）在 CLI 下也要存在。
+// runtime 日志目录在 CLI 下也要存在。
 $runtime = $root . '/runtime/logs';
 if (!is_dir($runtime)) {
     mkdir($runtime, 0777, true);

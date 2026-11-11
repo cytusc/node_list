@@ -10,10 +10,5 @@ $warningRow = ['updated_at' => gmdate('c', $now), 'payload' => '{"running":true,
 $publicStatus = ServiceMonitor::service('source-ingest', $warningRow, $now);
 same('degraded', $publicStatus['status'], 'source warning degrades status');
 ok(!str_contains(json_encode($publicStatus), 'private-secret'), 'worker payload and raw warnings never escape to browser');
-same('degraded', ServiceMonitor::service('mihomo-manager', $healthyRow, $now)['status'], 'manager requires healthy kernel');
-same(24, ServiceMonitor::hours(null), 'default monitoring window');
-same(168, ServiceMonitor::hours('168'), 'seven day monitoring window');
-foreach (['0', '999', ['24'], '24 OR 1=1'] as $value) {
-    try { ServiceMonitor::hours($value); ok(false, 'invalid monitor range accepted'); }
-    catch (\app\service\ApiError $e) { same(400, $e->status, 'invalid monitoring range rejected'); }
-}
+ok(!isset(ServiceMonitor::SERVICES['mihomo-manager']), 'retired manager is absent from service catalog');
+same('healthy', ServiceMonitor::service('node-liveness', $healthyRow, $now)['status'], 'independent liveness heartbeat is healthy');

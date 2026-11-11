@@ -1,6 +1,6 @@
 <?php
 /**
- * PostgreSQL 连接（只读账号即可）。
+ * PostgreSQL 连接。启用对外接口时，还需 nonce 表的 SELECT/INSERT/UPDATE/DELETE 权限。
  *
  * 环境变量名与 compose 的 x-environment 完全同名：
  *   PGHOST / PGPORT / PGDATABASE / PGUSER / PGPASSWORD / PGPOOL_MAX

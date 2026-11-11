@@ -86,3 +86,42 @@ func TestAttributesReplaceStaleLabelsWithSourceTypes(t *testing.T) {
 		t.Fatalf("stale label retained: %v", a)
 	}
 }
+
+// A refusal says nothing about the address. It must not outvote, replace or
+// outlive the last answer the same provider gave, because the persisted Result
+// is the only copy of that answer.
+func TestFailedLookupCannotEvictAnAnswer(t *testing.T) {
+	now := time.Now()
+	answer := evidence("ippure", 1, now.Add(-2*time.Hour))
+	for _, status := range []string{"request-failed", "quota-cooldown", "http-error"} {
+		t.Run(status, func(t *testing.T) {
+			failed := Evidence{Provider: "ippure", IP: "8.8.8.8", CheckedAt: now.UTC().Format(time.RFC3339Nano), Outcome: "unknown", QueryStatus: status}
+			r := Score("8.8.8.8", []Evidence{answer, failed}, now)
+			if r.State != "residential" || r.ResidentialVotes != 1 {
+				t.Fatalf("refusal evicted the answer: %+v", r)
+			}
+			if len(r.Evidence) != 2 {
+				t.Fatalf("the refusal was not kept beside the answer: %+v", r.Evidence)
+			}
+			// The result is re-read from storage on the next merge, so the
+			// answer has to survive a round trip through it.
+			if again := Score("8.8.8.8", r.Evidence, now); again.State != "residential" {
+				t.Fatalf("answer lost on reload: %+v", again)
+			}
+		})
+	}
+}
+
+// A newer answer is still allowed to correct an older one.
+func TestNewerAnswerReplacesOlderAnswer(t *testing.T) {
+	now := time.Now()
+	old := evidence("ippure", 1, now.Add(-2*time.Hour))
+	fresh := evidence("ippure", -1, now)
+	r := Score("8.8.8.8", []Evidence{old, fresh}, now)
+	if r.State != "datacenter" || r.DatacenterVotes != 1 {
+		t.Fatalf("correction was ignored: %+v", r)
+	}
+	if len(r.Evidence) != 1 {
+		t.Fatalf("superseded answer retained: %+v", r.Evidence)
+	}
+}

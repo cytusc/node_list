@@ -14,7 +14,7 @@ declare(strict_types=1);
  *   PGHOST=127.0.0.1 PGUSER=postgres PGPASSWORD=... PGDATABASE=node_explorer_test \
  *     php tests/integration.php
  *
- * 脚本会先把夹具里的观测时间戳推到「2 分钟前」——优选位判定要求证据在 10 分钟内，
+ * 脚本会先把夹具里的观测时间戳推到「2 分钟前」——优选位判定要求证据在 45 分钟内，
  * 写死的时间戳放久了会让 preferred 排序失效，导致断言随「什么时候导入的」而飘。
  */
 
@@ -22,7 +22,6 @@ require __DIR__ . '/bootstrap.php';
 
 use app\service\LiveResults;
 use app\service\ResultsQueryParser;
-use app\service\ResultsStatus;
 use support\Db;
 
 $passed = 0;
@@ -84,19 +83,55 @@ $live = new LiveResults();
 $run = static fn (array $params): array => $live->query(ResultsQueryParser::fromQuery($params));
 
 // ---------------------------------------------------------------------------
-// 1. 视图口径：退役与下线节点必须被排除
+// 1. 视图口径：available + 近期连通性记录 + 已验证出口决定展示
 // ---------------------------------------------------------------------------
 
 $all = $run([]);
-same(5, $all['totalNodes'], 'live 视图只含可用且未退役的节点');
+same(5, $all['totalNodes'], 'live 视图包含 available=true 且近期测活、出口已验证的节点');
 same(0, $all['page'], '不分页时 page=0');
 same(0, $all['limit'], '不分页时 limit=0');
 same(5, count($all['nodes']), '不分页时返回全部节点');
-same('2026-10-18T00:00:00Z', $all['checkedAt'], '批次时间透传');
+ok(!array_key_exists('checkedAt', $all), '结果不再包含批次检测时间');
+ok(!array_key_exists('snapshotId', $all['nodes'][0]), '节点响应不包含快照标识');
 
 $names = array_column($all['nodes'], 'name');
-ok(!in_array('🇺🇸 美国 99', $names, true), '退役节点不出现在结果里');
+ok(!in_array('🇺🇸 美国 99', $names, true), '历史退役且 available=false 的节点不出现在结果里');
 ok(!in_array('🇬🇧 英国 07', $names, true), 'available=false 的节点不出现在结果里');
+
+Db::statement("UPDATE node_explorer_node_registry SET available=true WHERE identity='id-us-retired'");
+try {
+    $withRetired = $run([]);
+    same(6, $withRetired['totalNodes'], '历史退役记录不能覆盖测活维护的 available=true');
+    ok(in_array('🇺🇸 美国 99', array_column($withRetired['nodes'], 'name'), true), '近期测活与已验证出口齐全时，恢复可用后可正常展示');
+} finally {
+    Db::statement("UPDATE node_explorer_node_registry SET available=false WHERE identity='id-us-retired'");
+}
+
+
+// 缺少任一发布事实都要隐藏节点；调度标记保留，以便后续探针恢复。
+foreach ([
+    '负面测活结论' => "UPDATE node_explorer_connectivity SET payload=payload || '{\"reachable\":false}'::jsonb WHERE identity='id-us-ss'",
+    '旧版测活记录' => "UPDATE node_explorer_connectivity SET payload=payload-'configDigest' WHERE identity='id-us-ss'",
+    '配置已改变' => "UPDATE node_explorer_node_registry SET node=node || '{\"name\":\"changed\"}'::jsonb WHERE identity='id-us-ss'",
+    '节点已替换' => "UPDATE node_explorer_node_registry SET incarnation='replacement' WHERE identity='id-us-ss'",
+    '过期连通性记录' => "UPDATE node_explorer_connectivity SET checked_at=now()-interval '7 hours' WHERE identity='id-us-ss'",
+    '缺少连通性记录' => "DELETE FROM node_explorer_connectivity WHERE identity='id-us-ss'",
+    '出口未验证' => "UPDATE node_explorer_exits SET payload=jsonb_set(payload,'{verified}','false'::jsonb) WHERE identity='id-us-ss'",
+    '出口缺少验证字段' => "UPDATE node_explorer_exits SET payload=payload-'verified' WHERE identity='id-us-ss'",
+    '缺少出口记录' => "DELETE FROM node_explorer_exits WHERE identity='id-us-ss'",
+] as $reason => $sql) {
+    Db::beginTransaction();
+    try {
+        Db::statement($sql);
+        $hidden = $run([]);
+        same(4, $hidden['totalNodes'], $reason . '时不发布节点');
+        ok(!in_array('id-us-ss', array_column($hidden['nodes'], 'identity'), true), $reason . '时响应不包含该节点');
+        same(true, Db::table('node_explorer_node_registry')->where('identity', 'id-us-ss')->value('available'), $reason . '不改变调度标记');
+    } finally {
+        Db::rollBack();
+    }
+    same(5, $run([])['totalNodes'], $reason . '恢复后立即重新展示');
+}
 
 // ---------------------------------------------------------------------------
 // 2. 分页
@@ -198,6 +233,21 @@ foreach ($all['nodes'] as $node) {
 ok($us !== null, '找到美国节点');
 ok(!array_key_exists('rawLink', $us ?? []), '节点的 rawLink 不出现在响应里');
 ok(!array_key_exists('rawConfig', $us ?? []), '节点的 rawConfig 不出现在响应里');
+ok(!array_key_exists('generatedLink', $us ?? []), '生成链接不出现在列表响应里');
+same(true, $us['hasOriginalLink'] ?? null, '原始链接存在时可复制');
+foreach ($all['nodes'] as $node) {
+    if ($node['identity'] !== 'id-us-ss') same(false, $node['hasOriginalLink'] ?? null, '无原始链接的节点不可复制');
+}
+Db::statement("UPDATE node_explorer_node_registry SET node=node || jsonb_build_object('generatedLink','http://generated:test@198.51.100.20:8443') WHERE identity='id-jp-vmess'");
+$generatedPage = $run(['page' => '1', 'limit' => '50']);
+foreach ($generatedPage['nodes'] as $item) {
+    if ($item['identity'] === 'id-jp-vmess') {
+        same(true, $item['hasOriginalLink'] ?? null, '已保存生成链接的节点可复制');
+        ok(!array_key_exists('generatedLink', $item), '生成链接凭据不通过列表泄露');
+    }
+}
+Db::statement("UPDATE node_explorer_node_registry SET node=node-'generatedLink' WHERE identity='id-jp-vmess'");
+
 same('443', $us['port'] ?? null, 'port 统一为字符串');
 same(['status' => 'active'], $us['lifecycle'] ?? null, 'lifecycle 固定 active');
 same('residential', $us['ippure']['classification']['state'] ?? null, 'ippure.classification 透出住宅判定');
@@ -212,16 +262,18 @@ foreach ($all['nodes'] as $node) {
     }
 }
 same('unsupported', $sg['ippure']['status'] ?? null, '仅 IPv6 的出口标记为 unsupported');
-ok(isset($sg['connectivity']['error']), '连通性失败原因透出');
+same(true, $sg['connectivity']['reachable'] ?? null, '已发布节点保留正面测活结论');
 
-// 没有富集数据的节点不应凭空出现 ippure
+// 出口已验证但属性尚未查询的节点仍可展示，返回待查询状态。
 $hk = null;
 foreach ($all['nodes'] as $node) {
     if (($node['name'] ?? '') === '🇭🇰 香港 03') {
         $hk = $node;
     }
 }
-ok(!array_key_exists('ippure', $hk ?? []), '无出口探针数据的节点没有 ippure 字段');
+same('error', $hk['ippure']['status'] ?? null, '出口已验证但缺少属性时返回待查询状态');
+same('ippure-query', $hk['ippure']['failureStage'] ?? null, '缺少属性不等于缺少已验证出口');
+same('203.0.113.50', $hk['ippure']['ip'] ?? null, '待查询属性保留已验证出口 IP');
 
 // 标签统计和筛选必须与实际返回的详情一致，不能只读取库里的旧 attributes。
 foreach ($all['facets']['ipAttributes'] as $facet) {
@@ -253,23 +305,20 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// 7. 结果附属字段
-//
-// 心跳表由测试自己掌管：本机可能同时跑着别的进程（比如并排验证 Go 版时，
-// 它每 10s 写一次 api 心跳），不清空的话断言会随「谁在跑」而飘。
+// 7. 每次请求都读取当前可用状态，不缓存结果，也不附带采集器状态。
 // ---------------------------------------------------------------------------
-
-$status = new ResultsStatus();
-Db::statement('DELETE FROM node_explorer_service_status');
-$isZeroTime = static fn (string $v): bool =>
-    str_starts_with($v, '0000-12-31') || str_starts_with($v, '0001-01-01');
-
-// 采集器状态读的是 ip-service：本夹具没有它的心跳。
-$collector = $status->collectorStatus();
-same(true, $collector['enabled'], 'collector.enabled 恒为 true');
-ok($isZeroTime($collector['lastRunAt']), 'collector.lastRunAt 用秒精度零值时间哨兵');
-same('服务尚未启动', $collector['error'], '采集器无心跳时透出错误文案');
-same(null, $status->sourceWarning(), '无 sourceWarning 时为 null');
+$before = $run(['page' => '1', 'limit' => '50']);
+Db::statement("UPDATE node_explorer_node_registry SET available=false WHERE identity='id-us-ss'");
+try {
+    $after = $run(['page' => '1', 'limit' => '50']);
+    same($before['totalNodes'] - 1, $after['totalNodes'], '可用状态改变后下次请求立即生效');
+    ok(!in_array('id-us-ss', array_column($after['nodes'], 'identity'), true), '不可用节点不出现在响应中');
+    ok(!array_key_exists('sourceWarning', $after), '不附带来源告警');
+    ok(!array_key_exists('ippureCollector', $after), '不附带采集器状态');
+} finally {
+    Db::statement("UPDATE node_explorer_node_registry SET available=true WHERE identity='id-us-ss'");
+}
+same($before['totalNodes'], $run([])['totalNodes'], '恢复可用后下次请求立即展示');
 
 // ---------------------------------------------------------------------------
 // 结果

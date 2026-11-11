@@ -27,8 +27,23 @@ type Result struct {
 	Votes            []Vote         `json:"-"`
 }
 
+// answered reports whether a row carries an upstream answer. A row that only
+// records a refusal, a cooldown or a timeout knows nothing about the address,
+// so it may never stand in for one that does. Rows written before QueryStatus
+// existed are treated as answers.
+func answered(e Evidence) bool {
+	return e.QueryStatus == "" || e.QueryStatus == "success"
+}
+
 // Score gives each named service at most one vote for this exact IP. Unknown
 // responses abstain; tied leaders prefer residential, then business, then hosting.
+//
+// A failed lookup is a fact about the attempt, not about the address. The vote
+// basis is therefore the newest answered row inside the window, even when a
+// later attempt failed: picking the newest row of any kind let one timeout
+// erase a residential verdict, and because this Result is what gets persisted,
+// erase it permanently. The newest attempt still travels with the result so the
+// failure stays visible without displacing the answer.
 func Score(ip string, evidence []Evidence, now time.Time) Result {
 	r := Result{Version: VotingVersion, IP: ip, CheckedAt: now.UTC().Format(time.RFC3339), State: "unknown"}
 	providers := []string{"ippure", "ipinfo", "ip-api"}
@@ -40,22 +55,37 @@ func Score(ip string, evidence []Evidence, now time.Time) Result {
 			}
 		}
 	}
+	kept := map[string]bool{}
 	for _, provider := range providers {
 		selected := Evidence{Provider: provider, IP: ip, Outcome: "unknown"}
-		var newest time.Time
+		latest := Evidence{}
+		var answeredAt, latestAt time.Time
 		for _, e := range evidence {
 			if e.Provider != provider || e.IP != ip {
 				continue
 			}
 			stamp, err := time.Parse(time.RFC3339Nano, e.CheckedAt)
-			if err != nil || stamp.After(now.Add(5*time.Minute)) || now.Sub(stamp) > 24*time.Hour || stamp.Before(newest) {
+			if err != nil || stamp.After(now.Add(5*time.Minute)) || now.Sub(stamp) > 24*time.Hour {
 				continue
 			}
-			newest, selected = stamp, e
+			if latest.CheckedAt == "" || stamp.After(latestAt) {
+				latest, latestAt = e, stamp
+			}
+			if !answered(e) {
+				continue
+			}
+			if selected.CheckedAt == "" || stamp.After(answeredAt) {
+				selected, answeredAt = e, stamp
+			}
 		}
 		v := Vote{Provider: provider, Evidence: selected, Reason: "unknown-or-unavailable"}
-		if selected.CheckedAt != "" {
-			r.Evidence = append(r.Evidence, selected)
+		for _, e := range []Evidence{selected, latest} {
+			key := e.Provider + "|" + e.CheckedAt
+			if e.CheckedAt == "" || kept[key] {
+				continue
+			}
+			kept[key] = true
+			r.Evidence = append(r.Evidence, e)
 		}
 		types := selected.networkTypes()
 		if types.UsageType != "" || types.CompanyType != "" {

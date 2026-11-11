@@ -12,5 +12,5 @@
 
 return [
     'enable' => true,
-    'middleware' => [],
+    'middleware' => [app\middleware\StaticCache::class],
 ];

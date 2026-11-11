@@ -38,7 +38,7 @@ final class Heartbeat
     }
 
     /**
-     * 满了间隔才写，由 ResultsStatus::collectorSnapshot() 调用。
+     * 满了间隔才写，由结果与监控接口调用。
      */
     public static function beatIfDue(string $service = 'api'): void
     {

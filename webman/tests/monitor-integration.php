@@ -2,23 +2,25 @@
 use support\Db;
 // Included by integration.php against its dedicated fixture database.
 $monitor = new \app\service\ServiceMonitor();
-Db::statement('TRUNCATE node_explorer_monitor_samples');
-$emptyMonitor = $monitor->query(24);
-same(null, $emptyMonitor['current'], 'no sample is unknown, not zero');
-same(true, $emptyMonitor['sampleStale'], 'empty telemetry is marked stale');
-same(24, count($emptyMonitor['hourly']), 'hour range includes empty buckets');
-same(null, $emptyMonitor['hourly'][0]['queues'], 'missing hours are gaps');
-$base = "date_trunc('hour',now())-interval '2 hours'";
-$payload = json_encode(['queues' => [['kind'=>'exit','due'=>10,'scheduled'=>20,'running'=>2]],'coverage'=>['total'=>100,'connectivity'=>50,'exit'=>30,'attributes'=>20], 'recovery'=>['active'=>0,'stalled'=>0]]);
-Db::insert("INSERT INTO node_explorer_monitor_samples VALUES({$base}+interval '1 minute',?::jsonb)", [$payload]);
-// A legitimate sample with no exit work must contribute zero to the hourly mean.
-$second = json_encode(['queues'=>[], 'coverage'=>['total'=>100,'connectivity'=>60,'exit'=>40,'attributes'=>30], 'recovery'=>['active'=>0,'stalled'=>0]]);
-Db::insert("INSERT INTO node_explorer_monitor_samples VALUES({$base}+interval '2 minutes',?::jsonb)", [$second]);
-$history = $monitor->query(24);
-$bucket = array_values(array_filter($history['hourly'], fn($row) => $row['samples'] > 0))[0];
-same(2, $bucket['samples'], 'hourly sample count');
-same(5.0, $bucket['queues']['exit']['due'], 'hour mean includes absence of a queue');
-same(55.0, $bucket['coverage']['connectivity'], 'coverage average across real samples');
-same(true, $history['sampleStale'], 'old sample is not current');
-same(168, count($monitor->query(168)['hourly']), 'seven day range');
-Db::statement('TRUNCATE node_explorer_monitor_samples');
+$empty = $monitor->query();
+same(5, count($empty['services']), 'only current services are listed');
+same(null, $empty['liveness']['inFlight'], 'missing heartbeat is unknown');
+ok(!array_key_exists('hourly', $empty) && !array_key_exists('kernel', $empty), 'no historical or retired kernel placeholders');
+Db::statement(<<<'SQL'
+INSERT INTO node_explorer_service_status(service,updated_at,payload) VALUES('node-liveness',now(),'{"running":true,"inFlight":2,"xrayQueued":10,"mihomoQueued":3,"counts":{"xray:reachable":4,"mihomo:reachable":2,":config_error":3,"mihomo:infrastructure":1,"mihomo:unsupported":99}}') ON CONFLICT(service) DO UPDATE SET updated_at=excluded.updated_at,payload=excluded.payload
+SQL);
+same(2, $monitor->query()['liveness']['inFlight'], 'current heartbeat read immediately');
+same(['reachable'=>6,'unreachable'=>0,'config_error'=>3,'infrastructure'=>1], $monitor->query()['liveness']['results'], 'safe final statuses aggregate across engines');
+Db::statement(<<<'SQL'
+UPDATE node_explorer_service_status SET payload=payload || '{"inFlight":7}'::jsonb WHERE service='node-liveness'
+SQL);
+same(7, $monitor->query()['liveness']['inFlight'], 'subsequent request observes update without TTL');
+Db::statement(<<<'SQL'
+DELETE FROM node_explorer_service_status WHERE service='node-liveness'
+SQL);
+
+$state = $monitor->query()['liveness']['visibility'];
+$total = (int)Db::selectOne('SELECT count(*) AS total FROM node_explorer_node_registry')->total;
+$published = (int)Db::selectOne('SELECT count(*) AS total FROM node_explorer_live_facts')->total;
+same($total, array_sum($state), 'hidden reasons partition all nodes');
+same($published, $state['published'], 'published count agrees with view');

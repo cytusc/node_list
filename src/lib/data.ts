@@ -44,6 +44,9 @@ export type IPPureResult = {
   label?: string;
 };
 export type NodeRecord = {
+  identity?: string;
+  hasOriginalLink?: boolean;
+  addedAt?: string;
   connectivity?: { checkedAt: string; reachable: boolean; error?: string };
   exit?: {
     ip?: string;
@@ -55,12 +58,11 @@ export type NodeRecord = {
   lifecycle?: { status: string; reason?: string; retiredAt?: string };
   ippure?: IPPureResult;
   checkedAt?: string;
-  snapshotId?: number;
   speedTest?: boolean;
   mediaCheck?: boolean;
-  name: string;
+  name?: string | null;
   baseName?: string;
-  type: string;
+  type?: string | null;
   server: string;
   port: string;
   sni?: string;
@@ -77,14 +79,8 @@ export type NodeRecord = {
   media?: MediaTag[];
   details?: { k: string; v: string }[];
 };
-export type HistoryItem = {
-  id: number;
-  checkedAt?: string;
-  importedAt: string;
-  nodeCount: number;
-};
 type FacetOption = { value: string; label: string; count: number };
-export type Snapshot = {
+export type NodeResults = {
   total: number;
   totalNodes: number;
   page: number;
@@ -99,15 +95,6 @@ export type Snapshot = {
     ipAttributes: FacetOption[];
     media: FacetOption[];
   };
-  ippureCollector?: {
-    enabled: boolean;
-    running?: boolean;
-    error?: string | null;
-  };
-  id?: number;
-  batchCount?: number;
-  sourceWarning?: string | null;
-  checkedAt?: string;
   speedTest: boolean;
   mediaCheck: boolean;
   nodes: NodeRecord[];
@@ -132,10 +119,12 @@ export function countryName(code?: string) {
   }
 }
 export function plainName(n: NodeRecord) {
-  return (
-    (n.baseName || n.name).replace(/[\u{1F1E6}-\u{1F1FF}]/gu, "").trim() ||
-    n.name
-  );
+  const baseName = typeof n.baseName === "string" ? n.baseName : "";
+  const name = typeof n.name === "string" ? n.name : "";
+  const normalized = (baseName || name)
+    .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, "")
+    .trim();
+  return normalized || name || baseName || "未命名节点";
 }
 export function speedParts(speed: number) {
   return speed > 0
@@ -144,6 +133,24 @@ export function speedParts(speed: number) {
         unit: speed >= 1024 ? "MB/s" : "KB/s",
       }
     : { value: "—", unit: "" };
+}
+export function protocolLabel(type: NodeRecord["type"]) {
+  return typeof type === "string" && type.trim()
+    ? type.trim().toUpperCase()
+    : "未知协议";
+}
+export function lastCheckedAt(node: NodeRecord) {
+  return [
+    node.checkedAt,
+    node.connectivity?.checkedAt,
+    node.exit?.checkedAt,
+    node.ippure?.checkedAt,
+    node.ippure?.classification?.checkedAt,
+  ]
+    .filter(
+      (date): date is string => !!date && Number.isFinite(Date.parse(date)),
+    )
+    .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
 }
 export function timeLabel(date?: string) {
   return date && Number.isFinite(Date.parse(date))

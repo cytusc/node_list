@@ -3,7 +3,7 @@
 # Run from the deployment host (cron or manual). Read-only against the
 # database; every failure exits non-zero so cron/systemd surfaces it.
 #
-# Pattern follows deploy/ip-type-clean.sh: database coordinates are read from
+# Database coordinates are read from
 # the running app container with docker inspect, the dump runs in a temporary
 # container on the app's network namespace, and credentials never appear in
 # arguments, logs or this file.

@@ -10,10 +10,6 @@
  */
 
 return [
-    // 只读实时视图。置 false 时 /api/results 直接回 503，
-    // 用于灰度时「关掉读路径但不摘路由」，而不是 404 让前端以为接口没了。
-    'live' => (bool)env('API_LIVE', true),
-
     // 分页：默认 50，上限 200（前端表格一次最多 200 行）
     'default_limit' => (int)env('API_DEFAULT_LIMIT', 50),
     'max_limit' => (int)env('API_MAX_LIMIT', 200),
@@ -22,9 +18,4 @@ return [
     // 版本不一致的历史证据视为过期（宁可排到后面，也不误报住宅）。
     'voting_version' => (int)env('IPCHECK_VOTING_VERSION', 8),
 
-    // 读侧缓存 TTL（秒）。都远小于前端轮询间隔，避免界面拿到回退的旧状态。
-    'cache' => [
-        'collector_seconds' => (int)env('API_COLLECTOR_CACHE_SECONDS', 5),
-        'warning_seconds' => (int)env('API_WARNING_CACHE_SECONDS', 10),
-    ],
 ];
