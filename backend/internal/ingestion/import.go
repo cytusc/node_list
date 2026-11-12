@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
@@ -109,18 +108,6 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 	var existing string
 	err = tx.QueryRow(ctx, `SELECT status FROM node_explorer_source_batches WHERE source=$1 AND digest=$2`, source, digest).Scan(&existing)
 	if err == nil {
-		if existing == "complete" {
-			// Reactivate only the rows whose flag actually changes. The
-			// previous form rewrote every occurrence of the source on each
-			// repeat fetch (millions of rows for a stable subscription),
-			// which dominated the database's update volume.
-			if _, err = tx.Exec(ctx, `UPDATE node_explorer_source_occurrences SET current=false WHERE source=$1 AND current AND digest<>$2`, source, digest); err != nil {
-				return err
-			}
-			if _, err = tx.Exec(ctx, `UPDATE node_explorer_source_occurrences SET current=true WHERE source=$1 AND digest=$2 AND NOT current`, source, digest); err != nil {
-				return err
-			}
-		}
 		if _, err = tx.Exec(ctx, `UPDATE node_explorer_source_batches SET fetched_at=now() WHERE source=$1 AND digest=$2`, source, digest); err != nil {
 			return err
 		}
@@ -137,11 +124,6 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return err
-	}
-	if status == "complete" {
-		if _, err = tx.Exec(ctx, `UPDATE node_explorer_source_occurrences SET current=false WHERE source=$1 AND current`, source); err != nil {
-			return err
-		}
 	}
 	nodes := make([]domain.Node, len(result.Nodes))
 	seen := map[int]bool{}
@@ -213,11 +195,6 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 			if err != nil {
 				return err
 			}
-			if !strings.HasPrefix(id, "src1:") {
-				if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_source_identity_aliases VALUES($1,$2,$3,$1) ON CONFLICT DO NOTHING`, id, result.Version, n.Fingerprint); err != nil {
-					return err
-				}
-			}
 		} else if err != nil {
 			return err
 		}
@@ -231,19 +208,14 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 		if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_source_occurrences(source,digest,position,identity,name) VALUES($1,$2,$3,$4,$5)`, source, digest, n.Index, id, n.Name); err != nil {
 			return err
 		}
-		for _, link := range []struct{ value, origin, status string }{{n.OriginalEvidence, "original", map[bool]string{true: "conflict", false: n.LinkStatus}[n.Conflict]}, {n.GeneratedLink, "generated", n.LinkStatus}} {
-			if link.value != "" {
-				if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_source_links(source,digest,position,link,origin,status,version) VALUES($1,$2,$3,$4,$5,$6,$7)`, source, digest, n.Index, link.value, link.origin, link.status, result.Version); err != nil {
-					return err
-				}
-			}
-		}
+		// Source links are no longer written: nothing reads
+		// node_explorer_source_links (it was link history only), and each
+		// batch wrote up to two rows per node. The table and its existing
+		// rows are kept.
 	}
-	for _, rejected := range result.Rejected {
-		if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_source_rejections VALUES($1,$2,$3,$4)`, source, digest, rejected.Index, rejected.Code); err != nil {
-			return err
-		}
-	}
+	// Rejections are no longer recorded: nothing reads
+	// node_explorer_source_rejections, and the rejection counts are already
+	// kept on the batch row.
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}

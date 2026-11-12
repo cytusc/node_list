@@ -23,7 +23,7 @@ type Candidate struct {
 // nodes keep a sixth so a revived address is noticed. No group can starve
 // the others, and an empty group leaves its slots to the remaining ones.
 const dueSQL = `WITH base AS (
- SELECT n.identity,n.incarnation,md5((n.node - 'rawLink' - 'generatedLink')::text) AS digest,n.node,n.available,
+ SELECT n.identity,n.incarnation,n.digest,n.node,n.available,
   a.identity AS attempt_id,a.incarnation AS attempt_incarnation,a.digest AS attempt_digest,
   coalesce((a.payload->>'successStreak')::int,0) AS streak,
   coalesce(a.next_at,'-infinity'::timestamptz) AS due_at

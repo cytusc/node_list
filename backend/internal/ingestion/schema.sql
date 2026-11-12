@@ -14,11 +14,14 @@ CREATE TABLE IF NOT EXISTS node_explorer_source_batches (
 CREATE TABLE IF NOT EXISTS node_explorer_source_occurrences (
  source text NOT NULL, digest text NOT NULL, position integer NOT NULL,
  identity text NOT NULL REFERENCES node_explorer_node_registry(identity),
- name text NOT NULL, current boolean NOT NULL DEFAULT true,
+ name text NOT NULL,
  PRIMARY KEY(source,digest,position),
  FOREIGN KEY(source,digest) REFERENCES node_explorer_source_batches(source,digest)
 );
-CREATE INDEX IF NOT EXISTS node_explorer_source_current ON node_explorer_source_occurrences(source) WHERE current;
+-- The current flag was write-only (no production code ever read it) and its
+-- maintenance rewrote millions of rows per repeat fetch; it is removed.
+ALTER TABLE node_explorer_source_occurrences DROP COLUMN IF EXISTS current;
+DROP INDEX IF EXISTS node_explorer_source_current;
 -- The registry DELETE's foreign-key check looks up occurrences by identity;
 -- without this index it seq-scans the whole table per deleted node.
 CREATE INDEX IF NOT EXISTS node_explorer_source_occurrences_identity_idx ON node_explorer_source_occurrences(identity);
@@ -27,18 +30,11 @@ CREATE INDEX IF NOT EXISTS node_explorer_source_occurrences_identity_idx ON node
 -- the query still verifies the complete JSONB value to rule out hash collisions.
 CREATE INDEX IF NOT EXISTS node_explorer_registry_raw_config_hash
  ON node_explorer_node_registry (md5(((node->'rawConfig')-'name'-'sub_tag')::text));
-CREATE TABLE IF NOT EXISTS node_explorer_source_links (
- source text NOT NULL, digest text NOT NULL, position integer NOT NULL,
- link text NOT NULL, origin text NOT NULL, status text NOT NULL, version text NOT NULL,
- PRIMARY KEY(source,digest,position,origin),
- FOREIGN KEY(source,digest) REFERENCES node_explorer_source_batches(source,digest)
-);
-CREATE TABLE IF NOT EXISTS node_explorer_source_rejections (
- source text NOT NULL, digest text NOT NULL, position integer NOT NULL, code text NOT NULL,
- PRIMARY KEY(source,digest,position),
- FOREIGN KEY(source,digest) REFERENCES node_explorer_source_batches(source,digest)
-);
-CREATE TABLE IF NOT EXISTS node_explorer_source_identity_aliases (
- legacy_identity text NOT NULL, version text NOT NULL, fingerprint text NOT NULL,
- adopted_identity text NOT NULL, PRIMARY KEY(legacy_identity,version,fingerprint)
-);
+-- These three tables were write-only (no production code ever read them)
+-- and are removed: source_links (link history), source_rejections
+-- (rejection reasons; the counts stay on the batch row), and
+-- source_identity_aliases (legacy-adoption audit trail; the adoption itself
+-- is recorded in source_connections).
+DROP TABLE IF EXISTS node_explorer_source_links;
+DROP TABLE IF EXISTS node_explorer_source_rejections;
+DROP TABLE IF EXISTS node_explorer_source_identity_aliases;
