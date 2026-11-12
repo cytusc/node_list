@@ -258,7 +258,7 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 			rawLinks = append(rawLinks, [2]string{r.id, n.RawLink})
 		}
 	}
-	// Registry rows must exist before connections and occurrences reference them.
+	// Registry rows must exist before connections reference them.
 	if len(fresh) > 0 {
 		var sb strings.Builder
 		sb.WriteString(`INSERT INTO node_explorer_node_registry(identity,node,available) VALUES `)
