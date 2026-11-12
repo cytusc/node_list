@@ -14,6 +14,7 @@ const BackupTarget = "https://cp.cloudflare.com/generate_204"
 type Store interface {
 	Due(context.Context, int) ([]Candidate, error)
 	Save(context.Context, Candidate, Result, time.Duration) error
+	SaveBatch(context.Context, []SaveItem) error
 	Heartbeat(context.Context, any) error
 }
 type completed struct {
@@ -33,6 +34,11 @@ type Runner struct {
 	XrayWorkers, MihomoWorkers int
 	Interval, Retry            time.Duration
 	Control                    func(context.Context) bool
+	// SaveBatchSize caps how many completed results are flushed in one
+	// SaveBatch call (default 128); SaveFlushInterval caps how long a
+	// result waits in the buffer (default 5s).
+	SaveBatchSize     int
+	SaveFlushInterval time.Duration
 }
 
 func (r *Runner) Run(parent context.Context) error {
@@ -129,6 +135,49 @@ func (r *Runner) Run(parent context.Context) error {
 		defer stop()
 		return r.Store.Heartbeat(check, map[string]any{"running": true, "error": inputError, "counts": counts, "lastCompletedAt": last, "xrayQueued": len(xs), "mihomoQueued": len(ms), "inFlight": len(pending)})
 	}
+	batchSize := r.SaveBatchSize
+	if batchSize <= 0 {
+		batchSize = 128
+	}
+	flushInterval := r.SaveFlushInterval
+	if flushInterval <= 0 {
+		flushInterval = 5 * time.Second
+	}
+	// Completed results are buffered and persisted in batches instead of
+	// one transaction per probe. A node stays in pending until its result
+	// is flushed, so it cannot be re-fetched and re-probed while its
+	// verdict is still buffered. A failed flush keeps the buffer for the
+	// next attempt (capped, oldest dropped) instead of killing the
+	// runner; dropped results are re-probed because their next_at was
+	// never advanced.
+	const maxSaveBuf = 1024
+	var saveBuf []SaveItem
+	lastFlush := time.Now()
+	flushSave := func(flushCtx context.Context) {
+		if len(saveBuf) == 0 {
+			return
+		}
+		write, stop := context.WithTimeout(flushCtx, 10*time.Second)
+		err := r.Store.SaveBatch(write, saveBuf)
+		stop()
+		if err != nil {
+			if len(saveBuf) > maxSaveBuf {
+				drop := len(saveBuf) - maxSaveBuf
+				for _, item := range saveBuf[:drop] {
+					delete(pending, item.Node.Identity)
+				}
+				saveBuf = append(saveBuf[:0], saveBuf[drop:]...)
+			}
+			return
+		}
+		for _, item := range saveBuf {
+			counts[item.Result.Engine+":"+item.Result.Status]++
+			delete(pending, item.Node.Identity)
+		}
+		last = time.Now().UTC()
+		saveBuf = saveBuf[:0]
+		lastFlush = time.Now()
+	}
 	if err := beat(); err != nil {
 		return err
 	}
@@ -147,6 +196,8 @@ func (r *Runner) Run(parent context.Context) error {
 		}
 		select {
 		case <-ctx.Done():
+			// Best-effort flush of buffered results before exit.
+			flushSave(context.Background())
 			return nil
 		case xc <- xt:
 			xs[0] = task{}
@@ -192,15 +243,10 @@ func (r *Runner) Run(parent context.Context) error {
 			if !done.result.Valid() || done.result.Status == "unreachable" {
 				interval = r.Retry
 			}
-			write, stop := context.WithTimeout(ctx, 5*time.Second)
-			err := r.Store.Save(write, done.task.node, done.result, interval)
-			stop()
-			if err != nil {
-				return err
+			saveBuf = append(saveBuf, SaveItem{Node: done.task.node, Result: done.result, Interval: interval})
+			if len(saveBuf) >= batchSize {
+				flushSave(ctx)
 			}
-			counts[done.result.Engine+":"+done.result.Status]++
-			last = time.Now().UTC()
-			delete(pending, done.task.node.Identity)
 		case <-tick.C:
 			// The 1s tick drives Due fetching; the status heartbeat only
 			// needs to refresh every 30s.
@@ -209,6 +255,9 @@ func (r *Runner) Run(parent context.Context) error {
 					return err
 				}
 				lastBeat = time.Now()
+			}
+			if len(saveBuf) > 0 && time.Since(lastFlush) >= flushInterval {
+				flushSave(ctx)
 			}
 			if !fetching && len(pending) < 256 {
 				fetch <- struct{}{}

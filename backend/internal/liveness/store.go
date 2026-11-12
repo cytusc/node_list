@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -120,7 +122,27 @@ func (d *DB) Due(ctx context.Context, limit int) ([]Candidate, error) {
 	}
 	return nodes, rows.Err()
 }
+// SaveItem is one completed probe result awaiting persistence.
+type SaveItem struct {
+	Node     Candidate
+	Result   Result
+	Interval time.Duration
+}
+
 func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Duration) error {
+	return d.SaveBatch(ctx, []SaveItem{{Node: n, Result: r, Interval: interval}})
+}
+
+// SaveBatch persists a batch of completed probe results in one transaction:
+// one registry lookup, one previous-attempt lookup, and one multi-row
+// statement per table, instead of one transaction with up to three
+// statements per result. The runner buffers results and flushes every
+// few seconds (or when the buffer fills), so a single probe no longer
+// costs a full round trip.
+func (d *DB) SaveBatch(ctx context.Context, items []SaveItem) error {
+	if len(items) == 0 {
+		return nil
+	}
 	// The single writer uses the very session holding ownership. A lost lock
 	// connection cannot leave pooled writers committing after ownership changes.
 	tx, err := d.owner.Begin(ctx)
@@ -132,87 +154,180 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 		defer cancel()
 		_ = tx.Rollback(ctx)
 	}()
-	var id string
-	var prevAvailable bool
-	err = tx.QueryRow(ctx, `SELECT identity,available FROM node_explorer_node_registry
- WHERE identity=$1 AND incarnation=$2 AND md5((node - 'rawLink' - 'generatedLink')::text)=$3 FOR UPDATE`, n.Identity, n.Incarnation, n.Digest).Scan(&id, &prevAvailable)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+	ids := make([]string, len(items))
+	for i, it := range items {
+		ids[i] = it.Node.Identity
 	}
+	type regRow struct {
+		available           bool
+		incarnation, digest string
+	}
+	reg := map[string]regRow{}
+	rows, err := tx.Query(ctx, `SELECT identity,available,incarnation,digest FROM node_explorer_node_registry WHERE identity=ANY($1) FOR UPDATE`, ids)
 	if err != nil {
 		return err
 	}
-	// Retry deterministic configuration errors less often without treating
-	// them as negative availability verdicts. Changed configurations start fresh.
-	var previous []byte
-	if err = tx.QueryRow(ctx, `SELECT payload FROM node_explorer_liveness_attempts WHERE identity=$1 AND incarnation=$2 AND digest=$3`, id, n.Incarnation, n.Digest).Scan(&previous); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return err
-	}
-	var last Result
-	_ = json.Unmarshal(previous, &last)
-	// Streaks are consecutive-verdict counters, not per-round resets.
-	// infrastructure / config_error / cancelled carry no verdict about
-	// the node, so they must neither increment nor clear either streak:
-	// the old code reset FailureStreak to 0 on every such round, so a
-	// dead node alternating unreachable/infrastructure never reached
-	// the 2-failure threshold and stayed available forever.
-	// A reachable verdict breaks a failure streak (and vice versa);
-	// only a verdict of the same kind extends its streak.
-	r.FailureStreak, r.SuccessStreak, r.ErrorStreak = last.FailureStreak, last.SuccessStreak, last.ErrorStreak
-	switch r.Status {
-	case "unreachable":
-		r.FailureStreak = last.FailureStreak + 1
-		r.SuccessStreak = 0
-	case "reachable":
-		r.SuccessStreak = last.SuccessStreak + 1
-		r.FailureStreak = 0
-	case "config_error":
-		r.ErrorStreak = 1
-		if last.Status == r.Status && last.Reason == r.Reason {
-			r.ErrorStreak = last.ErrorStreak + 1
-		}
-	}
-	b, err := json.Marshal(r)
-	if err != nil {
-		return err
-	}
-	delay := interval
-	if r.FailureStreak > 0 {
-		delay = backoff(interval, r.FailureStreak, d.MaxBackoff)
-	} else if r.ErrorStreak > 0 {
-		delay = backoff(interval, r.ErrorStreak, time.Hour)
-	} else if r.Status == "infrastructure" && interval > 0 {
-		delay += time.Duration(rand.Int64N(int64(interval)/5 + 1))
-	} else if r.Status == "reachable" && r.SuccessStreak == 1 && !prevAvailable {
-		// A first success lists the node immediately; re-probe soon
-		// (1 minute, the retry cadence) to confirm it quickly instead
-		// of waiting a full interval.
-		if delay > time.Minute {
-			delay = time.Minute
-		}
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_liveness_attempts(identity,incarnation,digest,checked_at,next_at,payload)
- VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(identity) DO UPDATE SET incarnation=EXCLUDED.incarnation,digest=EXCLUDED.digest,
- checked_at=EXCLUDED.checked_at,next_at=EXCLUDED.next_at,payload=EXCLUDED.payload`, id, n.Incarnation, n.Digest, r.CheckedAt, time.Now().Add(delay), b); err != nil {
-		return err
-	}
-	// Availability goes up on the first success and down on 2 consecutive
-	// failures: a new node is listed after one good probe, while one
-	// transient failure never delists a healthy node.
-	flipUp := r.Reachable
-	flipDown := !r.Reachable && r.FailureStreak >= 2
-	if r.Valid() && (flipUp || flipDown) {
-		state := map[string]any{"reachable": r.Reachable, "checkedAt": r.CheckedAt, "probeTarget": r.ProbeTarget, "targets": r.Targets, "engine": r.Engine, "latencyMs": r.LatencyMS, "status": r.Status, "incarnation": n.Incarnation, "configDigest": n.Digest}
-		if !r.Reachable {
-			state["error"] = "target_unreachable"
-		}
-		b, _ = json.Marshal(state)
-		if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_connectivity(identity,checked_at,payload) VALUES($1,$2,$3)
- ON CONFLICT(identity) DO UPDATE SET checked_at=EXCLUDED.checked_at,payload=EXCLUDED.payload
- `, id, r.CheckedAt, b); err != nil {
+	for rows.Next() {
+		var id string
+		var rr regRow
+		if err = rows.Scan(&id, &rr.available, &rr.incarnation, &rr.digest); err != nil {
+			rows.Close()
 			return err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE node_explorer_node_registry SET available=$2 WHERE identity=$1`, id, r.Reachable); err != nil {
+		reg[id] = rr
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	type attRow struct {
+		incarnation, digest string
+		payload             []byte
+	}
+	prev := map[string]attRow{}
+	rows, err = tx.Query(ctx, `SELECT identity,incarnation,digest,payload FROM node_explorer_liveness_attempts WHERE identity=ANY($1)`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id string
+		var a attRow
+		if err = rows.Scan(&id, &a.incarnation, &a.digest, &a.payload); err != nil {
+			rows.Close()
+			return err
+		}
+		prev[id] = a
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	now := time.Now()
+	type attempt struct {
+		id, incarnation, digest string
+		checkedAt, nextAt       time.Time
+		payload                 []byte
+	}
+	var attempts []attempt
+	type flip struct {
+		id        string
+		checkedAt time.Time
+		payload   []byte
+		available bool
+	}
+	var flips []flip
+	for _, it := range items {
+		n, r := it.Node, it.Result
+		rr, ok := reg[n.Identity]
+		if !ok || rr.incarnation != n.Incarnation || rr.digest != n.Digest {
+			// Node changed or was deleted; skip this result.
+			continue
+		}
+		// Retry deterministic configuration errors less often without treating
+		// them as negative availability verdicts. Changed configurations start fresh.
+		var last Result
+		if a, ok := prev[n.Identity]; ok && a.incarnation == n.Incarnation && a.digest == n.Digest {
+			_ = json.Unmarshal(a.payload, &last)
+		}
+		// Streaks are consecutive-verdict counters, not per-round resets.
+		// infrastructure / config_error / cancelled carry no verdict about
+		// the node, so they must neither increment nor clear either streak:
+		// the old code reset FailureStreak to 0 on every such round, so a
+		// dead node alternating unreachable/infrastructure never reached
+		// the 2-failure threshold and stayed available forever.
+		// A reachable verdict breaks a failure streak (and vice versa);
+		// only a verdict of the same kind extends its streak.
+		r.FailureStreak, r.SuccessStreak, r.ErrorStreak = last.FailureStreak, last.SuccessStreak, last.ErrorStreak
+		switch r.Status {
+		case "unreachable":
+			r.FailureStreak = last.FailureStreak + 1
+			r.SuccessStreak = 0
+		case "reachable":
+			r.SuccessStreak = last.SuccessStreak + 1
+			r.FailureStreak = 0
+		case "config_error":
+			r.ErrorStreak = 1
+			if last.Status == r.Status && last.Reason == r.Reason {
+				r.ErrorStreak = last.ErrorStreak + 1
+			}
+		}
+		b, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		delay := it.Interval
+		if r.FailureStreak > 0 {
+			delay = backoff(it.Interval, r.FailureStreak, d.MaxBackoff)
+		} else if r.ErrorStreak > 0 {
+			delay = backoff(it.Interval, r.ErrorStreak, time.Hour)
+		} else if r.Status == "infrastructure" && it.Interval > 0 {
+			delay += time.Duration(rand.Int64N(int64(it.Interval)/5 + 1))
+		} else if r.Status == "reachable" && r.SuccessStreak == 1 && !rr.available {
+			// A first success lists the node immediately; re-probe soon
+			// (1 minute, the retry cadence) to confirm it quickly instead
+			// of waiting a full interval.
+			if delay > time.Minute {
+				delay = time.Minute
+			}
+		}
+		attempts = append(attempts, attempt{n.Identity, n.Incarnation, n.Digest, r.CheckedAt, now.Add(delay), b})
+		// Availability goes up on the first success and down on 2 consecutive
+		// failures: a new node is listed after one good probe, while one
+		// transient failure never delists a healthy node.
+		flipUp := r.Reachable
+		flipDown := !r.Reachable && r.FailureStreak >= 2
+		if r.Valid() && (flipUp || flipDown) {
+			state := map[string]any{"reachable": r.Reachable, "checkedAt": r.CheckedAt, "probeTarget": r.ProbeTarget, "targets": r.Targets, "engine": r.Engine, "latencyMs": r.LatencyMS, "status": r.Status, "incarnation": n.Incarnation, "configDigest": n.Digest}
+			if !r.Reachable {
+				state["error"] = "target_unreachable"
+			}
+			sb, _ := json.Marshal(state)
+			flips = append(flips, flip{n.Identity, r.CheckedAt, sb, r.Reachable})
+		}
+	}
+	if len(attempts) > 0 {
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO node_explorer_liveness_attempts(identity,incarnation,digest,checked_at,next_at,payload) VALUES `)
+		args := make([]any, 0, len(attempts)*6)
+		for i, a := range attempts {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d)", i*6+1, i*6+2, i*6+3, i*6+4, i*6+5, i*6+6)
+			args = append(args, a.id, a.incarnation, a.digest, a.checkedAt, a.nextAt, a.payload)
+		}
+		sb.WriteString(` ON CONFLICT(identity) DO UPDATE SET incarnation=EXCLUDED.incarnation,digest=EXCLUDED.digest,checked_at=EXCLUDED.checked_at,next_at=EXCLUDED.next_at,payload=EXCLUDED.payload`)
+		if _, err = tx.Exec(ctx, sb.String(), args...); err != nil {
+			return err
+		}
+	}
+	if len(flips) > 0 {
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO node_explorer_connectivity(identity,checked_at,payload) VALUES `)
+		args := make([]any, 0, len(flips)*3)
+		for i, f := range flips {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, "($%d,$%d,$%d)", i*3+1, i*3+2, i*3+3)
+			args = append(args, f.id, f.checkedAt, f.payload)
+		}
+		sb.WriteString(` ON CONFLICT(identity) DO UPDATE SET checked_at=EXCLUDED.checked_at,payload=EXCLUDED.payload`)
+		if _, err = tx.Exec(ctx, sb.String(), args...); err != nil {
+			return err
+		}
+		var sb2 strings.Builder
+		sb2.WriteString(`UPDATE node_explorer_node_registry r SET available=v.available FROM (VALUES `)
+		args2 := make([]any, 0, len(flips)*2)
+		for i, f := range flips {
+			if i > 0 {
+				sb2.WriteString(",")
+			}
+			fmt.Fprintf(&sb2, "($%d,$%d::boolean)", i*2+1, i*2+2)
+			args2 = append(args2, f.id, f.available)
+		}
+		sb2.WriteString(`) AS v(identity,available) WHERE r.identity=v.identity`)
+		if _, err = tx.Exec(ctx, sb2.String(), args2...); err != nil {
 			return err
 		}
 	}
