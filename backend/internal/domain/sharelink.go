@@ -18,7 +18,12 @@ import (
 // ShareLinkVersion bumps whenever the converter changes. Persisted failures
 // tagged with an older version re-enter the queue so a fixed parser retries
 // nodes that previously looked unsupported.
-const ShareLinkVersion = 9
+// v10: flagValue accepts yes/on/case variants, decodeBase64 requires a
+// round-trip, '+' is preserved for base64 query keys (ech/pbk/...),
+// gRPC no longer invents serviceName "/", TUIC UUID links no longer
+// carry an empty password. See converter strict-v2 for the matching
+// fingerprint change.
+const ShareLinkVersion = 10
 
 // ErrShareLink is returned for any link this converter cannot express as a
 // usable outbound. The message never includes the link itself: share links
@@ -49,18 +54,21 @@ func normalizeVLESSID(value string) (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16]), nil
 }
 
+// decodeBase64 tries the four base64 alphabets, but only accepts a
+// decoding that re-encodes to the input (ignoring trailing padding).
+// The old first-success order could silently decode one alphabet's
+// string under another and hand the wrong bytes to VMess/SSR passwords.
 func decodeBase64(value string) (string, error) {
-	if b, err := base64.RawURLEncoding.DecodeString(value); err == nil {
-		return string(b), nil
+	for _, enc := range []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding, base64.StdEncoding, base64.RawStdEncoding} {
+		b, err := enc.DecodeString(value)
+		if err != nil {
+			continue
+		}
+		if strings.TrimRight(enc.EncodeToString(b), "=") == strings.TrimRight(value, "=") {
+			return string(b), nil
+		}
 	}
-	if b, err := base64.URLEncoding.DecodeString(value); err == nil {
-		return string(b), nil
-	}
-	if b, err := base64.StdEncoding.DecodeString(value); err == nil {
-		return string(b), nil
-	}
-	b, err := base64.RawStdEncoding.DecodeString(value)
-	return string(b), err
+	return "", ErrShareLink
 }
 
 func validECHConfig(value string) bool {
@@ -121,8 +129,8 @@ func parseECHSetting(value string) (config, queryServerName, resolver string, ok
 }
 
 func flagValue(v string) bool {
-	switch v {
-	case "true", "1":
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "1", "yes", "on":
 		return true
 	}
 	return false
@@ -159,7 +167,12 @@ func normalizeTUICCredential(proxy ProxyConfig, user, password string) error {
 	id, err := normalizeUUID(user)
 	if err == nil {
 		proxy["uuid"] = id
-		proxy["password"] = password
+		// An empty password is "no password", not a password value:
+		// writing password:"" makes Mihomo treat the credential as
+		// present-but-empty and reject a token-style v5 link.
+		if password != "" {
+			proxy["password"] = password
+		}
 		return nil
 	}
 	if password == "" {
@@ -437,16 +450,22 @@ func urlProxy(link, name string) (ProxyConfig, error) {
 	secret, _ := u.User.Password()
 	password := secret
 	query := u.Query()
-	// ECH uses '+' both in base64 and between its DNS name and resolver.
-	// Subscription URLs often leave it literal; form decoding would turn it
-	// into a space. Preserve it only for ECH, without changing other fields.
+	// '+' is a literal character in base64, but form decoding turns it
+	// into a space. Subscription URLs often leave it literal, so restore
+	// it for every base64-valued query key, not just ECH: a '+' lost
+	// from pbk/publicKey corrupts the key and the node fails TLS/REALITY
+	// for a reason no log can explain.
 	for _, part := range strings.Split(u.RawQuery, "&") {
 		key, value, _ := strings.Cut(part, "=")
-		if decoded, err := url.QueryUnescape(key); err == nil && decoded == "ech" {
+		decoded, err := url.QueryUnescape(key)
+		if err != nil {
+			continue
+		}
+		switch decoded {
+		case "ech", "pbk", "publicKey", "public-key", "public_key":
 			if value, err := url.QueryUnescape(strings.ReplaceAll(value, "+", "%2B")); err == nil {
-				query.Set("ech", value)
+				query.Set(decoded, value)
 			}
-			break
 		}
 	}
 	get := query.Get
@@ -645,7 +664,10 @@ func applyTransport(proxy ProxyConfig, get func(string) string) error {
 		host = get("authority")
 	}
 	path := get("path")
-	if path == "" {
+	// "/" is a WS/HTTP default, not a gRPC service name. Defaulting the
+	// path here used to make applyTransport invent grpc-service-name "/"
+	// for links that specify neither, which Mihomo rejects.
+	if path == "" && network != "grpc" {
 		path = "/"
 	}
 	if network == "tcp" && get("headerType") == "http" {
@@ -672,8 +694,8 @@ func applyTransport(proxy ProxyConfig, get func(string) string) error {
 		proxy["ws-opts"] = opts
 	case network == "grpc":
 		proxy["network"] = network
-		proxy["grpc-opts"] = map[string]any{
-			"grpc-service-name": firstOr(get, "serviceName", "path"),
+		if serviceName := firstOr(get, "serviceName", "path"); serviceName != "" && serviceName != "/" {
+			proxy["grpc-opts"] = map[string]any{"grpc-service-name": serviceName}
 		}
 	case network == "http":
 		proxy["network"] = network

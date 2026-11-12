@@ -118,8 +118,9 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 		_ = tx.Rollback(ctx)
 	}()
 	var id string
-	err = tx.QueryRow(ctx, `SELECT identity FROM node_explorer_node_registry
- WHERE identity=$1 AND incarnation=$2 AND md5((node - 'rawLink' - 'generatedLink')::text)=$3 FOR UPDATE`, n.Identity, n.Incarnation, n.Digest).Scan(&id)
+	var prevAvailable bool
+	err = tx.QueryRow(ctx, `SELECT identity,available FROM node_explorer_node_registry
+ WHERE identity=$1 AND incarnation=$2 AND md5((node - 'rawLink' - 'generatedLink')::text)=$3 FOR UPDATE`, n.Identity, n.Incarnation, n.Digest).Scan(&id, &prevAvailable)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -134,13 +135,26 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 	}
 	var last Result
 	_ = json.Unmarshal(previous, &last)
-	r.FailureStreak, r.ErrorStreak = 0, 0
-	if r.Status == "unreachable" {
+	// Streaks are consecutive-verdict counters, not per-round resets.
+	// infrastructure / config_error / cancelled carry no verdict about
+	// the node, so they must neither increment nor clear either streak:
+	// the old code reset FailureStreak to 0 on every such round, so a
+	// dead node alternating unreachable/infrastructure never reached
+	// the 2-failure threshold and stayed available forever.
+	// A reachable verdict breaks a failure streak (and vice versa);
+	// only a verdict of the same kind extends its streak.
+	r.FailureStreak, r.SuccessStreak, r.ErrorStreak = last.FailureStreak, last.SuccessStreak, last.ErrorStreak
+	switch r.Status {
+	case "unreachable":
 		r.FailureStreak = last.FailureStreak + 1
-	} else if r.Status == "config_error" {
+		r.SuccessStreak = 0
+	case "reachable":
+		r.SuccessStreak = last.SuccessStreak + 1
+		r.FailureStreak = 0
+	case "config_error":
 		r.ErrorStreak = 1
 		if last.Status == r.Status && last.Reason == r.Reason {
-			r.ErrorStreak += last.ErrorStreak
+			r.ErrorStreak = last.ErrorStreak + 1
 		}
 	}
 	b, err := json.Marshal(r)
@@ -154,15 +168,27 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 		delay = backoff(interval, r.ErrorStreak, time.Hour)
 	} else if r.Status == "infrastructure" && interval > 0 {
 		delay += time.Duration(rand.Int64N(int64(interval)/5 + 1))
+	} else if r.Status == "reachable" && r.SuccessStreak == 1 && !prevAvailable {
+		// First success for a not-yet-available node is unconfirmed:
+		// re-probe soon (1 minute, the retry cadence) instead of
+		// waiting a full interval before the confirming probe.
+		if delay > time.Minute {
+			delay = time.Minute
+		}
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_liveness_attempts(identity,incarnation,digest,checked_at,next_at,payload)
  VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(identity) DO UPDATE SET incarnation=EXCLUDED.incarnation,digest=EXCLUDED.digest,
  checked_at=EXCLUDED.checked_at,next_at=EXCLUDED.next_at,payload=EXCLUDED.payload`, id, n.Incarnation, n.Digest, r.CheckedAt, time.Now().Add(delay), b); err != nil {
 		return err
 	}
-	// One failed round can be transient. Keep the last positive verdict until
-	// a second consecutive failure; its timestamp still enforces freshness.
-	if r.Valid() && (r.Reachable || r.FailureStreak >= 2) {
+	// Availability flips symmetrically: 2 consecutive failures to
+	// go down, 2 consecutive successes to come up. A node that is
+	// already available stays available on a (confirmed) success;
+	// a new node needs the second success before it is shown.
+	// One transient failure or success never flips the verdict.
+	flipUp := r.Reachable && (r.SuccessStreak >= 2 || prevAvailable)
+	flipDown := !r.Reachable && r.FailureStreak >= 2
+	if r.Valid() && (flipUp || flipDown) {
 		state := map[string]any{"reachable": r.Reachable, "checkedAt": r.CheckedAt, "probeTarget": r.ProbeTarget, "targets": r.Targets, "engine": r.Engine, "latencyMs": r.LatencyMS, "status": r.Status, "incarnation": n.Incarnation, "configDigest": n.Digest}
 		if !r.Reachable {
 			state["error"] = "target_unreachable"

@@ -65,12 +65,18 @@ func TestAvailabilityOwnershipAndStaleResults(t *testing.T) {
 		}
 	}
 	save("reachable", true)
+	// Symmetric flip: one success is unconfirmed, the node stays
+	// unavailable until the second consecutive success.
+	check(false)
+	save("reachable", true)
 	check(true)
 	save("infrastructure", false)
 	check(true)
 	check(true)
 	save("unreachable", false)
 	check(true)
+	// infrastructure between failures must not reset the streak.
+	save("infrastructure", false)
 	save("unreachable", false)
 	check(false)
 	if _, err = pool.Exec(ctx, "UPDATE node_explorer_node_registry SET node=node || '{\"name\":\"changed\"}'::jsonb WHERE identity=$1", n.Identity); err != nil {

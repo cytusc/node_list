@@ -31,7 +31,12 @@ type Result struct {
 	Targets     map[string]bool `json:"targets,omitempty"`
 	// FailureStreak counts consecutive "unreachable" verdicts for this
 	// configuration; the store uses it to back off dead addresses.
+	// SuccessStreak is its mirror: consecutive "reachable" verdicts.
+	// Availability flips symmetrically on 2 of either, so a single
+	// success cannot resurrect a flapping node any more than a
+	// single failure can kill a healthy one.
 	FailureStreak int `json:"failureStreak,omitempty"`
+	SuccessStreak int `json:"successStreak,omitempty"`
 	ErrorStreak   int `json:"errorStreak,omitempty"`
 }
 

@@ -4,6 +4,7 @@ package liveness
 
 import (
 	"fmt"
+	"strconv"
 
 	"strings"
 
@@ -26,10 +27,17 @@ func Decode(raw []byte) (Proxy, error) { return proxyprocess.Decode(raw) }
 
 // XrayOutbound is deliberately conservative: an unmodelled connection option
 // goes to Mihomo, never gets silently dropped. Version: Xray 26.10.21.
+//
+// Options Xray models natively are mapped here instead of forcing a
+// Mihomo fallback: HTTP/H2 transports, HTTPUpgrade + early-data,
+// XHTTP extensions (headers, no-grpc-header, padding, xmux reuse),
+// skip-cert-verify (allowInsecure), TCP fast open (sockopt) and
+// VMess alterId. Falling back for those only made the verdict depend
+// on which engine happened to run, not on whether the node works.
 func XrayOutbound(p Proxy) (Proxy, string) {
 	protocol := text(p, "type")
 	allowed := map[string]bool{}
-	for _, k := range strings.Fields("name type server port udp tfo tcp-fast-open tls servername sni alpn client-fingerprint skip-cert-verify network ws-opts grpc-opts xhttp-opts reality-opts") {
+	for _, k := range strings.Fields("name type server port udp tfo tcp-fast-open tls servername sni alpn client-fingerprint fingerprint skip-cert-verify network ws-opts grpc-opts http-opts h2-opts xhttp-opts reality-opts") {
 		allowed[k] = true
 	}
 	specific := map[string]string{"vless": "uuid flow", "vmess": "uuid cipher alterId", "trojan": "password", "ss": "cipher password", "http": "username password", "socks5": "username password"}
@@ -52,7 +60,7 @@ func XrayOutbound(p Proxy) (Proxy, string) {
 			}
 		}
 	}
-	for key, network := range map[string]string{"ws-opts": "ws", "grpc-opts": "grpc", "xhttp-opts": "xhttp"} {
+	for key, network := range map[string]string{"ws-opts": "ws", "grpc-opts": "grpc", "http-opts": "http", "h2-opts": "h2", "xhttp-opts": "xhttp"} {
 		if v, ok := p[key]; ok {
 			if _, valid := v.(map[string]any); !valid || text(p, "network") != network {
 				return nil, "transport_options"
@@ -67,15 +75,12 @@ func XrayOutbound(p Proxy) (Proxy, string) {
 			return nil, "reality_protocol"
 		}
 	}
-	if flag(p, "skip-cert-verify") {
-		return nil, "insecure_tls"
-	}
-	if flag(p, "tfo") || flag(p, "tcp-fast-open") {
-		return nil, "socket_options"
-	}
-	if protocol == "vmess" && text(p, "alterId") != "" && text(p, "alterId") != "0" {
-		return nil, "legacy_vmess"
-	}
+	// skip-cert-verify, TCP fast open and VMess alterId are all modelled
+	// by Xray (tlsSettings.allowInsecure, streamSettings.sockopt,
+	// users[].alterId), so they no longer force a Mihomo fallback.
+	// A relay that forwards correctly with a wrong certificate is
+	// usable with skip-verify; testing it under Xray with the same
+	// flag is the honest verdict, not a stricter one.
 	hasTLS := flag(p, "tls") || protocol == "trojan"
 	if !hasTLS && len(object(p, "reality-opts")) == 0 {
 		for _, key := range []string{"servername", "sni", "alpn", "client-fingerprint"} {
@@ -99,12 +104,33 @@ func XrayOutbound(p Proxy) (Proxy, string) {
 	case "ws":
 		opts := object(p, "ws-opts")
 		for k := range opts {
-			if k != "path" && k != "headers" {
+			if k != "path" && k != "headers" && k != "v2ray-http-upgrade" && k != "max-early-data" && k != "early-data-header-name" {
 				return nil, "ws_options"
 			}
 		}
-		stream["network"] = "ws"
-		stream["wsSettings"] = opts
+		if flag(opts, "v2ray-http-upgrade") {
+			// Mihomo encodes HTTPUpgrade as ws + v2ray-http-upgrade;
+			// Xray has a dedicated httpupgrade network.
+			stream["network"] = "httpupgrade"
+			settings := Proxy{"path": opts["path"]}
+			if host := wsHost(opts); host != "" {
+				settings["host"] = host
+			}
+			stream["httpupgradeSettings"] = settings
+		} else {
+			stream["network"] = "ws"
+			settings := Proxy{"path": opts["path"]}
+			if headers, ok := opts["headers"]; ok {
+				settings["headers"] = headers
+			}
+			if v, ok := opts["max-early-data"]; ok {
+				settings["maxEarlyData"] = v
+			}
+			if v, ok := opts["early-data-header-name"]; ok {
+				settings["earlyDataHeaderName"] = v
+			}
+			stream["wsSettings"] = settings
+		}
 	case "grpc":
 		opts := object(p, "grpc-opts")
 		for k := range opts {
@@ -114,17 +140,51 @@ func XrayOutbound(p Proxy) (Proxy, string) {
 		}
 		stream["network"] = "grpc"
 		stream["grpcSettings"] = Proxy{"serviceName": opts["grpc-service-name"]}
+	case "http":
+		opts := object(p, "http-opts")
+		for k := range opts {
+			if k != "path" && k != "headers" {
+				return nil, "http_options"
+			}
+		}
+		stream["network"] = "http"
+		settings := Proxy{}
+		if v := firstString(opts["path"]); v != "" {
+			settings["path"] = v
+		}
+		if host := httpHost(opts); host != nil {
+			settings["host"] = host
+		}
+		stream["httpSettings"] = settings
+	case "h2":
+		opts := object(p, "h2-opts")
+		for k := range opts {
+			if k != "path" && k != "host" {
+				return nil, "h2_options"
+			}
+		}
+		stream["network"] = "h2"
+		settings := Proxy{"path": opts["path"]}
+		if v, ok := opts["host"]; ok {
+			settings["host"] = v
+		}
+		stream["h2Settings"] = settings
 	case "xhttp":
 		opts := object(p, "xhttp-opts")
 		for k := range opts {
-			if k != "path" && k != "host" && k != "mode" {
+			switch k {
+			case "path", "host", "mode", "headers", "no-grpc-header", "x-padding-bytes", "reuse-settings", "session-key", "session-placement", "sc-max-each-post-bytes", "sc-min-posts-interval-ms":
+			default:
 				return nil, "xhttp_options"
 			}
 		}
 		stream["network"] = "xhttp"
-		stream["xhttpSettings"] = opts
+		stream["xhttpSettings"] = xhttpSettings(opts)
 	default:
 		return nil, "transport"
+	}
+	if flag(p, "tfo") || flag(p, "tcp-fast-open") {
+		stream["sockopt"] = Proxy{"tcpFastOpen": true}
 	}
 	sni := text(p, "servername")
 	if sni == "" {
@@ -154,6 +214,12 @@ func XrayOutbound(p Proxy) (Proxy, string) {
 				}
 				settings[name] = v
 			}
+		}
+		if flag(p, "skip-cert-verify") {
+			settings["allowInsecure"] = true
+		}
+		if v := text(p, "fingerprint"); v != "" {
+			settings["pinnedPeerCertificateSha256"] = v
 		}
 		stream["tlsSettings"] = settings
 	}
@@ -193,7 +259,10 @@ func XrayOutbound(p Proxy) (Proxy, string) {
 	case "ss":
 		cipher := text(p, "cipher")
 		switch cipher {
-		case "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305":
+		case "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
+			// Legacy stream ciphers Xray still dials; rejecting them
+			// only hid working nodes behind a Mihomo fallback.
+			"aes-128-cfb", "aes-256-cfb", "chacha20", "chacha20-ietf":
 		default:
 			return nil, "ss_cipher"
 		}
@@ -226,4 +295,101 @@ func XrayOutbound(p Proxy) (Proxy, string) {
 		return nil, "protocol_options"
 	}
 	return out, ""
+}
+
+// firstString takes the first element of a string/list value, or "".
+func firstString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case []string:
+		if len(t) > 0 {
+			return t[0]
+		}
+	case []any:
+		if len(t) > 0 {
+			return fmt.Sprint(t[0])
+		}
+	}
+	return ""
+}
+
+// wsHost extracts the Host header from ws-opts headers, if present.
+func wsHost(opts Proxy) string {
+	if headers, ok := opts["headers"].(map[string]any); ok {
+		return text(headers, "Host")
+	}
+	return ""
+}
+
+// httpHost extracts the Host header list from http-opts headers.
+func httpHost(opts Proxy) any {
+	if headers, ok := opts["headers"].(map[string]any); ok {
+		if v, ok := headers["Host"]; ok {
+			return v
+		}
+	}
+	return nil
+}
+
+func toIntValue(v any) any {
+	switch t := v.(type) {
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case float64:
+		return int(t)
+	case string:
+		if n, err := strconv.Atoi(t); err == nil {
+			return n
+		}
+		return t
+	}
+	return v
+}
+
+// xhttpSettings translates Mihomo kebab-case xhttp-opts into Xray
+// camelCase xhttpSettings. Unknown keys were already rejected above,
+// so this is a pure rename, never a silent drop.
+func xhttpSettings(opts Proxy) Proxy {
+	out := Proxy{}
+	for k, v := range opts {
+		switch k {
+		case "path", "host", "mode", "headers":
+			out[k] = v
+		case "no-grpc-header":
+			out["noGRPCHeader"] = v
+		case "x-padding-bytes":
+			out["xPaddingBytes"] = toIntValue(v)
+		case "sc-max-each-post-bytes":
+			out["scMaxEachPostBytes"] = toIntValue(v)
+		case "sc-min-posts-interval-ms":
+			out["scMinPostsIntervalMs"] = toIntValue(v)
+		case "session-key":
+			out["sessionKey"] = v
+		case "session-placement":
+			out["sessionPlacement"] = v
+		case "reuse-settings":
+			out["xmux"] = xhttpReuseSettings(v)
+		}
+	}
+	return out
+}
+
+func xhttpReuseSettings(v any) Proxy {
+	aliases := map[string]string{
+		"max-concurrency": "maxConcurrency", "max-connections": "maxConnections",
+		"c-max-reuse-times": "cMaxReuseTimes", "h-max-request-times": "hMaxRequestTimes",
+		"h-max-reusable-secs": "hMaxReusableSecs", "h-keep-alive-period": "hKeepAlivePeriod",
+	}
+	out := Proxy{}
+	if m, ok := v.(map[string]any); ok {
+		for k, val := range m {
+			if target, ok := aliases[k]; ok {
+				out[target] = toIntValue(val)
+			}
+		}
+	}
+	return out
 }
