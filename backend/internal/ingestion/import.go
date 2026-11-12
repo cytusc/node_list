@@ -110,7 +110,14 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 	err = tx.QueryRow(ctx, `SELECT status FROM node_explorer_source_batches WHERE source=$1 AND digest=$2`, source, digest).Scan(&existing)
 	if err == nil {
 		if existing == "complete" {
-			if _, err = tx.Exec(ctx, `UPDATE node_explorer_source_occurrences SET current=(digest=$2) WHERE source=$1`, source, digest); err != nil {
+			// Reactivate only the rows whose flag actually changes. The
+			// previous form rewrote every occurrence of the source on each
+			// repeat fetch (millions of rows for a stable subscription),
+			// which dominated the database's update volume.
+			if _, err = tx.Exec(ctx, `UPDATE node_explorer_source_occurrences SET current=false WHERE source=$1 AND current AND digest<>$2`, source, digest); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(ctx, `UPDATE node_explorer_source_occurrences SET current=true WHERE source=$1 AND digest=$2 AND NOT current`, source, digest); err != nil {
 				return err
 			}
 		}
@@ -214,8 +221,10 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 		} else if err != nil {
 			return err
 		}
-		// Keep the first complete config and URI. A config-only repeat cannot erase an original.
-		_, err = tx.Exec(ctx, `UPDATE node_explorer_node_registry SET node=CASE WHEN coalesce(node->>'rawLink','')='' AND $2<>'' THEN node || jsonb_build_object('rawLink',$2::text) ELSE node END WHERE identity=$1`, id, n.RawLink)
+		// Only touch the registry row when the raw link is actually being
+		// added; the previous form rewrote every node's row on every new
+		// batch even when nothing changed.
+		_, err = tx.Exec(ctx, `UPDATE node_explorer_node_registry SET node=node || jsonb_build_object('rawLink',$2::text) WHERE identity=$1 AND coalesce(node->>'rawLink','')='' AND $2<>''`, id, n.RawLink)
 		if err != nil {
 			return err
 		}

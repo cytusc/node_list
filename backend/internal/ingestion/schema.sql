@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS node_explorer_source_occurrences (
  FOREIGN KEY(source,digest) REFERENCES node_explorer_source_batches(source,digest)
 );
 CREATE INDEX IF NOT EXISTS node_explorer_source_current ON node_explorer_source_occurrences(source) WHERE current;
+-- The registry DELETE's foreign-key check looks up occurrences by identity;
+-- without this index it seq-scans the whole table per deleted node.
+CREATE INDEX IF NOT EXISTS node_explorer_source_occurrences_identity_idx ON node_explorer_source_occurrences(identity);
 -- Legacy adoption compares strict configs after removing display-only fields.
 -- Hash the JSONB text to keep the index key bounded for large node configs;
 -- the query still verifies the complete JSONB value to rule out hash collisions.

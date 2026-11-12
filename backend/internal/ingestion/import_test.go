@@ -54,6 +54,47 @@ func save(t *testing.T, r *Repository, source, digest string, v Conversion, want
 		t.Fatalf("save: %v want %v", err, want)
 	}
 }
+func TestRepeatFetchDoesNotRewriteOccurrences(t *testing.T) {
+	r, c := fixture(t)
+	v := convert(t, c, configuration(80))
+	save(t, r, "one", "a", v, nil)
+	xmins := func() []uint32 {
+		t.Helper()
+		rows, err := r.Pool.Query(context.Background(), `SELECT xmin FROM node_explorer_source_occurrences ORDER BY source,digest,position`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []uint32
+		for rows.Next() {
+			var x uint32
+			if err := rows.Scan(&x); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, x)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	before := xmins()
+	// Re-fetching the digest that is already current must not rewrite any
+	// occurrence row (previously it rewrote every row of the source).
+	save(t, r, "one", "a", v, nil)
+	after := xmins()
+	if len(before) != len(after) {
+		t.Fatalf("occurrence rows changed: %d -> %d", len(before), len(after))
+	}
+	for i := range before {
+		if before[i] != after[i] {
+			t.Fatalf("occurrence row %d rewritten on repeat fetch", i)
+		}
+	}
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one' AND current") != 1 {
+		t.Fatal("repeat fetch changed current membership")
+	}
+}
 func TestConcurrentReplayAndSourceMembership(t *testing.T) {
 	r, c := fixture(t)
 	ctx := context.Background()
