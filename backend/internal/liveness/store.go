@@ -122,6 +122,7 @@ func (d *DB) Due(ctx context.Context, limit int) ([]Candidate, error) {
 	}
 	return nodes, rows.Err()
 }
+
 // SaveItem is one completed probe result awaiting persistence.
 type SaveItem struct {
 	Node     Candidate
