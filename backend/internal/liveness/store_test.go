@@ -65,9 +65,9 @@ func TestAvailabilityOwnershipAndStaleResults(t *testing.T) {
 		}
 	}
 	save("reachable", true)
-	// Symmetric flip: one success is unconfirmed, the node stays
-	// unavailable until the second consecutive success.
-	check(false)
+	// One success lists the node immediately; no confirming probe is
+	// needed before it appears.
+	check(true)
 	save("reachable", true)
 	check(true)
 	save("infrastructure", false)
