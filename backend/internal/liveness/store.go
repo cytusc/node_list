@@ -169,9 +169,9 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
 	} else if r.Status == "infrastructure" && interval > 0 {
 		delay += time.Duration(rand.Int64N(int64(interval)/5 + 1))
 	} else if r.Status == "reachable" && r.SuccessStreak == 1 && !prevAvailable {
-		// First success for a not-yet-available node is unconfirmed:
-		// re-probe soon (1 minute, the retry cadence) instead of
-		// waiting a full interval before the confirming probe.
+		// A first success lists the node immediately; re-probe soon
+		// (1 minute, the retry cadence) to confirm it quickly instead
+		// of waiting a full interval.
 		if delay > time.Minute {
 			delay = time.Minute
 		}
@@ -181,12 +181,10 @@ func (d *DB) Save(ctx context.Context, n Candidate, r Result, interval time.Dura
  checked_at=EXCLUDED.checked_at,next_at=EXCLUDED.next_at,payload=EXCLUDED.payload`, id, n.Incarnation, n.Digest, r.CheckedAt, time.Now().Add(delay), b); err != nil {
 		return err
 	}
-	// Availability flips symmetrically: 2 consecutive failures to
-	// go down, 2 consecutive successes to come up. A node that is
-	// already available stays available on a (confirmed) success;
-	// a new node needs the second success before it is shown.
-	// One transient failure or success never flips the verdict.
-	flipUp := r.Reachable && (r.SuccessStreak >= 2 || prevAvailable)
+	// Availability goes up on the first success and down on 2 consecutive
+	// failures: a new node is listed after one good probe, while one
+	// transient failure never delists a healthy node.
+	flipUp := r.Reachable
 	flipDown := !r.Reachable && r.FailureStreak >= 2
 	if r.Valid() && (flipUp || flipDown) {
 		state := map[string]any{"reachable": r.Reachable, "checkedAt": r.CheckedAt, "probeTarget": r.ProbeTarget, "targets": r.Targets, "engine": r.Engine, "latencyMs": r.LatencyMS, "status": r.Status, "incarnation": n.Incarnation, "configDigest": n.Digest}

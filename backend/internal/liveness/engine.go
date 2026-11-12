@@ -32,9 +32,9 @@ type Result struct {
 	// FailureStreak counts consecutive "unreachable" verdicts for this
 	// configuration; the store uses it to back off dead addresses.
 	// SuccessStreak is its mirror: consecutive "reachable" verdicts.
-	// Availability flips symmetrically on 2 of either, so a single
-	// success cannot resurrect a flapping node any more than a
-	// single failure can kill a healthy one.
+	// Availability goes up on the first success and down on 2 consecutive
+	// failures, so a node appears after one good probe while a single
+	// failure cannot delist a healthy one.
 	FailureStreak int `json:"failureStreak,omitempty"`
 	SuccessStreak int `json:"successStreak,omitempty"`
 	ErrorStreak   int `json:"errorStreak,omitempty"`
