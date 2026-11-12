@@ -16,17 +16,32 @@ type Candidate struct {
 	Node                          json.RawMessage
 }
 
-// These are input and output contracts, not calls into other services.
-// available is an output only: even previously unreachable nodes are scheduled.
-const dueSQL = `SELECT n.identity,n.incarnation,md5((n.node - 'rawLink' - 'generatedLink')::text),n.node
+// Fresh nodes are probed first: a node that has never been probed, whose
+// config changed, or whose first success is still waiting to list it can
+// reach the homepage with one more probe, so it gets half the slots.
+// Available nodes keep a third so the live list stays fresh, and dead
+// nodes keep a sixth so a revived address is noticed. No group can starve
+// the others, and an empty group leaves its slots to the remaining ones.
+const dueSQL = `WITH base AS (
+ SELECT n.identity,n.incarnation,md5((n.node - 'rawLink' - 'generatedLink')::text) AS digest,n.node,n.available,
+  a.identity AS attempt_id,a.incarnation AS attempt_incarnation,a.digest AS attempt_digest,
+  coalesce((a.payload->>'successStreak')::int,0) AS streak,
+  coalesce(a.next_at,'-infinity'::timestamptz) AS due_at
  FROM node_explorer_node_registry n
  LEFT JOIN node_explorer_liveness_attempts a USING(identity)
- WHERE (a.identity IS NULL OR a.incarnation<>n.incarnation OR a.digest<>md5((n.node - 'rawLink' - 'generatedLink')::text) OR a.next_at<=now())
- -- Interleave three available nodes with one other node. Neither group can
- -- starve the other, and an empty group leaves all slots to the remaining one.
- ORDER BY (row_number() OVER (PARTITION BY n.available ORDER BY coalesce(a.next_at,'-infinity'::timestamptz),n.identity)-1)
- / CASE WHEN n.available THEN 3 ELSE 1 END, n.available DESC,
- coalesce(a.next_at,'-infinity'::timestamptz),n.identity LIMIT $1`
+)
+SELECT identity,incarnation,digest,node FROM (
+ SELECT identity,incarnation,digest,node,
+  CASE WHEN attempt_id IS NULL OR attempt_incarnation<>incarnation OR attempt_digest<>digest OR (NOT available AND streak>=1) THEN 0
+   WHEN available THEN 1 ELSE 2 END AS prio,
+  CASE WHEN NOT available AND streak>=1 THEN 0 ELSE 1 END AS subprio,
+  due_at
+ FROM base
+ WHERE attempt_id IS NULL OR attempt_incarnation<>incarnation OR attempt_digest<>digest OR due_at<=now()
+) s
+ORDER BY (row_number() OVER (PARTITION BY prio ORDER BY subprio,due_at,identity)-1)
+ / CASE WHEN prio=0 THEN 3 WHEN prio=1 THEN 2 ELSE 1 END,
+ prio,subprio,due_at,identity LIMIT $1`
 
 const schemaSQL = `CREATE TABLE IF NOT EXISTS node_explorer_liveness_attempts (
  identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity) ON DELETE CASCADE,

@@ -100,35 +100,58 @@ func TestAvailabilityOwnershipAndStaleResults(t *testing.T) {
 	}
 }
 
-func TestDueReservesAvailableCapacityWithoutStarvation(t *testing.T) {
+func TestDuePrioritisesFreshNodes(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.Database(t)
 	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,available) SELECT 'available-'||i,'{}',true FROM generate_series(1,12) i;
- INSERT INTO node_explorer_node_registry(identity,node,available) SELECT 'new-'||i,'{}',false FROM generate_series(1,12) i`); err != nil {
+	// Fresh nodes have no attempts row; available and dead nodes have one
+	// with a matching incarnation and digest, due an hour ago. A pending
+	// node has one success but is not yet listed, so it leads the fresh
+	// class. Identities sort so the class, not the name, decides the order.
+	if _, err := pool.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,available) SELECT 'fresh-'||i,'{}',false FROM generate_series(1,6) i;
+ INSERT INTO node_explorer_node_registry(identity,node,available) SELECT 'avail-'||i,'{}',true FROM generate_series(1,6) i;
+ INSERT INTO node_explorer_node_registry(identity,node,available) SELECT 'dead-'||i,'{}',false FROM generate_series(1,6) i;
+ INSERT INTO node_explorer_node_registry(identity,node,available) VALUES('pending-1','{}',false);
+ INSERT INTO node_explorer_liveness_attempts(identity,incarnation,digest,checked_at,next_at,payload)
+  SELECT identity,incarnation,md5((node - 'rawLink' - 'generatedLink')::text),now(),now() - interval '1 hour','{}'::jsonb
+  FROM node_explorer_node_registry WHERE identity LIKE 'avail-%';
+ INSERT INTO node_explorer_liveness_attempts(identity,incarnation,digest,checked_at,next_at,payload)
+  SELECT identity,incarnation,md5((node - 'rawLink' - 'generatedLink')::text),now(),now() - interval '1 hour','{"failureStreak":1}'::jsonb
+  FROM node_explorer_node_registry WHERE identity LIKE 'dead-%';
+ INSERT INTO node_explorer_liveness_attempts(identity,incarnation,digest,checked_at,next_at,payload)
+  SELECT identity,incarnation,md5((node - 'rawLink' - 'generatedLink')::text),now(),now() - interval '1 hour','{"successStreak":1}'::jsonb
+  FROM node_explorer_node_registry WHERE identity='pending-1'`); err != nil {
 		t.Fatal(err)
 	}
 	d := DB{Pool: pool}
-	nodes, err := d.Due(ctx, 8)
-	if err != nil || len(nodes) != 8 {
+	nodes, err := d.Due(ctx, 12)
+	if err != nil || len(nodes) != 12 {
 		t.Fatalf("due: %d %v", len(nodes), err)
 	}
-	available := 0
+	if nodes[0].Identity != "pending-1" {
+		t.Fatalf("first node=%s want pending-1", nodes[0].Identity)
+	}
+	counts := map[string]int{}
 	for _, n := range nodes {
-		if strings.HasPrefix(n.Identity, "available-") {
-			available++
-		}
+		counts[strings.SplitN(n.Identity, "-", 2)[0]]++
 	}
-	if available != 6 {
-		t.Fatalf("available slots=%d want 6/8", available)
+	// Fresh gets half the slots (3:2:1): the pending node plus five fresh,
+	// four available, two dead.
+	if counts["fresh"] != 5 || counts["pending"] != 1 || counts["avail"] != 4 || counts["dead"] != 2 {
+		t.Fatalf("slots=%v want fresh=5 pending=1 avail=4 dead=2", counts)
 	}
-	if _, err := pool.Exec(ctx, `DELETE FROM node_explorer_node_registry WHERE NOT available`); err != nil {
+	if _, err := pool.Exec(ctx, `DELETE FROM node_explorer_node_registry WHERE identity LIKE 'dead-%'`); err != nil {
 		t.Fatal(err)
 	}
-	nodes, err = d.Due(ctx, 8)
-	if err != nil || len(nodes) != 8 {
+	nodes, err = d.Due(ctx, 12)
+	if err != nil || len(nodes) != 12 {
 		t.Fatalf("unused quota not filled: %d %v", len(nodes), err)
+	}
+	for _, n := range nodes {
+		if strings.HasPrefix(n.Identity, "dead-") {
+			t.Fatalf("dead node returned after delete: %s", n.Identity)
+		}
 	}
 }
