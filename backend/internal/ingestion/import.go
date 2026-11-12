@@ -59,7 +59,7 @@ func (i *Importer) request(ctx context.Context, request any) error {
 	return i.Repository.Save(ctx, i.Source, digest, converted)
 }
 
-// Save commits nodes, source occurrences and URI evidence in one transaction.
+// Save commits nodes and URI evidence in one transaction.
 // It never mutates availability, incarnation, exit, attributes or work tables.
 func (r *Repository) Save(ctx context.Context, source, digest string, result Conversion) error {
 	if source == "" || len(source) > 100 || result.Version != converterVersion || result.Total < 0 || result.Total > 20000 || len(result.Nodes)+len(result.Rejected) != result.Total {
@@ -304,21 +304,10 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 			return err
 		}
 	}
-	if len(result.Nodes) > 0 {
-		var sb strings.Builder
-		sb.WriteString(`INSERT INTO node_explorer_source_occurrences(source,digest,position,identity,name) VALUES `)
-		args := make([]any, 0, len(result.Nodes)*5)
-		for i, n := range result.Nodes {
-			if i > 0 {
-				sb.WriteString(",")
-			}
-			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d)", i*5+1, i*5+2, i*5+3, i*5+4, i*5+5)
-			args = append(args, source, digest, n.Index, byFP[n.Fingerprint].id, n.Name)
-		}
-		if _, err = tx.Exec(ctx, sb.String(), args...); err != nil {
-			return err
-		}
-	}
+	// Source occurrences are no longer written: nothing reads
+	// node_explorer_source_occurrences (no Go code, no PHP, no SQL view
+	// uses it), and each batch wrote one row per node. The table and its
+	// existing rows are kept.
 	// Source links are no longer written: nothing reads
 	// node_explorer_source_links (it was link history only), and each
 	// batch wrote up to two rows per node. The table and its existing
