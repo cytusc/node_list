@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cytusc/node_list/backend/internal/domain"
@@ -148,71 +149,180 @@ func (r *Repository) Save(ctx context.Context, source, digest string, result Con
 	if err != nil {
 		return err
 	}
-	for index, n := range result.Nodes {
-		id := "src1:" + n.Fingerprint
-		var canonical string
-		err = tx.QueryRow(ctx, `SELECT identity,canonical FROM node_explorer_source_connections WHERE version=$1 AND fingerprint=$2`, result.Version, n.Fingerprint).Scan(&id, &canonical)
-		if err == nil && canonical != n.Canonical {
-			return errors.New("connection fingerprint collision")
+	// Resolve identities and persist the batch with a few multi-row
+	// statements instead of one query per node. A batch used to issue up
+	// to five statements per node (connections lookup, legacy adoption,
+	// registry insert, connections insert, rawLink update, occurrence
+	// insert); it now issues one connections lookup, one adoption lookup
+	// per genuinely new fingerprint, and one multi-row statement per
+	// table.
+	fps := make([]string, len(result.Nodes))
+	for i, n := range result.Nodes {
+		fps[i] = n.Fingerprint
+	}
+	type knownConn struct {
+		identity, canonical string
+	}
+	known := map[string]knownConn{}
+	connRows, err := tx.Query(ctx, `SELECT fingerprint,identity,canonical FROM node_explorer_source_connections WHERE version=$1 AND fingerprint=ANY($2)`, result.Version, fps)
+	if err != nil {
+		return err
+	}
+	for connRows.Next() {
+		var fp, id, canonical string
+		if err = connRows.Scan(&fp, &id, &canonical); err != nil {
+			connRows.Close()
+			return err
 		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Adopt only one byte-equivalent strict-config legacy record. Never merge legacy rows.
-			var material map[string]json.RawMessage
-			if json.Unmarshal([]byte(n.Canonical), &material) != nil {
-				return errors.New("invalid canonical configuration")
-			}
-			if _, opaque := material["uri"]; !opaque {
-				rows, e := tx.Query(ctx, `SELECT r.identity FROM node_explorer_node_registry r WHERE md5(((r.node->'rawConfig')-'name'-'sub_tag')::text)=md5($1::jsonb::text) AND (r.node->'rawConfig')-'name'-'sub_tag'=$1::jsonb AND NOT EXISTS(SELECT 1 FROM node_explorer_source_connections c WHERE c.identity=r.identity) ORDER BY r.identity LIMIT 2`, string(material["config"]))
+		known[fp] = knownConn{id, canonical}
+	}
+	connRows.Close()
+	if err = connRows.Err(); err != nil {
+		return err
+	}
+	type resolved struct {
+		id          string
+		preExisting bool
+	}
+	byFP := map[string]resolved{}
+	adopted := map[string]bool{}
+	type newFP struct {
+		fingerprint, canonical, identity string
+		payload                          []byte
+	}
+	var fresh []newFP
+	rawLinkSeen := map[string]bool{}
+	var rawLinks [][2]string
+	for index, n := range result.Nodes {
+		r, ok := byFP[n.Fingerprint]
+		if !ok {
+			r.id = "src1:" + n.Fingerprint
+			if k, knownFP := known[n.Fingerprint]; knownFP {
+				if k.canonical != n.Canonical {
+					return errors.New("connection fingerprint collision")
+				}
+				r.id = k.identity
+				r.preExisting = true
+			} else {
+				// Adopt only one byte-equivalent strict-config legacy
+				// record. Never merge legacy rows.
+				var material map[string]json.RawMessage
+				if json.Unmarshal([]byte(n.Canonical), &material) != nil {
+					return errors.New("invalid canonical configuration")
+				}
+				if _, opaque := material["uri"]; !opaque {
+					rows, e := tx.Query(ctx, `SELECT r.identity FROM node_explorer_node_registry r WHERE md5(((r.node->'rawConfig')-'name'-'sub_tag')::text)=md5($1::jsonb::text) AND (r.node->'rawConfig')-'name'-'sub_tag'=$1::jsonb AND NOT EXISTS(SELECT 1 FROM node_explorer_source_connections c WHERE c.identity=r.identity) ORDER BY r.identity LIMIT 2`, string(material["config"]))
+					if e != nil {
+						return e
+					}
+					var candidates []string
+					for rows.Next() {
+						var candidate string
+						if e = rows.Scan(&candidate); e != nil {
+							rows.Close()
+							return e
+						}
+						// The connections for this batch are not inserted
+						// yet, so a legacy identity adopted by an earlier
+						// fingerprint in this batch is still invisible to
+						// the NOT EXISTS check; exclude it here.
+						if !adopted[candidate] {
+							candidates = append(candidates, candidate)
+						}
+					}
+					rows.Close()
+					if e = rows.Err(); e != nil {
+						return e
+					}
+					if len(candidates) == 1 {
+						r.id = candidates[0]
+						r.preExisting = true
+						adopted[r.id] = true
+					}
+				}
+				payload, e := json.Marshal(nodes[index])
 				if e != nil {
 					return e
 				}
-				var candidates []string
-				for rows.Next() {
-					var candidate string
-					if e = rows.Scan(&candidate); e != nil {
-						rows.Close()
-						return e
-					}
-					candidates = append(candidates, candidate)
-				}
-				rows.Close()
-				if e = rows.Err(); e != nil {
-					return e
-				}
-				if len(candidates) == 1 {
-					id = candidates[0]
-				}
+				fresh = append(fresh, newFP{n.Fingerprint, n.Canonical, r.id, payload})
 			}
-			payload, e := json.Marshal(nodes[index])
-			if e != nil {
-				return e
-			}
-			_, err = tx.Exec(ctx, `INSERT INTO node_explorer_node_registry(identity,node,available) VALUES($1,$2,false) ON CONFLICT(identity) DO NOTHING`, id, payload)
-			if err != nil {
-				return err
-			}
-			_, err = tx.Exec(ctx, `INSERT INTO node_explorer_source_connections(version,fingerprint,canonical,identity) VALUES($1,$2,$3,$4)`, result.Version, n.Fingerprint, n.Canonical, id)
-			if err != nil {
-				return err
-			}
-		} else if err != nil {
-			return err
+			byFP[n.Fingerprint] = r
 		}
 		// Only touch the registry row when the raw link is actually being
 		// added; the previous form rewrote every node's row on every new
-		// batch even when nothing changed.
-		_, err = tx.Exec(ctx, `UPDATE node_explorer_node_registry SET node=node || jsonb_build_object('rawLink',$2::text) WHERE identity=$1 AND coalesce(node->>'rawLink','')='' AND $2<>''`, id, n.RawLink)
-		if err != nil {
-			return err
+		// batch even when nothing changed. A fresh src1 identity is
+		// inserted with the raw link already in its payload, so it needs
+		// no update.
+		if n.RawLink != "" && r.preExisting && !rawLinkSeen[r.id] {
+			rawLinkSeen[r.id] = true
+			rawLinks = append(rawLinks, [2]string{r.id, n.RawLink})
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO node_explorer_source_occurrences(source,digest,position,identity,name) VALUES($1,$2,$3,$4,$5)`, source, digest, n.Index, id, n.Name); err != nil {
-			return err
-		}
-		// Source links are no longer written: nothing reads
-		// node_explorer_source_links (it was link history only), and each
-		// batch wrote up to two rows per node. The table and its existing
-		// rows are kept.
 	}
+	// Registry rows must exist before connections and occurrences reference them.
+	if len(fresh) > 0 {
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO node_explorer_node_registry(identity,node,available) VALUES `)
+		args := make([]any, 0, len(fresh)*2)
+		for i, f := range fresh {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, "($%d,$%d,false)", i*2+1, i*2+2)
+			args = append(args, f.identity, f.payload)
+		}
+		sb.WriteString(` ON CONFLICT(identity) DO NOTHING`)
+		if _, err = tx.Exec(ctx, sb.String(), args...); err != nil {
+			return err
+		}
+		var sb2 strings.Builder
+		sb2.WriteString(`INSERT INTO node_explorer_source_connections(version,fingerprint,canonical,identity) VALUES `)
+		args2 := make([]any, 0, len(fresh)*4)
+		for i, f := range fresh {
+			if i > 0 {
+				sb2.WriteString(",")
+			}
+			fmt.Fprintf(&sb2, "($%d,$%d,$%d,$%d)", i*4+1, i*4+2, i*4+3, i*4+4)
+			args2 = append(args2, result.Version, f.fingerprint, f.canonical, f.identity)
+		}
+		if _, err = tx.Exec(ctx, sb2.String(), args2...); err != nil {
+			return err
+		}
+	}
+	if len(rawLinks) > 0 {
+		var sb strings.Builder
+		sb.WriteString(`UPDATE node_explorer_node_registry r SET node=r.node || jsonb_build_object('rawLink',v.rawlink) FROM (VALUES `)
+		args := make([]any, 0, len(rawLinks)*2)
+		for i, rl := range rawLinks {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, "($%d,$%d)", i*2+1, i*2+2)
+			args = append(args, rl[0], rl[1])
+		}
+		sb.WriteString(`) AS v(identity,rawlink) WHERE r.identity=v.identity AND coalesce(r.node->>'rawLink','')='' AND v.rawlink<>''`)
+		if _, err = tx.Exec(ctx, sb.String(), args...); err != nil {
+			return err
+		}
+	}
+	if len(result.Nodes) > 0 {
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO node_explorer_source_occurrences(source,digest,position,identity,name) VALUES `)
+		args := make([]any, 0, len(result.Nodes)*5)
+		for i, n := range result.Nodes {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d)", i*5+1, i*5+2, i*5+3, i*5+4, i*5+5)
+			args = append(args, source, digest, n.Index, byFP[n.Fingerprint].id, n.Name)
+		}
+		if _, err = tx.Exec(ctx, sb.String(), args...); err != nil {
+			return err
+		}
+	}
+	// Source links are no longer written: nothing reads
+	// node_explorer_source_links (it was link history only), and each
+	// batch wrote up to two rows per node. The table and its existing
+	// rows are kept.
 	// Rejections are no longer recorded: nothing reads
 	// node_explorer_source_rejections, and the rejection counts are already
 	// kept on the batch row.
