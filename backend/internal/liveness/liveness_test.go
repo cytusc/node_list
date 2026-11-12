@@ -108,12 +108,12 @@ func TestFailedControlPreservesAvailabilityVerdict(t *testing.T) {
 	failed := fakeEngine(func(context.Context, Proxy) Result {
 		return Result{Engine: "mihomo", Status: "unreachable", CheckedAt: time.Now()}
 	})
-	r := Runner{Store: st, Xray: failed, Mihomo: failed, XrayWorkers: 1, MihomoWorkers: 1, Interval: time.Hour, Retry: time.Minute, Control: func(context.Context) bool { return false }}
+	r := Runner{Store: st, Xray: failed, Mihomo: failed, XrayWorkers: 1, MihomoWorkers: 1, Interval: time.Hour, Retry: time.Minute, SaveFlushInterval: 20 * time.Millisecond, Control: func(context.Context) bool { return false }}
 	finished := make(chan error, 1)
 	go func() { finished <- r.Run(ctx) }()
 	select {
 	case <-st.done:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("control result did not complete")
 	}
 	cancel()
@@ -151,10 +151,17 @@ func (s *memoryStore) Due(context.Context, int) ([]Candidate, error) {
 	return out, nil
 }
 func (s *memoryStore) Save(_ context.Context, n Candidate, r Result, _ time.Duration) error {
+	return s.SaveBatch(context.Background(), []SaveItem{{Node: n, Result: r}})
+}
+func (s *memoryStore) SaveBatch(_ context.Context, items []SaveItem) error {
 	s.mu.Lock()
-	s.saved[n.Identity] = r
+	for _, it := range items {
+		s.saved[it.Node.Identity] = it.Result
+	}
 	s.mu.Unlock()
-	s.done <- n.Identity
+	for _, it := range items {
+		s.done <- it.Node.Identity
+	}
 	return nil
 }
 func (s *memoryStore) Heartbeat(context.Context, any) error { return nil }
@@ -175,14 +182,14 @@ func TestIndependentPoolsAndSingleFallbackResult(t *testing.T) {
 		return Result{Engine: "xray", Status: "reachable", Reachable: true, CheckedAt: time.Now()}
 	})
 	m := fakeEngine(func(ctx context.Context, _ Proxy) Result { <-ctx.Done(); return Result{Status: "cancelled"} })
-	r := Runner{Store: st, Xray: x, Mihomo: m, XrayWorkers: 1, MihomoWorkers: 1, Interval: time.Hour, Retry: time.Minute, Control: func(context.Context) bool { return true }}
+	r := Runner{Store: st, Xray: x, Mihomo: m, XrayWorkers: 1, MihomoWorkers: 1, Interval: time.Hour, Retry: time.Minute, SaveFlushInterval: 20 * time.Millisecond, Control: func(context.Context) bool { return true }}
 	go func() { finished <- r.Run(ctx) }()
 	select {
 	case id := <-st.done:
 		if id != "xray" {
 			t.Fatal(id)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("Mihomo queue blocked Xray")
 	}
 	cancel()
@@ -206,7 +213,7 @@ func TestIndependentPoolsAndSingleFallbackResult(t *testing.T) {
 	go func() { finished <- r.Run(ctx) }()
 	select {
 	case <-st.done:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("fallback never completed")
 	}
 	cancel()
@@ -254,13 +261,13 @@ func TestConcurrentFailuresShareControlCheck(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r := Runner{Store: st, Xray: failed, Mihomo: failed, XrayWorkers: 1, MihomoWorkers: 4, Interval: time.Hour, Retry: time.Minute, Control: func(context.Context) bool { calls.Add(1); return false }}
+	r := Runner{Store: st, Xray: failed, Mihomo: failed, XrayWorkers: 1, MihomoWorkers: 4, Interval: time.Hour, Retry: time.Minute, SaveFlushInterval: 20 * time.Millisecond, Control: func(context.Context) bool { calls.Add(1); return false }}
 	finished := make(chan error, 1)
 	go func() { finished <- r.Run(ctx) }()
 	for range st.nodes {
 		select {
 		case <-st.done:
-		case <-time.After(time.Second):
+		case <-time.After(3 * time.Second):
 			t.Fatal("failed probes did not complete")
 		}
 	}
