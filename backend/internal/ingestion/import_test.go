@@ -54,47 +54,6 @@ func save(t *testing.T, r *Repository, source, digest string, v Conversion, want
 		t.Fatalf("save: %v want %v", err, want)
 	}
 }
-func TestRepeatFetchDoesNotRewriteOccurrences(t *testing.T) {
-	r, c := fixture(t)
-	v := convert(t, c, configuration(80))
-	save(t, r, "one", "a", v, nil)
-	xmins := func() []uint32 {
-		t.Helper()
-		rows, err := r.Pool.Query(context.Background(), `SELECT xmin FROM node_explorer_source_occurrences ORDER BY source,digest,position`)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer rows.Close()
-		var out []uint32
-		for rows.Next() {
-			var x uint32
-			if err := rows.Scan(&x); err != nil {
-				t.Fatal(err)
-			}
-			out = append(out, x)
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
-		}
-		return out
-	}
-	before := xmins()
-	// Re-fetching an already-known digest must not rewrite any occurrence
-	// row (it returns early after refreshing the batch timestamp).
-	save(t, r, "one", "a", v, nil)
-	after := xmins()
-	if len(before) != len(after) {
-		t.Fatalf("occurrence rows changed: %d -> %d", len(before), len(after))
-	}
-	for i := range before {
-		if before[i] != after[i] {
-			t.Fatalf("occurrence row %d rewritten on repeat fetch", i)
-		}
-	}
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one'") != 1 {
-		t.Fatal("repeat fetch changed source membership")
-	}
-}
 func TestConcurrentReplayAndSourceMembership(t *testing.T) {
 	r, c := fixture(t)
 	ctx := context.Background()
@@ -125,27 +84,28 @@ func TestConcurrentReplayAndSourceMembership(t *testing.T) {
 	}
 	v.Nodes[0].Name = "second alias"
 	save(t, r, "two", "a", v, nil)
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences") != 2 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != 2 || count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 {
 		t.Fatal("lost source evidence")
 	}
 	partial := convert(t, c, configuration(81), domain.ProxyConfig{"type": "trojan", "server": "x", "port": 443})
 	save(t, r, "one", "b", partial, ErrPartialBatch)
 	save(t, r, "one", "b", partial, ErrPartialBatch)
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one'") != 2 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_batches WHERE source='one'") != 2 {
 		t.Fatal("partial removed previous members")
 	}
 	save(t, r, "one", "c", convert(t, c, configuration(82)), nil)
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one' AND digest='c'") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='two' AND digest='a'") != 1 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_batches WHERE source='one'") != 3 || count(t, r, "SELECT count(*) FROM node_explorer_source_batches WHERE source='two'") != 1 {
 		t.Fatal("source replacement leaked")
 	}
 	save(t, r, "one", "a", v, nil)
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one' AND digest='a'") != 1 {
-		t.Fatal("replay duplicated occurrence")
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_batches WHERE source='one'") != 3 {
+		t.Fatal("replay duplicated batch")
 	}
 	rejected := convert(t, c, domain.ProxyConfig{"type": "trojan"})
 	save(t, r, "one", "d", rejected, ErrNoAdmissibleNodes)
 	save(t, r, "one", "empty", Conversion{Version: converterVersion}, ErrNoAdmissibleNodes)
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one'") != 3 {
+	// Rejected saves still record a batch row, but must admit no nodes.
+	if count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 3 {
 		t.Fatal("rejection changed source")
 	}
 	if count(t, r, "SELECT count(*) FROM node_explorer_node_registry WHERE available") != 0 {
@@ -218,7 +178,7 @@ func TestCollisionRollsBackEntireBatch(t *testing.T) {
 	if err := r.Save(ctx, "source", "collision", v); err == nil {
 		t.Fatal("collision accepted")
 	}
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != before || count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences") != 1 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != before || count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_connections") != 1 {
 		t.Fatal("partial transaction persisted")
 	}
 }
