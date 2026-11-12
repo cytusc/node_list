@@ -6,7 +6,7 @@
 
 `node-liveness` 是唯一执行节点测活、写入 `node_explorer_connectivity` 和更新注册表 `available` 的常驻服务。它只依赖 PostgreSQL 中的节点配置及来源成员关系，独立启动私有 Xray / Mihomo 进程，不依赖 Redis、manager、出口核验、IP 属性、住宅分类或其他业务队列。
 
-采集服务只导入节点，新节点 `available=false`；重复导入不修改此字段。出口和属性服务可读取测活事实，但不能改变它，也不能向测活服务投递任务。测活成功即可标记可用，无需出口、住宅属性或恢复审批；失败不会退役、删除节点或写 tombstone。不可用节点持续按相同规则复测。
+采集服务只导入节点，新节点 `available=false`；重复导入不修改此字段。出口和属性服务可读取测活事实，但不能改变它，也不能向测活服务投递任务。测活结论对称翻转：连续 2 次成功才标记可用，连续 2 次失败才标记不可用；单次成功/失败不翻转，已可用节点的单次成功保持可用。infrastructure / config_error / cancelled 不携带节点结论，不递增也不清零成功/失败 streak。失败不会退役、删除节点或写 tombstone。不可用节点持续按相同规则复测。
 
 已删除 recovery、normal recovery、dead-verify、malformed-clean、connectivity-bench、manager sweeper、fast-delay 和共享 manager 的 delay 接口，以及来源 TCP 准入、恢复依赖、生命周期变更和自动判死删除流程。测活直接读取 registry，不依赖历史表、快照成员或其他服务任务；出口与属性服务独立运行。
 

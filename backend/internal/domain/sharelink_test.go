@@ -8,6 +8,34 @@ import (
 	"testing"
 )
 
+func TestFlagValueAcceptsCommonSpellings(t *testing.T) {
+	for _, v := range []string{"true", "True", "TRUE", "1", "yes", "YES", "on"} {
+		if !flagValue(v) {
+			t.Fatalf("flag %q not accepted", v)
+		}
+	}
+	for _, v := range []string{"false", "0", "no", "off", ""} {
+		if flagValue(v) {
+			t.Fatalf("flag %q accepted", v)
+		}
+	}
+	// allowInsecure spelled "yes" must actually skip verification.
+	p, err := ShareLinkProxy("vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&allowInsecure=yes", "node")
+	if err != nil || p["skip-cert-verify"] != true {
+		t.Fatalf("allowInsecure=yes lost: %v %v", p, err)
+	}
+}
+
+func TestGRPCWithoutServiceNameInventsNone(t *testing.T) {
+	p, err := ShareLinkProxy("vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=grpc", "node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p["grpc-opts"]; ok {
+		t.Fatalf("grpc-service-name invented: %v", p["grpc-opts"])
+	}
+}
+
 func TestVLESSCustomIDMatchesMihomoUUIDMap(t *testing.T) {
 	p, err := ShareLinkProxy("vless://custom-user@example.com:443?type=splithttp&security=tls", "中国 🇨🇳")
 	if err != nil {
@@ -245,7 +273,9 @@ func TestTUICLinkCredentialShapes(t *testing.T) {
 		{
 			name: "uuid token",
 			link: "tuic://123e4567-e89b-12d3-a456-426614174000@example.com:443?sni=example.com&congestion-controller=bbr&udp-relay-mode=native&allow_insecure=1",
-			want: ProxyConfig{"uuid": "123e4567-e89b-12d3-a456-426614174000", "password": ""},
+			// No password in the link means no password key at all:
+			// password:"" is a present-but-empty credential to Mihomo.
+			want: ProxyConfig{"uuid": "123e4567-e89b-12d3-a456-426614174000"},
 		},
 		{
 			name: "compact uuid",
@@ -287,6 +317,11 @@ func TestTUICLinkCredentialShapes(t *testing.T) {
 			for key, want := range test.want {
 				if proxy[key] != want {
 					t.Fatalf("%s: got %#v, want %#v", key, proxy[key], want)
+				}
+			}
+			if test.name == "uuid token" {
+				if _, ok := proxy["password"]; ok {
+					t.Fatalf("uuid-only TUIC link must not carry an empty password key: %#v", proxy)
 				}
 			}
 			if proxy["type"] != "tuic" || proxy["server"] == "" {

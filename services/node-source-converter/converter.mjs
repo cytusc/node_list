@@ -6,7 +6,14 @@ import { join } from 'node:path';
 import canonicalize from 'canonicalize';
 import { parseDocument } from 'yaml';
 
-export const VERSION = 'strict-v1/sub-store-2.44.2';
+export const VERSION = 'strict-v2/sub-store-2.44.2';
+// strict-v2: the fingerprint is the normalised wire configuration only.
+// The original URI form (URI vs Clash YAML, unknown query parameters,
+// display fragment) is evidence, not identity: the same server/port/
+// credentials/transport imported twice must be one node, not two.
+// Bumping VERSION re-keys every fingerprint, so pre-v2 nodes are
+// re-derived on the next import instead of silently keeping the old
+// URI-shaped identity.
 const MAX_ITEMS = 20000;
 const MAX_BYTES = 32 * 1024 * 1024;
 const artifact = new URL('./vendor/proxy-utils.esm.mjs', import.meta.url);
@@ -20,7 +27,14 @@ for (const key of ['log', 'info', 'warn', 'error', 'debug']) console[key] = () =
 const { parse, produce } = await import('./vendor/proxy-utils.esm.mjs');
 const clone = value => structuredClone(value);
 const hash = value => createHash('sha256').update(value).digest('hex');
-const clean = config => Object.fromEntries(Object.entries(config).filter(([key]) => !['name', 'sub_tag'].includes(key)));
+const clean = config => {
+  const out = Object.fromEntries(Object.entries(config).filter(([key]) => !['name', 'sub_tag'].includes(key)));
+  // Empty SOCKS credentials mean "no auth", exactly as roundtripConfig()
+  // treats them on the URI round trip. Keeping '' in the fingerprint
+  // would split one SOCKS node into two identities for the same wire config.
+  if (out.type === 'socks5') for (const key of ['username', 'password']) if (out[key] === '') delete out[key];
+  return out;
+};
 const fail = code => { throw Error(code); };
 function one(text) {
   if (/^https?:\/\//.test(text)) {
@@ -60,7 +74,12 @@ function endpoint(config) {
   if (required?.some(key => typeof config[key] !== 'string' || !config[key])) fail('incomplete');
 }
 function basicHTTP(config) {
-  if (Object.keys(clean(config)).some(key => !['type', 'server', 'port', 'username', 'password', 'tls'].includes(key))) fail('unrepresentable');
+  // Normalised configs carry Sub-Store defaults (udp:true, _h2:false,
+  // packet-encoding:'', skip-cert-verify:false) that are not part of
+  // an HTTP proxy URI; they must not make a plain HTTP node
+  // unrepresentable.
+  const keys = Object.keys(stripDefaults(clean(config)));
+  if (keys.some(key => !['type', 'server', 'port', 'username', 'password', 'tls'].includes(key))) fail('unrepresentable');
   if ('tls' in config && typeof config.tls !== 'boolean') fail('invalid');
   const url = new URL(`${config.tls ? 'https' : 'http'}://${config.server.includes(':') && !config.server.startsWith('[') ? `[${config.server}]` : config.server}:${config.port}`);
   url.username = config.username ?? '';
@@ -76,23 +95,31 @@ function roundtripConfig(config) {
   if (result.type === 'socks5') for (const key of ['username', 'password']) if (result[key] === '') delete result[key];
   return result;
 }
+// stripDefaults removes Sub-Store default-only fields so a YAML import
+// and a URI import of the same outbound compare equal: the URI round
+// trip adds _h2:false / packet-encoding:'' / skip-cert-verify:false /
+// udp:true, the YAML path does not, and neither spelling changes the wire.
+function stripDefaults(config) {
+  const out = clone(config);
+  // Sub-Store internal fields (_h2, _resolved, ...) are not wire config.
+  for (const key of Object.keys(out)) if (key.startsWith('_')) delete out[key];
+  if (out['packet-encoding'] === '' || out['packet-encoding'] === 'xudp') delete out['packet-encoding'];
+  if (out['skip-cert-verify'] === false) delete out['skip-cert-verify'];
+  if (out.udp === true) delete out.udp;
+  return out;
+}
 function generated(config, parsed) {
   if (config.type === 'http') return basicHTTP(config);
   const uri = produce([clone(parsed)], 'URI');
   if (typeof uri !== 'string' || !uri.trim() || /[\r\n]/.test(uri.trim())) fail('unrepresentable');
   const back = one(uri);
-  if (canonicalize(roundtripConfig(mihomo(parsed))) !== canonicalize(roundtripConfig(mihomo(back)))) fail('unrepresentable');
+  if (canonicalize(stripDefaults(roundtripConfig(mihomo(parsed)))) !== canonicalize(stripDefaults(roundtripConfig(mihomo(back))))) fail('unrepresentable');
   // Unknown source fields must also survive. Normalized library output alone is insufficient.
   const before = clean(config), after = mihomo(back);
   for (const [key, value] of Object.entries(before)) {
     if (canonicalize(value) !== canonicalize(after[key] ?? null)) fail('unrepresentable');
   }
   return uri.trim();
-}
-function inputIdentity(link) {
-  // Preserve all unknown URI options as identity material; only the display fragment is removed.
-  if (link.startsWith('vmess://')) return link;
-  try { const uri = new URL(link); uri.hash = ''; return uri.href; } catch { return link; }
 }
 function convert(item) {
   const original = typeof item.rawLink === 'string' ? item.rawLink : '';
@@ -103,20 +130,39 @@ function convert(item) {
   }
   if (config) {
     safeFields(config);
+    const raw = clone(config);
     parsed = one(JSON.stringify({ proxies: [config] }));
+    // Normalise a raw Clash config through the same Mihomo output the
+    // URI path uses, with Sub-Store default/internal fields stripped.
+    // Without this, a YAML import keeps the author's spelling (missing
+    // Sub-Store defaults such as servername/udp/packet-encoding) while
+    // a URI import of the same outbound gets the normalised form, so
+    // the two never converge on one fingerprint and generated()
+    // rejects the YAML form as unrepresentable.
+    const normalised = mihomo(parsed);
+    // Strictness survives normalisation: a raw field Sub-Store drops
+    // (sni on an HTTP proxy, an unknown extension) must reject the
+    // node, not be silently discarded to fabricate an exportable URI.
+    for (const [key, value] of Object.entries(clean(raw))) {
+      if (canonicalize(value) !== canonicalize(normalised[key] ?? null)) fail('unrepresentable');
+    }
+    config = stripDefaults(normalised);
     if (uriParsed) {
       const back = mihomo(uriParsed);
       conflict = canonicalize(mihomo(parsed)) !== canonicalize(back) || Object.entries(clean(config)).some(([key, value]) => canonicalize(value) !== canonicalize(back[key] ?? null));
     }
   } else if (uriParsed) {
     parsed = uriParsed;
-    config = mihomo(parsed);
+    config = stripDefaults(mihomo(parsed));
   } else fail('incomplete');
   if (parsed._ca) fail('unsupported');
   endpoint(config);
-  // Any URI-only input keeps its opaque URI identity: conversion may discard extensions.
-  const material = { config: clean(config) };
-  if (original) material.uri = inputIdentity(original);
+  // Identity is the normalised wire configuration only (strict-v2),
+  // with Sub-Store default-only fields stripped (stripDefaults):
+  // the original URI is kept as evidence (originalEvidence / rawLink),
+  // never as fingerprint material, so a URI import and a Clash-YAML
+  // import of the same outbound converge on one node.
+  const material = { config: stripDefaults(clean(config)) };
   const canonical = canonicalize(material);
   const fingerprint = hash(VERSION + '\0' + canonical);
   let generatedLink = '', rawLink = original;

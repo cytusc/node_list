@@ -22,10 +22,18 @@ func TestConservativeRouting(t *testing.T) {
 	}{
 		{"http", Proxy{"type": "http", "server": "127.0.0.1", "port": 80}, true},
 		{"tls-vless", Proxy{"type": "vless", "uuid": "123e4567-e89b-12d3-a456-426614174000", "tls": true}, true},
-		{"insecure", Proxy{"type": "trojan", "password": "secret", "skip-cert-verify": true}, false},
+		// skip-cert-verify / alterId are modelled by Xray (allowInsecure /
+		// users[].alterId) and no longer force a Mihomo fallback.
+		{"insecure", Proxy{"type": "trojan", "password": "secret", "skip-cert-verify": true}, true},
 		{"plain-vless", Proxy{"type": "vless", "uuid": "id"}, false},
 		{"hysteria2", Proxy{"type": "hysteria2", "password": "secret"}, false},
-		{"vmess-legacy", Proxy{"type": "vmess", "uuid": "id", "alterId": 64}, false},
+		{"vmess-legacy", Proxy{"type": "vmess", "uuid": "id", "alterId": 64}, true},
+		{"httpupgrade", Proxy{"type": "vless", "uuid": "123e4567-e89b-12d3-a456-426614174000", "tls": true, "network": "ws", "ws-opts": Proxy{"path": "/hu", "v2ray-http-upgrade": true}}, true},
+		{"ws-early-data", Proxy{"type": "vless", "uuid": "123e4567-e89b-12d3-a456-426614174000", "tls": true, "network": "ws", "ws-opts": Proxy{"path": "/", "max-early-data": 2048, "early-data-header-name": "Sec-WebSocket-Protocol"}}, true},
+		{"xhttp-extra", Proxy{"type": "vless", "uuid": "123e4567-e89b-12d3-a456-426614174000", "tls": true, "network": "xhttp", "xhttp-opts": Proxy{"path": "/x", "mode": "packet-up", "no-grpc-header": true, "x-padding-bytes": 100}}, true},
+		{"http-transport", Proxy{"type": "vless", "uuid": "123e4567-e89b-12d3-a456-426614174000", "tls": true, "network": "http", "http-opts": Proxy{"path": []any{"/"}, "headers": Proxy{"Host": []any{"example.com"}}}}, true},
+		{"h2-transport", Proxy{"type": "vless", "uuid": "123e4567-e89b-12d3-a456-426614174000", "tls": true, "network": "h2", "h2-opts": Proxy{"path": "/", "host": []any{"example.com"}}}, true},
+		{"ss-legacy-cipher", Proxy{"type": "ss", "cipher": "aes-128-cfb", "password": "secret"}, true},
 		{"unused-tls-options", Proxy{"type": "http", "sni": "example.com"}, false},
 		{"empty-reality", Proxy{"type": "vless", "uuid": "id", "tls": true, "reality-opts": Proxy{}}, false},
 		{"plugin", Proxy{"type": "ss", "cipher": "aes-128-gcm", "password": "secret", "plugin": "obfs"}, false},

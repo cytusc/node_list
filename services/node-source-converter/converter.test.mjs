@@ -7,7 +7,10 @@ test('strict fingerprints ignore only top-level display fields', () => {
   assert.equal(convert(config({name:'one'})).fingerprint,convert(config({name:'two',sub_tag:'x'})).fingerprint);
   for (const change of [{password:'a'},{username:'a'},{tls:true}]) assert.notEqual(convert(config()).fingerprint,convert(config(change)).fingerprint);
   // Unknown fields cannot be silently dropped to fabricate an exportable URI.
-  for (const change of [{sni:'x'},{'skip-cert-verify':true},{udp:true},{unknown:{name:'a'}}]) assert.equal(convertBatch({items:[{rawConfig:config(change)}]}).rejected[0].code,'unrepresentable');
+  for (const change of [{sni:'x'},{'skip-cert-verify':true},{unknown:{name:'a'}}]) assert.equal(convertBatch({items:[{rawConfig:config(change)}]}).rejected[0].code,'unrepresentable');
+  // udp:true is Sub-Store's default for an HTTP proxy, so it is the
+  // same node as the base config, not an unrepresentable extension.
+  assert.equal(convert(config({udp:true})).fingerprint,convert(config()).fingerprint);
 });
 test('HTTP generation uses URL encoding, TLS and IPv6 round trips', () => {
   const n=convert(config({server:'2001:db8::1',tls:true,username:'a@b',password:'p:/#?'}));
@@ -16,15 +19,25 @@ test('HTTP generation uses URL encoding, TLS and IPv6 round trips', () => {
   assert.equal(n.rawLink,'');assert.equal(n.linkStatus,'generated_verified');
   assert.equal(convertBatch({text:n.generatedLink}).nodes.length,1);
 });
-test('original URI bytes and unknown options survive, fragments are display only', () => {
+test('strict-v2 fingerprints are the wire config only: fragments and non-wire query params converge', () => {
   const a='vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=ws&path=%2Fx&unknown=a#first';
   const n=convertBatch({items:[{rawLink:a},{rawLink:a.replace('#first','#second')},{rawLink:a.replace('unknown=a','unknown=b')}]}).nodes;
-  assert.equal(n.length,3);assert.equal(n[0].rawLink,a);assert.equal(n[0].fingerprint,n[1].fingerprint);assert.notEqual(n[0].fingerprint,n[2].fingerprint);
+  assert.equal(n.length,3);assert.equal(n[0].rawLink,a);
+  // Same outbound, three spellings: one identity. The differing
+  // original bytes stay visible as evidence, not as identity.
+  assert.equal(n[0].fingerprint,n[1].fingerprint);assert.equal(n[0].fingerprint,n[2].fingerprint);
+  assert.notEqual(n[0].originalEvidence,n[2].originalEvidence);
 });
-test('SOCKS empty authentication is equivalent only for link verification',()=>{
+test('SOCKS empty authentication is the same node as no authentication',()=>{
  const n=convert({type:'socks5',server:'192.0.2.1',port:1080});assert.equal(n.linkStatus,'generated_verified');
  const explicit=convert({type:'socks5',server:'192.0.2.1',port:1080,username:'',password:''});
- assert.notEqual(n.fingerprint,explicit.fingerprint);
+ assert.equal(n.fingerprint,explicit.fingerprint);
+});
+test('same outbound via URI and via Clash YAML converges on one identity',()=>{
+ const link='vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&type=ws&path=%2Fx#one';
+ const fromUri=convertBatch({items:[{rawLink:link}]}).nodes[0];
+ const fromYaml=convertBatch({text:'proxies:\n  - type: vless\n    server: example.com\n    port: 443\n    uuid: 11111111-1111-4111-8111-111111111111\n    tls: true\n    network: ws\n    ws-opts:\n      path: /x\n'}).nodes[0];
+ assert.equal(fromUri.fingerprint,fromYaml.fingerprint);
 });
 test('missing authentication and conflicting URI are never silently accepted as that config',()=>{
  const bad=convertBatch({items:[{rawConfig:{type:'vless',server:'x.example',port:443}},{rawLink:'invalid'}]});assert.equal(bad.rejected.length,2);
@@ -50,8 +63,13 @@ test('protocol and transport matrix retains configuration differences',()=>{
  ];
  const b=convertBatch({items:links.map(rawLink=>({rawLink}))});assert.equal(b.nodes.length,links.length,JSON.stringify(b.rejected));
  for(let i=0;i<links.length;i++)assert.equal(b.nodes[i].rawLink,links[i]);
- for(const suffix of ['?plugin=v2ray-plugin%3Btls','?unknown=1']){
+ for(const suffix of ['?plugin=v2ray-plugin%3Btls']){
   const b=convertBatch({items:[{rawLink:links[0]},{rawLink:links[0].replace('#ss',suffix+'#ss')}]});assert.equal(b.nodes.length,2);assert.notEqual(b.nodes[0].fingerprint,b.nodes[1].fingerprint);
+ }
+ // A non-wire query parameter changes no outbound field, so under
+ // strict-v2 it must not split the node (see the fingerprint test above).
+ {
+  const b=convertBatch({items:[{rawLink:links[0]},{rawLink:links[0].replace('#ss','?unknown=1#ss')}]});assert.equal(b.nodes.length,2);assert.equal(b.nodes[0].fingerprint,b.nodes[1].fingerprint);
  }
 });
 

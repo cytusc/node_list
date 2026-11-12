@@ -15,7 +15,7 @@ import (
 	"github.com/cytusc/node_list/backend/internal/runtimeenv"
 )
 
-const converterVersion = "strict-v1/sub-store-2.44.2"
+const converterVersion = "strict-v2/sub-store-2.44.2"
 const maxInput = 32 << 20
 
 type Converted struct {
