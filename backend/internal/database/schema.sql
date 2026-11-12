@@ -3,7 +3,11 @@ CREATE TABLE IF NOT EXISTS node_explorer_service_migrations (
 );
 CREATE TABLE IF NOT EXISTS node_explorer_node_registry (
   identity text PRIMARY KEY, node jsonb NOT NULL,
-  available boolean NOT NULL DEFAULT false
+  available boolean NOT NULL DEFAULT false,
+  -- Config digest, computed once on write. The liveness scheduler and the
+  -- live-facts view used to recompute this md5 over the whole node JSON for
+  -- every registry row on every query.
+  digest text GENERATED ALWAYS AS (md5((node - 'rawLink' - 'generatedLink')::text)) STORED
 );
 CREATE TABLE IF NOT EXISTS node_explorer_connectivity (
   identity text PRIMARY KEY REFERENCES node_explorer_node_registry(identity),
@@ -63,7 +67,7 @@ WITH observed AS (
  WHERE n.available
  AND c.payload->>'reachable'='true'
  AND c.payload->>'incarnation'=n.incarnation
- AND c.payload->>'configDigest'=md5((n.node - 'rawLink' - 'generatedLink')::text)
+ AND c.payload->>'configDigest'=n.digest
  AND c.checked_at>now()-interval '6 hours'
  AND e.identity IS NOT NULL AND e.payload->>'verified'='true'
  AND e.checked_at>now()-interval '6 hours'

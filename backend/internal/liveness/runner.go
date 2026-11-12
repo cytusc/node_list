@@ -123,6 +123,7 @@ func (r *Runner) Run(parent context.Context) error {
 	fetching := false
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+	lastBeat := time.Now()
 	beat := func() error {
 		check, stop := context.WithTimeout(ctx, 5*time.Second)
 		defer stop()
@@ -201,8 +202,13 @@ func (r *Runner) Run(parent context.Context) error {
 			last = time.Now().UTC()
 			delete(pending, done.task.node.Identity)
 		case <-tick.C:
-			if err := beat(); err != nil {
-				return err
+			// The 1s tick drives Due fetching; the status heartbeat only
+			// needs to refresh every 30s.
+			if time.Since(lastBeat) >= 30*time.Second {
+				if err := beat(); err != nil {
+					return err
+				}
+				lastBeat = time.Now()
 			}
 			if !fetching && len(pending) < 256 {
 				fetch <- struct{}{}

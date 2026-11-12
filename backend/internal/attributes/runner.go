@@ -131,7 +131,7 @@ func (r Runner) Run(parent context.Context) error {
 				return err
 			}
 		case <-tick.C:
-			if time.Since(lastHeartbeat) >= 5*time.Second {
+			if time.Since(lastHeartbeat) >= 30*time.Second {
 				if err := heartbeat(); err != nil {
 					return err
 				}

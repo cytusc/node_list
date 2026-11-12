@@ -79,8 +79,8 @@ func TestRepeatFetchDoesNotRewriteOccurrences(t *testing.T) {
 		return out
 	}
 	before := xmins()
-	// Re-fetching the digest that is already current must not rewrite any
-	// occurrence row (previously it rewrote every row of the source).
+	// Re-fetching an already-known digest must not rewrite any occurrence
+	// row (it returns early after refreshing the batch timestamp).
 	save(t, r, "one", "a", v, nil)
 	after := xmins()
 	if len(before) != len(after) {
@@ -91,8 +91,8 @@ func TestRepeatFetchDoesNotRewriteOccurrences(t *testing.T) {
 			t.Fatalf("occurrence row %d rewritten on repeat fetch", i)
 		}
 	}
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one' AND current") != 1 {
-		t.Fatal("repeat fetch changed current membership")
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one'") != 1 {
+		t.Fatal("repeat fetch changed source membership")
 	}
 }
 func TestConcurrentReplayAndSourceMembership(t *testing.T) {
@@ -125,28 +125,28 @@ func TestConcurrentReplayAndSourceMembership(t *testing.T) {
 	}
 	v.Nodes[0].Name = "second alias"
 	save(t, r, "two", "a", v, nil)
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences") != 2 || count(t, r, "SELECT count(*) FROM node_explorer_source_links") != 2 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences") != 2 {
 		t.Fatal("lost source evidence")
 	}
 	partial := convert(t, c, configuration(81), domain.ProxyConfig{"type": "trojan", "server": "x", "port": 443})
 	save(t, r, "one", "b", partial, ErrPartialBatch)
 	save(t, r, "one", "b", partial, ErrPartialBatch)
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one' AND current") != 2 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one'") != 2 {
 		t.Fatal("partial removed previous members")
 	}
 	save(t, r, "one", "c", convert(t, c, configuration(82)), nil)
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one' AND current") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='two' AND current") != 1 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one' AND digest='c'") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='two' AND digest='a'") != 1 {
 		t.Fatal("source replacement leaked")
 	}
 	save(t, r, "one", "a", v, nil)
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one' AND digest='a' AND current") != 1 {
-		t.Fatal("replay not reactivated")
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one' AND digest='a'") != 1 {
+		t.Fatal("replay duplicated occurrence")
 	}
 	rejected := convert(t, c, domain.ProxyConfig{"type": "trojan"})
 	save(t, r, "one", "d", rejected, ErrNoAdmissibleNodes)
 	save(t, r, "one", "empty", Conversion{Version: converterVersion}, ErrNoAdmissibleNodes)
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one' AND current") != 1 {
-		t.Fatal("rejection cleared source")
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE source='one'") != 3 {
+		t.Fatal("rejection changed source")
 	}
 	if count(t, r, "SELECT count(*) FROM node_explorer_node_registry WHERE available") != 0 {
 		t.Fatal("source marked available")
@@ -184,7 +184,7 @@ func TestLegacyAdoptionPreservesFacts(t *testing.T) {
 	if facts() != before {
 		t.Fatal("source mutated other service facts")
 	}
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_identity_aliases") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_connections") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 {
 		t.Fatal("legacy not adopted")
 	}
 	if count(t, r, "SELECT count(*) FROM node_explorer_live_nodes WHERE identity='legacy'") != 1 {
@@ -218,7 +218,7 @@ func TestCollisionRollsBackEntireBatch(t *testing.T) {
 	if err := r.Save(ctx, "source", "collision", v); err == nil {
 		t.Fatal("collision accepted")
 	}
-	if count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != before || count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences WHERE current") != 1 {
+	if count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != before || count(t, r, "SELECT count(*) FROM node_explorer_node_registry") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_batches") != 1 || count(t, r, "SELECT count(*) FROM node_explorer_source_occurrences") != 1 {
 		t.Fatal("partial transaction persisted")
 	}
 }
