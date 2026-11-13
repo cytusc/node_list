@@ -15,6 +15,7 @@ enum SortKey: string
     case IPAttributes = 'ipAttributes';
     case IPPure = 'ippure';
     case TrafficRatio = 'trafficRatio';
+    case Source = 'source';
 
     /**
      * 解析请求里的 sort 参数。

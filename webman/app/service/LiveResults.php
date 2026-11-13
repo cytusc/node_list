@@ -69,7 +69,7 @@ final class LiveResults
     private function factsQuery()
     {
         return Db::table(self::factsTable())->select([
-            'identity', 'country', 'ip_status',
+            'identity', 'country', 'ip_status', 'source',
             Db::raw("coalesce(nullif(btrim(node->>'rawLink'),''),btrim(node->>'generatedLink'),'')<>'' AS has_original_link"),
             Db::raw("coalesce(nullif(country,''),'unknown') AS region"),
             Db::raw("node->>'name' AS name"),
@@ -136,6 +136,7 @@ final class LiveResults
                 'node_type' => $f->node_type ?? '',
                 'protocol' => $f->protocol ?? 'unknown',
                 'network' => $f->network ?? 'unknown',
+                'source' => $f->source ?? 'unknown',
                 'speed' => (float)($f->speed ?? 0),
                 'tls' => self::toBool($f->tls ?? false),
                 'reality' => self::toBool($f->reality ?? false),
@@ -285,6 +286,9 @@ final class LiveResults
         if ($q->networks !== [] && !in_array($r['network'], $q->networks, true)) {
             return false;
         }
+        if ($q->sources !== [] && !in_array($r['source'], $q->sources, true)) {
+            return false;
+        }
         foreach ($q->features as $feature) {
             if (!($r[$feature->column()] ?? false)) {
                 return false;
@@ -422,6 +426,7 @@ final class LiveResults
             SortKey::Country => fn (array $r): mixed => $r['country'] === '' ? null : $r['country'],
             SortKey::Name => $this->nameExtractor(),
             SortKey::Type => fn (array $r): mixed => $r['node_type'] === '' ? null : $r['node_type'],
+            SortKey::Source => fn (array $r): mixed => $r['source'] === '' ? null : $r['source'],
             SortKey::AsnOrganization => fn (array $r): mixed => $r['ip_status'] === 'success'
                 ? ($r['asn_organization'] === '' ? null : $r['asn_organization'])
                 : null,
@@ -577,6 +582,7 @@ final class LiveResults
             $this->facetAdd($counts, 'country', $r['region']);
             $this->facetAdd($counts, 'type', $r['protocol']);
             $this->facetAdd($counts, 'network', $r['network']);
+            $this->facetAdd($counts, 'source', $r['source']);
             if ($r['ip_status'] === 'success') {
                 $this->facetAdd($counts, 'ipSource', $r['ip_source']);
             }

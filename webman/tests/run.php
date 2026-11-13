@@ -136,7 +136,7 @@ same(['US', 'JP'], $q?->countries, '逗号切分丢弃空项');
 // ---------------------------------------------------------------------------
 
 same(
-    ['country', 'name', 'type', 'speed', 'asnOrganization', 'ipSource', 'ipAttributes', 'ippure', 'trafficRatio'],
+    ['country', 'name', 'type', 'speed', 'asnOrganization', 'ipSource', 'ipAttributes', 'ippure', 'trafficRatio', 'source'],
     array_map(static fn (SortKey $k): string => $k->value, SortKey::cases()),
     'SortKey 取值顺序与 Go 的 domain.ResultSortKeys 一致'
 );
@@ -144,7 +144,7 @@ ok(SortKey::Speed->isNumeric() && !SortKey::Name->isNumeric(), '数值型排序�
 same(['tls', 'reality', 'udp'], Feature::values(), 'Feature 取值集合');
 same('TLS', Feature::Tls->label(), 'Feature 标签');
 same(
-    ['country', 'type', 'network', 'ipSource', 'ipAttributes', 'features', 'media'],
+    ['country', 'type', 'network', 'source', 'ipSource', 'ipAttributes', 'features', 'media'],
     array_keys(FacetKind::emptyBuckets()),
     'facet 空桶顺序稳定'
 );
@@ -407,7 +407,7 @@ same(5, $body['totalNodes'], 'summary.totalNodes 是全量节点数');
 same(5, $body['summary']['countries'], 'summary.countries 计不重复非空地区');
 same(2097152, $body['summary']['maxSpeed'], 'summary.maxSpeed');
 same(1572864, $body['summary']['median'], 'summary.median 偶数样本取中间两值平均');
-same(['country', 'type', 'network', 'ipSource', 'ipAttributes', 'features', 'media'], array_keys($body['facets']), 'facet 分桶齐全');
+same(['country', 'type', 'network', 'source', 'ipSource', 'ipAttributes', 'features', 'media'], array_keys($body['facets']), 'facet 分桶齐全');
 same(5, count($body['facets']['country']), 'country 桶含 5 个地区，每桶计数 1');
 same(['tls', 'reality', 'udp'], array_column($body['facets']['features'], 'value'), 'features 固定三项且顺序稳定');
 same(4, $body['facets']['features'][0]['count'], 'tls 计数');

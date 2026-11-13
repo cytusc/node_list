@@ -16,6 +16,7 @@ n1 = {
     "speedTest": True, "mediaCheck": True, "checkedAt": "2026-10-18T00:00:00Z",
     "rawLink": "ss://secret",
     "rawConfig": {"type": "ss", "server": "198.51.100.10", "port": 443},
+    "subTag": "subs-check-uri",
 }
 nodes.append(("id-us-ss", 1, 0, n1,
     {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
@@ -38,6 +39,7 @@ n2 = {
     "tls": True, "reality": False, "udp": False, "network": "ws", "speed": 10485760,
     "country": "JP", "media": [{"Platform": "Netflix", "Tag": "解锁"}],
     "details": [], "speedTest": True, "mediaCheck": True, "checkedAt": "2026-10-18T00:00:00Z",
+    "subTag": "qilan",
 }
 nodes.append(("id-jp-vmess", 1, 1, n2,
     {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
@@ -60,6 +62,7 @@ n3 = {
     "tls": True, "reality": True, "udp": True, "network": "tcp", "speed": 0,
     "country": "DE", "media": [], "details": [{"k": "流量", "v": "1T"}],
     "speedTest": True, "mediaCheck": True, "checkedAt": "2026-10-18T00:00:00Z",
+    "subTag": "proxio-all",
 }
 nodes.append(("id-de-trojan", 2, 0, n3,
     {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
@@ -73,6 +76,7 @@ n4 = {
     "speed": 2097152, "country": "SG", "ipRisk": "low",
     "media": [{"platform": "Disney+", "tag": "解锁"}],
     "speedTest": True, "mediaCheck": True, "checkedAt": "2026-10-18T00:00:00Z",
+    "subTag": "fmw86-socks5",
 }
 nodes.append(("id-sg-hy2", 2, 1, n4,
     {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},
@@ -86,6 +90,7 @@ n5 = {
     "speed": 7340032, "country": "",
     "media": [{"platform": "Netflix", "tag": "限自制剧"}],
     "speedTest": True, "mediaCheck": True, "checkedAt": "2026-10-18T00:00:00Z",
+    "subTag": "subs-check-yaml",
 }
 nodes.append(("id-hk-ss", 2, 2, n5,
     {"reachable": True, "checkedAt": "__NOW2M__", "error": ""},

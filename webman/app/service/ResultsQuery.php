@@ -28,6 +28,7 @@ final class ResultsQuery
      * @param list<string>  $types
      * @param list<string>  $networks
      * @param list<Feature> $features
+     * @param list<string>  $sources
      * @param list<string>  $ipSources
      * @param list<string>  $ipAttributes
      * @param list<string>  $media
@@ -41,6 +42,7 @@ final class ResultsQuery
         public readonly array $types = [],
         public readonly array $networks = [],
         public readonly array $features = [],
+        public readonly array $sources = [],
         public readonly array $ipSources = [],
         public readonly array $ipAttributes = [],
         public readonly array $media = [],

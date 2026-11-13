@@ -24,6 +24,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sun,
+  Tag,
   X,
   Zap,
 } from "lucide-react";
@@ -130,6 +131,7 @@ export default function App() {
   const [countries, setCountries] = useState<string[]>([]);
   const [types, setTypes] = useState<string[]>([]);
   const [networks, setNetworks] = useState<string[]>([]);
+  const [sources, setSources] = useState<string[]>([]);
   const [ipSources, setIpSources] = useState<string[]>([]);
   const [ipAttributes, setIpAttributes] = useState<string[]>([]);
   const [media, setMedia] = useState<string[]>([]);
@@ -158,6 +160,7 @@ export default function App() {
     countries,
     types,
     networks,
+    sources,
     ipSources,
     ipAttributes,
     media,
@@ -183,6 +186,7 @@ export default function App() {
     ["country", countries],
     ["type", types],
     ["network", networks],
+    ["source", sources],
     ["ipSource", ipSources],
     ["ipAttributes", ipAttributes],
     ["media", media],
@@ -241,6 +245,7 @@ export default function App() {
             "country",
             "type",
             "network",
+            "source",
             "ipSource",
             "ipAttributes",
             "media",
@@ -312,6 +317,7 @@ export default function App() {
   const regionOptions = results?.facets.country || [];
   const typeOptions = results?.facets.type || [];
   const networkOptions = results?.facets.network || [];
+  const sourceOptions = results?.facets.source || [];
   const ipSourceOptions = results?.facets.ipSource || [];
   const ipAttributeOptions = results?.facets.ipAttributes || [];
   const mediaOptions = (results?.facets.media || []).map((option) => ({
@@ -323,6 +329,7 @@ export default function App() {
     setCountries([]);
     setTypes([]);
     setNetworks([]);
+    setSources([]);
     setIpSources([]);
     setIpAttributes([]);
     setMedia([]);
@@ -332,6 +339,7 @@ export default function App() {
     countries.length +
     types.length +
     networks.length +
+    sources.length +
     ipSources.length +
     ipAttributes.length +
     media.length +
@@ -609,6 +617,13 @@ export default function App() {
                 onChange={setNetworks}
               />
               <FilterMenu
+                label="来源"
+                icon={<Tag className="size-4" />}
+                options={sourceOptions}
+                selected={sources}
+                onChange={setSources}
+              />
+              <FilterMenu
                 label="IP 来源"
                 icon={<Globe2 className="size-4" />}
                 options={ipSourceOptions}
@@ -685,6 +700,8 @@ export default function App() {
                   <option value="country-desc">地区 Z–A</option>
                   <option value="type-asc">协议 A–Z</option>
                   <option value="type-desc">协议 Z–A</option>
+                  <option value="source-asc">来源 A–Z</option>
+                  <option value="source-desc">来源 Z–A</option>
                 </select>
               </div>
               {activeCount > 0 && (
@@ -707,6 +724,11 @@ export default function App() {
                     values: networks,
                     set: setNetworks,
                     label: (v: string) => v.toUpperCase(),
+                  },
+                  {
+                    values: sources,
+                    set: setSources,
+                    label: (v: string) => v,
                   },
                   {
                     values: ipSources,
