@@ -21,15 +21,14 @@ func TestTriggerSerializesAndHonorsCancellation(t *testing.T) {
 	}})
 	var wg sync.WaitGroup
 	for range 12 {
-		wg.Go(func() { w.Trigger(context.Background()) })
+		wg.Go(func() { w.trigger(context.Background()) })
 	}
 	wg.Wait()
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	w.Trigger(cancelled)
-	runs, _, _ := w.Stats()
-	if runs != 12 || calls.Load() != 12 {
-		t.Fatalf("runs=%d calls=%d", runs, calls.Load())
+	w.trigger(cancelled)
+	if calls.Load() != 12 {
+		t.Fatalf("calls=%d", calls.Load())
 	}
 }
 

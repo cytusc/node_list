@@ -2,6 +2,7 @@ package ingestion
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,14 @@ func (p *qilanProvider) Close()                    { p.q.Close() }
 func (r *Repository) RunSource(ctx context.Context) error {
 	return servicelock.Run(ctx, r.Pool, "source-ingest", func(ctx context.Context) error { return r.runSource(ctx) })
 }
+
+// sourceFailure reports whether an import result is a real source failure.
+// A partial batch was applied successfully, so it is routine; only a failed
+// fetch/import or a source that yielded no representable nodes is surfaced.
+func sourceFailure(err error) bool {
+	return err != nil && !errors.Is(err, ErrPartialBatch)
+}
+
 func (r *Repository) runSource(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -45,11 +54,16 @@ func (r *Repository) runSource(ctx context.Context) error {
 	}
 	var mu sync.Mutex
 	warnings := map[string]bool{}
+	// Partial batches are the normal outcome for sources whose upstream lists
+	// contain entries we cannot represent (Qilan and the subs-check YAML
+	// export reject a handful every round). They are not source failures, so
+	// they must neither log as failures nor hold the service in "degraded"
+	// forever; only a genuinely failed fetch or import is a warning.
 	heartbeat := func(name string, err error) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if name != "" {
-			warnings[name] = err != nil
+			warnings[name] = sourceFailure(err)
 		}
 		count := 0
 		for _, failed := range warnings {
@@ -73,7 +87,7 @@ func (r *Repository) runSource(ctx context.Context) error {
 		_, _ = r.Pool.Exec(cleanup, `UPDATE node_explorer_service_status SET payload=payload || '{"running":false}'::jsonb WHERE service='source-ingest'`)
 	}()
 	enabled := map[string]bool{}
-	for _, name := range strings.Split(runtimeenv.Env("SOURCE_PROVIDERS", "subs-check,proxio-all,Jakee-http,xyzs996-all"), ",") {
+	for _, name := range strings.Split(runtimeenv.Env("SOURCE_PROVIDERS", "subs-check,proxio-all,Jakee-http,xyzs996-all,fmw86-socks5,fmw86-http"), ",") {
 		enabled[strings.TrimSpace(name)] = true
 	}
 	importer := func(name string) *reportingImporter {
@@ -98,13 +112,40 @@ func (r *Repository) runSource(ctx context.Context) error {
 		for _, file := range []struct{ name, path string }{{"subs-check-yaml", filepath.Join(dir, "output", "all.yaml")}, {"subs-check-uri", filepath.Join(dir, "output", "base64.txt")}} {
 			entry := file
 			in := importer(entry.name)
+			// The safety-net sweep fires every two minutes, but subs-check
+			// republishes on a much longer cycle. Remember the last imported
+			// bytes so a sweep over an unchanged file does not spawn the
+			// converter and open a batch transaction that only bumps
+			// fetched_at. A failed import leaves the digest unrecorded, so it
+			// is retried on the next event or sweep.
+			var lastMu sync.Mutex
+			var lastDigest [32]byte
+			var haveLast bool
 			ingest := func(ctx context.Context) error {
 				raw, err := stableFile(entry.path)
 				if err == nil {
+					digest := sha256.Sum256(raw)
+					lastMu.Lock()
+					unchanged := haveLast && lastDigest == digest
+					lastMu.Unlock()
+					if unchanged {
+						return nil
+					}
 					err = in.ImportText(ctx, string(raw))
+					if err == nil || errors.Is(err, ErrPartialBatch) {
+						lastMu.Lock()
+						lastDigest, haveLast = digest, true
+						lastMu.Unlock()
+					}
 				}
 				in.report(err)
-				return err
+				// A partial batch is a normal outcome, not a watcher failure:
+				// returning it would print "source ingest failed" on every
+				// round even though the batch was applied successfully.
+				if sourceFailure(err) {
+					return err
+				}
+				return nil
 			}
 			watcher := source.NewWatcher([]string{entry.path}, source.WatcherConfig{Quiet: 5 * time.Second, Sweep: 2 * time.Minute, Ingest: ingest})
 			if err := watcher.Start(ctx); err != nil {
@@ -127,12 +168,27 @@ func (r *Repository) runSource(ctx context.Context) error {
 			defer remote.Done()
 			ticker := time.NewTicker(runtimeenv.Seconds("PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS", 1800))
 			defer ticker.Stop()
+			// Subscription URLs are usually republished on a schedule, so an
+			// identical body means there is nothing to convert: skip it
+			// instead of spawning the converter for an unchanged batch.
+			var last [32]byte
+			haveLast := false
 			for {
 				raw, err := fetchSubscription(ctx, address)
+				unchanged := false
 				if err == nil {
-					err = in.ImportText(ctx, string(raw))
+					digest := sha256.Sum256(raw)
+					unchanged = haveLast && last == digest
+					if !unchanged {
+						err = in.ImportText(ctx, string(raw))
+						if err == nil || errors.Is(err, ErrPartialBatch) {
+							last, haveLast = digest, true
+						}
+					}
 				}
-				in.report(err)
+				if !unchanged {
+					in.report(err)
+				}
 				select {
 				case <-ctx.Done():
 					return
@@ -145,7 +201,9 @@ func (r *Repository) runSource(ctx context.Context) error {
 		p.Start(ctx)
 		defer p.Close()
 	}
-	tick := time.NewTicker(10 * time.Second)
+	// Heartbeat freshness is judged on a 90-second window, so a 30-second
+	// cadence keeps it healthy without writing a status row every 10 seconds.
+	tick := time.NewTicker(30 * time.Second)
 	defer tick.Stop()
 	for {
 		select {

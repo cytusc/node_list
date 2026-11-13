@@ -4,6 +4,7 @@ package qilan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -346,7 +347,7 @@ func (s *Source) Refresh(ctx context.Context) error {
 		return s.handleFailure(fmt.Errorf(
 			"Qilan member count collapsed from %d to %d; round discarded", lastSize, len(batch.Nodes)))
 	}
-	if err := s.ingestor.Import(ctx, batch); err != nil {
+	if err := s.ingestor.Import(ctx, batch); err != nil && !errors.Is(err, domain.ErrPartialBatch) {
 		return s.handleFailure(err)
 	}
 	s.mu.Lock()

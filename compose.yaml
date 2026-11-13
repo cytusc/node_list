@@ -51,7 +51,7 @@ services:
       PGPOOL_MAX: ${SOURCE_PGPOOL_MAX:-4}
       SOURCE_CONVERTER: /app/services/node-source-converter/converter.mjs
       SOURCE_SUBSCRIPTIONS: ${SOURCE_SUBSCRIPTIONS:-}
-      SOURCE_PROVIDERS: ${SOURCE_PROVIDERS:-subs-check,proxio-all,Jakee-http,xyzs996-all}
+      SOURCE_PROVIDERS: ${SOURCE_PROVIDERS:-subs-check,proxio-all,Jakee-http,xyzs996-all,fmw86-socks5,fmw86-http}
       PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS: ${PUBLIC_PROXY_REFRESH_INTERVAL_SECONDS:-1800}
       SUBS_CHECK_DIR: /data/sub
     volumes:

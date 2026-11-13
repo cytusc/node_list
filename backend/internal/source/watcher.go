@@ -32,14 +32,11 @@ type Watcher struct {
 	sweep  time.Duration
 	ingest func(context.Context) error
 
-	cancel  context.CancelFunc
-	done    chan struct{}
-	runMu   sync.Mutex
-	mu      sync.Mutex
-	timer   *time.Timer
-	lastRun time.Time
-	runs    int64
-	events  int64
+	cancel context.CancelFunc
+	done   chan struct{}
+	runMu  sync.Mutex
+	mu     sync.Mutex
+	timer  *time.Timer
 }
 
 // WatcherConfig configures the watcher.
@@ -114,9 +111,6 @@ func (w *Watcher) Start(ctx context.Context) error {
 				if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) == 0 {
 					continue
 				}
-				w.mu.Lock()
-				w.events++
-				w.mu.Unlock()
 				w.debounce(ctx)
 			case err, ok := <-observer.Errors:
 				if !ok {
@@ -141,7 +135,7 @@ func (w *Watcher) debounce(ctx context.Context) {
 	w.mu.Unlock()
 }
 
-// trigger serializes callbacks from the timer, sweep and polling fallback.
+// trigger serializes callbacks from the timer and sweep.
 func (w *Watcher) trigger(ctx context.Context) {
 	w.runMu.Lock()
 	defer w.runMu.Unlock()
@@ -153,24 +147,8 @@ func (w *Watcher) trigger(ctx context.Context) {
 	}
 	if err := w.ingest(ctx); err != nil {
 		fmt.Printf("source ingest failed: %v\n", err)
-		return
 	}
-	w.mu.Lock()
-	w.lastRun = time.Now()
-	w.runs++
-	w.mu.Unlock()
 }
-
-// Stats reports watcher activity for health output.
-func (w *Watcher) Stats() (runs, events int64, lastRun time.Time) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.runs, w.events, w.lastRun
-}
-
-// Trigger runs ingestion immediately. Used by the polling fallback when
-// inotify is unavailable.
-func (w *Watcher) Trigger(ctx context.Context) { w.trigger(ctx) }
 
 // Close cancels file events and drains callbacks before ownership is released.
 func (w *Watcher) Close() {

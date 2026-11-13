@@ -77,7 +77,9 @@ HTTP 仅使用标准库，不手写分享协议。SOCKS 回读中的缺省与空
 
 已完成第三方转换器 8 项回归测试；Go 全后端 race 测试、vet、独立 PostgreSQL 集成测试、真实私有内核回归；部署脚本 10 项测试和 PHP API 144 / auth 34 项断言。数据库覆盖并发重复、跨来源别名与链接、批次重放、部分/空/拒绝批次、摘要冲突整批回滚、历史唯一采用和多候选不合并、读者位置修复、其他服务事实不变、独立服务启停、转换失败脱敏和取消。
 
-本地运行先执行 `npm --prefix services/node-source-converter ci --ignore-scripts`，确保 Node.js >=22.14.0，再运行 `go -C backend run ./cmd/node-source`。可用 SOURCE_NODE_BIN / SOURCE_CONVERTER 指定绝对路径。健康检查为 `node-source -health`；来源失败或部分失败返回异常心跳。仅测试运行可设 SOURCE_PROVIDERS=none；正常部署应配置实际来源。
+本地运行先执行 `npm --prefix services/node-source-converter ci --ignore-scripts`，确保 Node.js >=22.14.0，再运行 `go -C backend run ./cmd/node-source`。可用 SOURCE_NODE_BIN / SOURCE_CONVERTER 指定绝对路径。健康检查为 `node-source -health`；真正的抓取或导入失败返回异常心跳，**部分批次（partial）是常规结果，不降低健康状态**。仅测试运行可设 SOURCE_PROVIDERS=none；正常部署应配置实际来源。
+
+公共来源由 `publicproxy` 定义，默认 `SOURCE_PROVIDERS` 为 `subs-check,proxio-all,Jakee-http,xyzs996-all,fmw86-socks5,fmw86-http`。`fmw86-*` 读取 [fmw86/free-proxy-pool](https://github.com/fmw86/free-proxy-pool) 的 `socks5_residential.txt` / `http_residential.txt`（每行 `host:port`）；上游的“住宅/ISP”只是标注，进入正常测活与出口核验后才算事实。所有公共来源按内容摘要跳过未变化的响应，避免每次轮询重复转换和开批次事务。
 
 Docker、Compose 与 CI 已纳入转换器和固定依赖，构建上下文排除宿主 node_modules。共享表仍需部署时预先准备；服务只创建上述自有表，不运行共享迁移。当前环境无法运行 Docker，镜像构建和容器内 Node 动态依赖需在 CI 验证；本地没有声称完成镜像构建。
 
