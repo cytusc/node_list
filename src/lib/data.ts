@@ -90,6 +90,7 @@ export type NodeResults = {
     country: FacetOption[];
     type: FacetOption[];
     network: FacetOption[];
+    source: FacetOption[];
     features: FacetOption[];
     ipSource: FacetOption[];
     ipAttributes: FacetOption[];

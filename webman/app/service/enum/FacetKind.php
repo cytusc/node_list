@@ -19,6 +19,7 @@ enum FacetKind: string
     case Country = 'country';
     case Type = 'type';
     case Network = 'network';
+    case Source = 'source';
     case IPSource = 'ipSource';
     case IPAttributes = 'ipAttributes';
     case Features = 'features';

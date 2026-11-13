@@ -56,7 +56,7 @@ IP 分类使用多家供应商独立投票，保留来源、时间和明细。�
 
 ## API 与后端
 
-- `/api/results?page=1&limit=50`：实时查询当前节点并分页，默认住宅优先；支持 `sort=preferred` 或速度、名称等显式排序。
+- `/api/results?page=1&limit=50`：实时查询当前节点并分页，默认住宅优先；支持 `sort=preferred` 或速度、名称等显式排序。筛选键：`country`、`type`、`network`、`source`（导入来源，如 subs-check/qilan/fmw86-socks5）、`ipSource`、`ipAttributes`、`media`、`minSpeed`；响应 `facets` 同步给出这些分桶及计数。
 - `/api/results`：每次请求实时查询数据库，仅返回 `available=true` 的节点；不读取结果文件、不缓存节点结果、不附带来源告警或采集器状态。历史接口已移除。
 - `/api/health`：HTTP API 存活。采集使用 `node-source -health`；出口使用 `node-exit -health`；属性使用 `node-attributes -health`；测活使用 `node-liveness -health`。
 - `/api/open/v1/countries`、`/api/open/v1/nodes?country=HK&page=1`：独立 HMAC 验签的对外接口，标准模式排序，每页固定 10 条。启用前执行 `deploy/sql/023-open-api.sql` 并配置独立密钥；详见 [对外接口文档](docs/open-api.md)。

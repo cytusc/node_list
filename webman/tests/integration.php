@@ -187,6 +187,8 @@ same(3, $run(['page' => '1', 'limit' => '50', 'media' => 'Netflix'])['total'], '
 
 same(1, $run(['page' => '1', 'limit' => '50', 'ipSource' => 'ippure'])['total'], 'ipSource=ippure');
 same(1, $run(['page' => '1', 'limit' => '50', 'ipAttributes' => 'residential'])['total'], 'ipAttributes=residential');
+same(1, $run(['page' => '1', 'limit' => '50', 'source' => 'qilan'])['total'], 'source=qilan 只返回该来源节点');
+same(0, $run(['page' => '1', 'limit' => '50', 'source' => 'no-such-source'])['total'], '未知来源返回空集');
 same(1, $run(['page' => '1', 'limit' => '50', 'minSpeed' => '8000'])['total'], 'minSpeed 阈值过滤');
 same(4, $run(['page' => '1', 'limit' => '50', 'minSpeed' => '1'])['total'], 'minSpeed=1 仍会滤掉 speed=0 的节点（德国 02）');
 
@@ -196,7 +198,7 @@ same(4, $run(['page' => '1', 'limit' => '50', 'minSpeed' => '1'])['total'], 'min
 
 $facets = $all['facets'];
 same(
-    ['country', 'type', 'network', 'ipSource', 'ipAttributes', 'features', 'media'],
+    ['country', 'type', 'network', 'source', 'ipSource', 'ipAttributes', 'features', 'media'],
     array_keys($facets),
     'facet 分桶齐全'
 );
@@ -204,6 +206,10 @@ $countryValues = array_column($facets['country'], 'value');
 ok(in_array('unknown', $countryValues, true), '空 country 归入 unknown 桶');
 $unknownLabel = $facets['country'][array_search('unknown', $countryValues, true)]['label'] ?? null;
 same('未知地区', $unknownLabel, 'unknown 桶的标签是中文');
+$sourceValues = array_column($facets['source'], 'value');
+ok(in_array('fmw86-socks5', $sourceValues, true), '来源 facet 含新接入的 fmw86-socks5');
+ok(in_array('qilan', $sourceValues, true), '来源 facet 含 qilan');
+same(count($all['nodes']), array_sum(array_column($facets['source'], 'count')), '来源 facet 计数覆盖全部可用节点');
 same(['tls', 'reality', 'udp'], array_column($facets['features'], 'value'), 'features 固定三项且顺序稳定');
 same(4, $facets['features'][0]['count'], 'tls 计数');
 same(1, $facets['features'][1]['count'], 'reality 计数');

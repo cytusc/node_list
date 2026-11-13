@@ -81,6 +81,7 @@ final class ResultsQueryParser
             types: self::splitList((string)self::raw($params, 'type')),
             networks: self::splitList((string)self::raw($params, 'network')),
             features: $features,
+            sources: self::splitList((string)self::raw($params, 'source')),
             ipSources: self::splitList((string)self::raw($params, 'ipSource')),
             ipAttributes: self::splitList((string)self::raw($params, 'ipAttributes')),
             media: self::splitList((string)self::raw($params, 'media')),
