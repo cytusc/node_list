@@ -76,15 +76,17 @@ SELECT observed.*,
  CASE WHEN observed_country ~ '^[a-zA-Z]{2}$' THEN
  CASE WHEN upper(coalesce(node->>'country',''))=upper(observed_country) THEN node->>'country'
  ELSE upper(observed_country) END ELSE node->>'country' END AS country,
- -- Source tag identifies the importer (subs-check, qilan, proxio-all,
- -- fmw86-socks5, ...). It is provenance, not an observed fact, so it is
- -- read straight from the stored node and never reclassified. Lower-cased
- -- because the same importer has appeared with differing case (Qilan/qilan),
- -- which would otherwise show as two identical filter options.
- lower(coalesce(nullif(btrim(node->>'subTag'),''),'unknown')) AS source,
  CASE WHEN exit_payload IS NULL THEN NULL
  WHEN exit_ip<>'' AND exit_payload->>'addressFamily'='6' THEN 'unsupported'
- WHEN attributes IS NOT NULL THEN attributes->>'status' ELSE 'error' END AS ip_status
+ WHEN attributes IS NOT NULL THEN attributes->>'status' ELSE 'error' END AS ip_status,
+ -- Appended after the existing columns so CREATE OR REPLACE VIEW can extend
+ -- the view in place (PostgreSQL only allows new columns at the end; an
+ -- insert in the middle is rejected as a rename). Source tag identifies the
+ -- importer (subs-check, qilan, proxio-all, fmw86-socks5, ...); it is
+ -- provenance, never an observed fact, so it is read straight from the stored
+ -- node. Lower-cased because the same importer has appeared with differing
+ -- case (Qilan/qilan), which would otherwise show as two filter options.
+ lower(coalesce(nullif(btrim(node->>'subTag'),''),'unknown')) AS source
 FROM observed;
 
 CREATE OR REPLACE VIEW node_explorer_live_nodes AS
