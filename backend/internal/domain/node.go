@@ -208,7 +208,7 @@ func (n Node) MarshalJSON() ([]byte, error) {
 	return marshalJSONShape(plain(n), n.shape, nodeJSONFields)
 }
 
-// ClearCredentials removes both the values and their JSON presence. Public
+// UnmarshalJSON preserves the upstream JSON shape while normalizing fields.
 func (r *IPPureResult) UnmarshalJSON(data []byte) error {
 	type plain IPPureResult
 	var decoded plain

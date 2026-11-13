@@ -17,8 +17,9 @@ import (
 
 //go:embed schema.sql
 var schemaSQL string
-var ErrPartialBatch = errors.New("source batch partially accepted")
-var ErrNoAdmissibleNodes = errors.New("source contains no representable nodes")
+
+var ErrPartialBatch = domain.ErrPartialBatch
+var ErrNoAdmissibleNodes = domain.ErrNoAdmissibleNodes
 
 func (r *Repository) Prepare(ctx context.Context) error {
 	_, err := r.Pool.Exec(ctx, schemaSQL)

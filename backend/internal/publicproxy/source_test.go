@@ -21,6 +21,7 @@ func TestParseProtocolsAndValidation(t *testing.T) {
 		{"proxio", `{"count":3,"proxies":[{"ip":"203.0.113.1","port":8080,"protocols":["HTTP","HTTPS","SOCKS5","CONNECT80"],"code":"JP"},{"ip":"203.0.113.2","port":1080,"protocols":["SOCKS4"]},{"ip":"bad","port":80,"protocols":["HTTP"]}]}`, 2},
 		{"xyzs996", `[{"host":"203.0.113.1","port":8080,"protocol":"http","country":"JP","networkType":"residential"},{"host":"203.0.113.1","port":8080,"protocol":"https","country":"JP"},{"host":"203.0.113.2","port":1080,"protocol":"socks4"},{"host":"203.0.113.1","port":8080,"protocol":"socks5"}]`, 2},
 		{"http", "203.0.113.1:8080\r\n203.0.113.1:8080\n[2001:db8::1]:80\nbad:80\n203.0.113.2:0\n203.0.113.2:65536\n<html>error</html>\n", 2},
+		{"socks5", "203.0.113.1:1080\n203.0.113.1:1080\n203.0.113.2:1080\nbad\n203.0.113.3:0\n", 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.format, func(t *testing.T) {
@@ -55,7 +56,7 @@ func TestRejectInvalidLists(t *testing.T) {
 	for _, tt := range []struct{ format, raw string }{
 		{"proxio", `{"count":2,"proxies":[{"ip":"203.0.113.1","port":80,"protocols":["HTTP"]}]}`},
 		{"proxio", `{"proxies":`}, {"xyzs996", `[]`}, {"xyzs996", `null`},
-		{"xyzs996", `<html>error</html>`}, {"http", ""}, {"http", "not a proxy"},
+		{"xyzs996", `<html>error</html>`}, {"http", ""}, {"http", "not a proxy"}, {"socks5", ""},
 	} {
 		if _, err := Parse(Definition{Name: "test", Format: tt.format}, []byte(tt.raw)); err == nil {
 			t.Errorf("accepted %s: %s", tt.format, tt.raw)
@@ -74,6 +75,51 @@ func (i *recordingIngestor) Import(_ context.Context, s domain.SourceBatch) erro
 	}
 	i.batches = append(i.batches, s)
 	return nil
+}
+
+func TestRefreshSkipsUnchangedBody(t *testing.T) {
+	body := "203.0.113.1:1080\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+	i := &recordingIngestor{}
+	s := New(Definition{"res", server.URL, "socks5"}, i, time.Minute)
+	for range 3 {
+		if err := s.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(i.batches) != 1 {
+		t.Fatalf("unchanged list imported %d times, want 1", len(i.batches))
+	}
+	body = "203.0.113.2:1080\n"
+	if err := s.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(i.batches) != 2 || i.batches[1].Nodes[0].Server != "203.0.113.2" {
+		t.Fatal("changed list was not imported")
+	}
+}
+
+func TestRefreshFailureIsRetried(t *testing.T) {
+	body := "203.0.113.3:1080\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+	i := &recordingIngestor{err: errors.New("database unavailable")}
+	s := New(Definition{"res", server.URL, "socks5"}, i, time.Minute)
+	if err := s.Refresh(context.Background()); err == nil {
+		t.Fatal("import failure accepted")
+	}
+	i.err = nil
+	if err := s.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(i.batches) != 1 {
+		t.Fatalf("failed body was not retried: %d", len(i.batches))
+	}
 }
 
 func TestRefreshRetainsPreviousOnFailureAndRecovers(t *testing.T) {
